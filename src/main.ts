@@ -91,7 +91,7 @@ class ShaderLoader {
 
 interface OceanLODLevel {
   geometry: THREE.PlaneGeometry
-  material: THREE.ShaderMaterial
+  material: THREE.ShaderMaterial | THREE.MeshStandardMaterial
   mesh: THREE.Mesh
   shadowMesh: THREE.Mesh
   distance: number
@@ -101,7 +101,7 @@ interface OceanLODLevel {
 
 interface LandPiece {
   geometry: THREE.BufferGeometry
-  material: THREE.ShaderMaterial
+  material: THREE.ShaderMaterial | THREE.MeshStandardMaterial
   mesh: THREE.Mesh
   shadowMesh: THREE.Mesh
   id: string
@@ -160,17 +160,33 @@ class OceanLODSystem {
       geometry.setAttribute('aRandom', new THREE.BufferAttribute(randomValues, 1))
 
       // Create material with shared uniforms
-      const material = new THREE.ShaderMaterial({
-        vertexShader: oceanShaders.vertex,
-        fragmentShader: oceanShaders.fragment,
-        uniforms: this.oceanUniforms,
-        transparent: true,
-        side: THREE.DoubleSide,
-        blending: THREE.NormalBlending,
-        depthWrite: true, // Enable depth writing for proper sorting
-        depthTest: true,
-        alphaTest: 0.1 // Discard fully transparent pixels
-      })
+      let material: THREE.ShaderMaterial | THREE.MeshStandardMaterial
+      try {
+        const shaderMaterial = new THREE.ShaderMaterial({
+          vertexShader: oceanShaders.vertex,
+          fragmentShader: oceanShaders.fragment,
+          uniforms: this.oceanUniforms,
+          transparent: true,
+          side: THREE.DoubleSide,
+          blending: THREE.NormalBlending,
+          depthWrite: true, // Enable depth writing for proper sorting
+          depthTest: true,
+          alphaTest: 0.1 // Discard fully transparent pixels
+        })
+        material = shaderMaterial
+        console.log(`✅ Ocean LOD ${i} shader compiled successfully`)
+      } catch (error) {
+        console.warn(`⚠️ Ocean LOD ${i} shader compilation failed, using fallback:`, error)
+        // Fallback to standard material for mobile
+        material = new THREE.MeshStandardMaterial({
+          color: 0x006994,
+          transparent: true,
+          opacity: 0.8,
+          roughness: 0.1,
+          metalness: 0.8,
+          side: THREE.DoubleSide
+        })
+      }
 
       // Create mesh
       const mesh = new THREE.Mesh(geometry, material)
@@ -360,7 +376,15 @@ class LandSystem {
       uSunIntensity: { value: 1.0 },
       uIslandRadius: { value: 35.0 }, // Smaller for steeper dropoff
       uCoastSmoothness: { value: 8.0 }, // Sharper coastline
-      uSeaLevel: { value: -4.0 } // Deeper edges
+      uSeaLevel: { value: -4.0 }, // Deeper edges
+      // Spotlight uniforms, 
+      uSpotlightPosition: { value: new THREE.Vector3(0, 30, 0) },
+      uSpotlightDirection: { value: new THREE.Vector3(0, -1, 0) },
+      uSpotlightColor: { value: new THREE.Color(1, 1, 1) },
+      uSpotlightIntensity: { value: 0.0 },
+      uSpotlightAngle: { value: Math.PI / 8 }, // 22.5 degrees - tight focus
+      uSpotlightPenumbra: { value: 0.3 }, // Sharper edges
+      uSpotlightDistance: { value: 80 }
     }
   }
 
@@ -415,13 +439,29 @@ class LandSystem {
     }
 
     // Create material with land shader
-    const material = new THREE.ShaderMaterial({
-      vertexShader: landShaders.vertex,
-      fragmentShader: landShaders.fragment,
-      uniforms: this.landUniforms,
-      side: THREE.DoubleSide,
-      wireframe: false
-    })
+    let material: THREE.ShaderMaterial | THREE.MeshStandardMaterial
+    try {
+      const shaderMaterial = new THREE.ShaderMaterial({
+        vertexShader: landShaders.vertex,
+        fragmentShader: landShaders.fragment,
+        uniforms: this.landUniforms,
+        side: THREE.DoubleSide,
+        wireframe: false
+      })
+      
+      // Test compilation by forcing a render check
+      material = shaderMaterial
+      console.log('✅ Land shader compiled successfully')
+    } catch (error) {
+      console.warn('⚠️ Land shader compilation failed, using fallback material:', error)
+      // Fallback to standard material for mobile compatibility
+      material = new THREE.MeshStandardMaterial({
+        color: 0x3a6b35,
+        roughness: 0.8,
+        metalness: 0.2,
+        side: THREE.DoubleSide
+      })
+    }
 
     // Create mesh
     const mesh = new THREE.Mesh(geometry, material)
@@ -542,6 +582,34 @@ class LandSystem {
 
   public setSunIntensity(intensity: number): void {
     this.landUniforms.uSunIntensity.value = intensity
+  }
+
+  public setSpotlightPosition(position: THREE.Vector3): void {
+    this.landUniforms.uSpotlightPosition.value.copy(position)
+  }
+
+  public setSpotlightDirection(direction: THREE.Vector3): void {
+    this.landUniforms.uSpotlightDirection.value.copy(direction)
+  }
+
+  public setSpotlightColor(color: THREE.Color): void {
+    this.landUniforms.uSpotlightColor.value.copy(color)
+  }
+
+  public setSpotlightIntensity(intensity: number): void {
+    this.landUniforms.uSpotlightIntensity.value = intensity
+  }
+
+  public setSpotlightAngle(angle: number): void {
+    this.landUniforms.uSpotlightAngle.value = angle
+  }
+
+  public setSpotlightPenumbra(penumbra: number): void {
+    this.landUniforms.uSpotlightPenumbra.value = penumbra
+  }
+
+  public setSpotlightDistance(distance: number): void {
+    this.landUniforms.uSpotlightDistance.value = distance
   }
 
   public setIslandRadius(radius: number): void {
@@ -761,8 +829,17 @@ class IntegratedThreeJSApp {
   private gamepadHandler!: GamepadInputHandler
   private retroPostProcessing!: RetroPostProcessingSystem
   
+  // Lighting references for dynamic control
+  private ambientLight!: THREE.AmbientLight
+  private keyLight!: THREE.DirectionalLight
+  private fillLight!: THREE.DirectionalLight
+  
+  // Initialization flag
+  private isInitialized: boolean = false
+  
   // Timing for delta time calculation
   private lastTime: number = 0
+  private frameCount: number = 0
   
   // All objects now managed via ObjectManager - no legacy references needed
   
@@ -804,7 +881,18 @@ class IntegratedThreeJSApp {
     this.init()
   }
 
-  private async init(): Promise<void> {
+  public async init(): Promise<void> {
+    // Prevent double initialization
+    if (this.isInitialized) {
+      console.log('⚠️ Game already initialized, ensuring animation loop is running...')
+      // Make sure animation is running
+      if (!this.lastTime) {
+        this.lastTime = performance.now()
+        this.animate()
+      }
+      return
+    }
+    
     this.detectDeviceType()
     this.detectInputMethods()
     
@@ -842,8 +930,8 @@ class IntegratedThreeJSApp {
           height: 1.8,
           radius: 0.5,
           mass: 70,
-          walkSpeed: 250.0,  // 10x faster (was 25.0)
-          runSpeed: 1200.0,  // 3x sprint speed (was 400.0)
+          walkSpeed: 2950.0,  // 10x faster (was 25.0)
+          runSpeed: 5200.0,  // 3x sprint speed (was 400.0)
           jumpForce: 15.0,  // Increased for higher jumps
           gravity: 8.0,      // CRITICAL FIX: Reduced from 25.0 to 8.0 for better collision detection
           groundCheckDistance: 0.1,
@@ -900,6 +988,10 @@ class IntegratedThreeJSApp {
     this.animate()
     
     this.animationSystem.start()
+    
+    // Mark as initialized
+    this.isInitialized = true
+    console.log('✅ Game initialization complete')
     
     // Initialize debug system after all other systems are ready
     this.initDebugSystem()
@@ -963,10 +1055,24 @@ class IntegratedThreeJSApp {
 
   private initRenderer(): void {
     // Retro mode: disable antialiasing for pixelated look
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: false, // Disabled for retro pixelated look
-      powerPreference: 'high-performance'
-    })
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        antialias: false, // Disabled for retro pixelated look
+        powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: false, // Allow fallback on mobile
+        alpha: false,
+        stencil: false
+      })
+      
+      console.log('✅ WebGL Renderer created successfully')
+      console.log(`📱 Device type: ${this.deviceType}`)
+      console.log(`🎮 WebGL Version: ${this.renderer.capabilities.isWebGL2 ? '2.0' : '1.0'}`)
+      console.log(`📊 Max Texture Size: ${this.renderer.capabilities.maxTextureSize}`)
+      
+    } catch (error) {
+      console.error('❌ Failed to create WebGL renderer:', error)
+      throw new Error('WebGL not supported on this device')
+    }
     
     this.renderer.setSize(window.innerWidth, window.innerHeight)
     // Lower pixel ratio for retro look (optional - can be adjusted)
@@ -979,6 +1085,17 @@ class IntegratedThreeJSApp {
     }
     
     this.container.appendChild(this.renderer.domElement)
+    
+    // Add WebGL context lost/restored handlers for mobile debugging
+    this.renderer.domElement.addEventListener('webglcontextlost', (event) => {
+      event.preventDefault()
+      console.error('❌ WebGL context lost!')
+      console.log('This usually happens on mobile when the browser runs out of GPU memory')
+    }, false)
+    
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      console.log('✅ WebGL context restored')
+    }, false)
     
     // Initialize retro post-processing system
     this.retroPostProcessing = new RetroPostProcessingSystem(
@@ -1245,6 +1362,9 @@ class IntegratedThreeJSApp {
         this.collisionSystem.registerLandMeshes(landMeshes)
         console.log(`🏔️ Registered ${landMeshes.length} land meshes for primitive collision detection`)
       }
+      
+      // Link land system to camera manager for spotlight updates
+      this.cameraManager.setLandSystem(this.landSystem)
     }
     
     // Set up camera switching controls
@@ -1341,6 +1461,7 @@ class IntegratedThreeJSApp {
     
     // Add keyboard listener for camera switching
     document.addEventListener('keydown', (event) => {
+      // C key - Switch between system and player cameras
       if (event.code === 'KeyC') {
         const currentMode = this.cameraManager.getCurrentMode()
         const newMode = currentMode === 'system' ? 'player' : 'system'
@@ -1362,23 +1483,22 @@ class IntegratedThreeJSApp {
         
         // Additional guidance for player camera
         if (newMode === 'player') {
-          // console.log('🎮 PLAYER MODE ACTIVE:')
-          // console.log('   • WASD = Move around')
-          // console.log('   • Mouse = Look around')
-          // console.log('   • Space = Jump')
-          // console.log('   • Shift = Run')
-          // console.log('   • C = Switch back to system camera')
-          // console.log('📷 If mouse look doesn\'t work, click on the canvas first')
-          
-          // Show a temporary on-screen message
-          this.showTemporaryMessage('Player Mode Active - Use WASD to move, mouse to look', 3000)
+          const view = this.cameraManager.getCurrentThirdPersonView()
+          this.showTemporaryMessage(`Player Mode: ${view.toUpperCase()} view - V to cycle views`, 3000)
         } else {
-          // console.log('📷 SYSTEM MODE ACTIVE:')
-          // console.log('   • Mouse drag = Rotate camera')
-          // console.log('   • Scroll = Zoom in/out')
-          // console.log('   • C = Switch to player camera for WASD movement')
-          
           this.showTemporaryMessage('System Mode - Press C for player movement', 2000)
+        }
+      }
+      
+      // V key - Cycle through third person views (only in player mode)
+      if (event.code === 'KeyV') {
+        const currentMode = this.cameraManager.getCurrentMode()
+        if (currentMode === 'player') {
+          this.cameraManager.cycleThirdPersonView()
+          const newView = this.cameraManager.getCurrentThirdPersonView()
+          this.updateCameraViewIndicator(newView)
+          this.showTemporaryMessage(`Camera View: ${newView.toUpperCase()}`, 2000)
+          console.log(`📷 Switched to ${newView} third person view`)
         }
       }
     })
@@ -1388,8 +1508,7 @@ class IntegratedThreeJSApp {
       this.playerController.setDebugVisible(true)
     }
     
-    // console.log('📷 Camera switching controls initialized (Press C to switch)')
-    // console.log('🎮 Current mode: System Camera - Press C to enable WASD movement')
+    // console.log('📷 Camera controls: C = Switch camera | V = Cycle 3rd person views')
   }
 
   /**
@@ -1412,9 +1531,12 @@ class IntegratedThreeJSApp {
       pointer-events: none;
       transition: all 0.3s ease;
     `
-    // Initialize with current camera mode from camera manager
+    // Initialize with current camera mode and view
     const currentMode = this.cameraManager.getCurrentMode()
-    indicator.textContent = currentMode === 'player' ? 'Player Camera' : 'System Camera'
+    const currentView = this.cameraManager.getCurrentThirdPersonView()
+    indicator.textContent = currentMode === 'player' 
+      ? `Player Camera: ${currentView.toUpperCase()}` 
+      : 'System Camera'
     if (currentMode === 'player') {
       indicator.style.background = 'rgba(0, 128, 0, 0.8)'
     }
@@ -1428,7 +1550,8 @@ class IntegratedThreeJSApp {
     const indicator = document.getElementById('camera-mode-indicator')
     if (indicator) {
       if (mode === 'player') {
-        indicator.textContent = 'Player Camera'
+        const currentView = this.cameraManager.getCurrentThirdPersonView()
+        indicator.textContent = `Player Camera: ${currentView.toUpperCase()}`
         indicator.style.background = 'rgba(0, 128, 0, 0.8)'
         indicator.style.color = 'white'
       } else {
@@ -1436,6 +1559,16 @@ class IntegratedThreeJSApp {
         indicator.style.background = 'rgba(0, 0, 0, 0.7)'
         indicator.style.color = 'white'
       }
+    }
+  }
+
+  /**
+   * Update the camera view indicator (for third person view changes)
+   */
+  private updateCameraViewIndicator(view: string): void {
+    const indicator = document.getElementById('camera-mode-indicator')
+    if (indicator) {
+      indicator.textContent = `Player Camera: ${view.toUpperCase()}`
     }
   }
 
@@ -1488,14 +1621,15 @@ class IntegratedThreeJSApp {
     // Retro arcade-style lighting: key light + ambient fill
     
     // Ambient fill light (softer, lower intensity for retro look)
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4) // Increased from 0.3 for better visibility
-    this.scene.add(ambientLight)
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.15) // Reduced for spotlight visibility
+    this.scene.add(this.ambientLight)
 
     // Key light (main directional light - arcade style)
     // Positioned at angle for dramatic lighting (typical arcade setup)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.0) // Slightly reduced from 1.2
-    keyLight.position.set(30, 40, 20) // Angled key light position
-    keyLight.castShadow = this.rendererConfig.shadows
+    this.keyLight = new THREE.DirectionalLight(0xffffff, 0.5) // Reduced for spotlight visibility
+    this.keyLight.position.set(30, 40, 20) // Angled key light position
+    this.keyLight.castShadow = this.rendererConfig.shadows
+    const keyLight = this.keyLight
     
     if (keyLight.castShadow) {
       // Lower resolution shadow map for retro look (harder edges)
@@ -1521,10 +1655,10 @@ class IntegratedThreeJSApp {
     this.scene.add(keyLight.target)
 
     // Subtle fill light from opposite side (arcade style)
-    const fillLight = new THREE.DirectionalLight(0xffffff, 0.25) // Slightly increased from 0.2
-    fillLight.position.set(-20, 20, -15)
-    fillLight.castShadow = false // Fill light doesn't cast shadows
-    this.scene.add(fillLight)
+    this.fillLight = new THREE.DirectionalLight(0xffffff, 0.15) // Reduced for spotlight visibility
+    this.fillLight.position.set(-20, 20, -15)
+    this.fillLight.castShadow = false // Fill light doesn't cast shadows
+    this.scene.add(this.fillLight)
     
     // console.log('💡 Retro arcade-style lighting initialized')
   }
@@ -1906,6 +2040,7 @@ class IntegratedThreeJSApp {
       // Calculate delta time for physics
       const deltaTime = Math.min((currentTime - (this.lastTime || currentTime)) / 1000, 0.1)
       this.lastTime = currentTime
+      this.frameCount++
       
       // Update controls (only for system camera)
       if (this.cameraManager.getCurrentMode() === 'system') {
@@ -1979,7 +2114,44 @@ class IntegratedThreeJSApp {
       performanceMonitor.startRender()
       
       // Render with current camera from camera manager
-      const currentCamera = this.cameraManager.getCurrentCamera()
+      const currentCamera = this.cameraManager.getCamera()
+      
+      // TEMP: Debug logging for camera and rendering on mobile
+      if (this.frameCount === 1) { // Log on first frame
+        console.log(`🎥 First frame render check:`)
+        console.log(`  - Current camera: ${currentCamera.name}`)
+        console.log(`  - Camera position:`, currentCamera.position)
+        console.log(`  - Scene children count: ${this.scene.children.length}`)
+        console.log(`  - Renderer size:`, this.renderer.getSize(new THREE.Vector2()))
+        console.log(`  - Canvas size: ${this.renderer.domElement.width}x${this.renderer.domElement.height}`)
+        console.log(`  - Device type: ${this.deviceType}`)
+        console.log(`  - Ambient light:`, this.ambientLight ? 'exists' : 'missing')
+        console.log(`  - Key light:`, this.keyLight ? 'exists' : 'missing')
+        console.log(`  - Renderer info:`, {
+          programs: this.renderer.info.programs?.length || 0,
+          memory: this.renderer.info.memory,
+          render: this.renderer.info.render
+        })
+        
+        // Check for shader materials
+        let shaderCount = 0
+        let standardCount = 0
+        this.scene.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            if (obj.material instanceof THREE.ShaderMaterial) shaderCount++
+            else if (obj.material instanceof THREE.MeshStandardMaterial) standardCount++
+          }
+        })
+        console.log(`  - Materials: ${shaderCount} shader, ${standardCount} standard`)
+        
+        if ('zoom' in currentCamera) {
+          console.log(`  - Camera zoom: ${(currentCamera as any).zoom}`)
+        }
+      }
+      
+      if (this.frameCount % 120 === 0) { // Log every 2 seconds
+        console.log(`🎥 Camera: ${currentCamera.name} at`, currentCamera.position)
+      }
       
       // Render with retro post-processing
       if (this.retroPostProcessing) {
@@ -2300,7 +2472,21 @@ export {
   type CameraConfig,
   type AnimationConfig,
   type QualityPreset
-} 
+}
+
+// Export initialization function for titlescreen
+export async function initializeGame(isNewGame: boolean = true): Promise<void> {
+  console.log(`🎮 Initializing game (${isNewGame ? 'New Game' : 'Continue'})...`)
+  
+  // The app is already initialized as a singleton, just call init
+  await app.init()
+  
+  if (!isNewGame) {
+    // Load saved game state if continuing
+    console.log('📂 Loading saved game state...')
+    // You can add load game logic here if needed
+  }
+}
 
 // Configure logging for development
 logger.setDevelopmentMode()

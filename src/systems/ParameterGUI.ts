@@ -67,8 +67,6 @@ export class ParameterGUI {
     if (!this.gui) return
 
     const categories: Array<{ category: ParameterCategory; name: string; icon: string }> = [
-      { category: 'ocean', name: 'Ocean', icon: '🌊' },
-      { category: 'land', name: 'Land', icon: '🏔️' },
       { category: 'sky', name: 'Sky', icon: '☀️' },
       { category: 'lighting', name: 'Lighting', icon: '💡' },
       { category: 'camera', name: 'Camera', icon: '📷' },
@@ -87,7 +85,7 @@ export class ParameterGUI {
    * Populate all parameters in their respective folders
    */
   private populateParameters(): void {
-    const categories: ParameterCategory[] = ['ocean', 'land', 'sky', 'lighting', 'camera', 'player', 'system']
+    const categories: ParameterCategory[] = ['sky', 'lighting', 'camera', 'player', 'system']
 
     categories.forEach(category => {
       const folder = this.categoryFolders.get(category)
@@ -298,8 +296,6 @@ export class ParameterGUI {
 
     // Category reset controls
     const categories: Array<{ category: ParameterCategory; name: string }> = [
-      { category: 'ocean', name: 'Ocean' },
-      { category: 'land', name: 'Land' },
       { category: 'sky', name: 'Sky' },
       { category: 'lighting', name: 'Lighting' },
       { category: 'camera', name: 'Camera' },
@@ -391,7 +387,7 @@ export class ParameterGUI {
    * Refresh all parameters in GUI
    */
   public refreshAllParameters(): void {
-    const categories: ParameterCategory[] = ['ocean', 'land', 'sky', 'lighting', 'camera', 'player', 'system']
+    const categories: ParameterCategory[] = ['sky', 'lighting', 'camera', 'player', 'system']
     categories.forEach(category => {
       this.refreshCategoryParameters(category)
     })

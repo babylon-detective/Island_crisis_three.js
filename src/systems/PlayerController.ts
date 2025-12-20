@@ -187,26 +187,65 @@ export class PlayerController {
   // ============================================================================
 
   private initializePlayer(): void {
-    // Create player mesh (capsule-like shape)
-    const geometry = new THREE.CylinderGeometry(
+    // Create player mesh group (body + head)
+    const playerGroup = new THREE.Group()
+    playerGroup.name = 'PlayerMesh'
+    
+    // Create body (capsule-like shape)
+    const bodyGeometry = new THREE.CylinderGeometry(
       this.config.radius,
       this.config.radius,
-      this.config.height,
+      this.config.height * 0.7, // Body is 70% of total height
       8
     )
     
-    const material = new THREE.MeshStandardMaterial({
+    const bodyMaterial = new THREE.MeshStandardMaterial({
       color: 0x4a90e2,
-      transparent: true,
-      opacity: 0.8
+      roughness: 0.7,
+      metalness: 0.3
     })
     
-    this.mesh = new THREE.Mesh(geometry, material)
+    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial)
+    bodyMesh.position.y = -this.config.height * 0.15 // Lower body position
+    bodyMesh.castShadow = true
+    bodyMesh.receiveShadow = true
+    playerGroup.add(bodyMesh)
+    
+    // Create head (sphere)
+    const headGeometry = new THREE.SphereGeometry(this.config.radius * 0.8, 8, 8)
+    const headMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffcc99, // Skin tone
+      roughness: 0.8,
+      metalness: 0.1
+    })
+    
+    const headMesh = new THREE.Mesh(headGeometry, headMaterial)
+    headMesh.position.y = this.config.height * 0.4 // Top of body
+    headMesh.castShadow = true
+    headMesh.receiveShadow = true
+    playerGroup.add(headMesh)
+    
+    // Add a simple face indicator (eyes)
+    const eyeGeometry = new THREE.SphereGeometry(0.08, 4, 4)
+    const eyeMaterial = new THREE.MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0x333333
+    })
+    
+    const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
+    leftEye.position.set(-0.15, this.config.height * 0.42, this.config.radius * 0.6)
+    playerGroup.add(leftEye)
+    
+    const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
+    rightEye.position.set(0.15, this.config.height * 0.42, this.config.radius * 0.6)
+    playerGroup.add(rightEye)
+    
+    this.mesh = playerGroup as any // Type cast for compatibility
     this.mesh.position.copy(this.state.position)
-    this.mesh.castShadow = true
-    this.mesh.receiveShadow = true
-    this.mesh.name = 'PlayerMesh'
     this.scene.add(this.mesh)
+    
+    // Register mesh with camera manager for visibility control
+    this.cameraManager.registerPlayerMesh(this.mesh)
     
     // Create collision volume
     this.collisionVolume = {
@@ -289,6 +328,11 @@ export class PlayerController {
     const keyJump = this.keyStates.get('Space') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyC') || false
+    
+    // Debug log when keys are pressed
+    if (keyForward || keyBackward || keyLeft || keyRight) {
+      console.log(`🎮 WASD Input:`, { keyForward, keyBackward, keyLeft, keyRight })
+    }
     
     // Touch input for movement (one finger) - use continuous direction
     const touchMovement = this.touchState.movementDirection
@@ -576,7 +620,7 @@ export class PlayerController {
 
   private updateMovement(deltaTime: number): void {
     // Get camera direction for movement
-    const camera = this.cameraManager.getCurrentCamera()
+    const camera = this.cameraManager.getCamera()
     const cameraDirection = new THREE.Vector3()
     camera.getWorldDirection(cameraDirection)
     
@@ -629,18 +673,25 @@ export class PlayerController {
       // Determine speed
       const baseSpeed = this.input.run ? this.config.runSpeed : this.config.walkSpeed
       const speed = baseSpeed * inputMagnitude // Scale by analog input magnitude
-      const movement = moveDirection.multiplyScalar(speed * deltaTime)
+      const movement = moveDirection.multiplyScalar(speed) // Don't multiply by deltaTime yet
       
-      // Apply horizontal movement
+      // Apply horizontal movement (velocity in units/second)
       this.state.velocity.x = movement.x
       this.state.velocity.z = movement.z
       this.state.isMoving = true
       this.state.isRunning = this.input.run
       
-      // Debug: Log speed difference (disabled)
-      // if (Math.random() < 0.05) { // 5% chance per frame
-      //   console.log(`🏃 Speed: ${this.input.run ? 'RUN' : 'WALK'} = ${speed} units/s`)
-      // }
+      // Debug: Log speed and movement values
+      if (Math.random() < 0.02) { // 2% chance per frame
+        console.log(`🏃 Speed Debug:`, {
+          mode: this.input.run ? 'RUN' : 'WALK',
+          baseSpeed: baseSpeed.toFixed(1),
+          speed: speed.toFixed(1),
+          deltaTime: deltaTime.toFixed(4),
+          movement: `(${movement.x.toFixed(2)}, ${movement.z.toFixed(2)})`,
+          velocity: `(${this.state.velocity.x.toFixed(2)}, ${this.state.velocity.z.toFixed(2)})`
+        })
+      }
       
       // logger.debug(LogModule.PLAYER, `Movement: speed=${speed}, direction=(${moveDirection.x.toFixed(2)}, ${moveDirection.z.toFixed(2)}), input=(${this.input.forward},${this.input.backward},${this.input.left},${this.input.right})`)
     } else {
@@ -684,6 +735,7 @@ export class PlayerController {
     }
     
     // Calculate new position
+    // velocity is in units/second, so multiply by deltaTime to get distance per frame
     const newPosition = this.state.position.clone().add(
       this.state.velocity.clone().multiplyScalar(deltaTime)
     )
@@ -779,6 +831,11 @@ export class PlayerController {
     const meshPosition = this.state.position.clone()
     meshPosition.y -= this.config.height / 2
     this.mesh.position.copy(meshPosition)
+    
+    // Rotate player mesh to face movement direction
+    // Get camera yaw from camera manager
+    const cameraYaw = this.cameraManager.getPlayerControls().yaw
+    this.mesh.rotation.y = cameraYaw
     
     // Update debug wireframe
     if (this.debugWireframe) {

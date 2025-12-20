@@ -214,7 +214,7 @@ export class ParameterIntegration {
 
   private updateLightingParameter(parameterId: string, value: any): void {
     if (!this.systems.lightingSystem) {
-      logger.warn(LogModule.SYSTEM, 'Lighting system not available for parameter update')
+      // Lighting system is optional, silently skip if not available
       return
     }
 
@@ -278,31 +278,82 @@ export class ParameterIntegration {
           const x = this.parameterManager.getParameter('camera', 'positionX')
           const y = this.parameterManager.getParameter('camera', 'positionY')
           const z = this.parameterManager.getParameter('camera', 'positionZ')
-          const camera = this.systems.cameraManager.getCurrentCamera()
+          const camera = this.systems.cameraManager.getCamera()
           if (camera) {
             camera.position.set(x, y, z)
           }
           break
         case 'fov':
-          const camera2 = this.systems.cameraManager.getCurrentCamera()
-          if (camera2) {
+          const camera2 = this.systems.cameraManager.getCamera()
+          if (camera2 && 'fov' in camera2) {
             camera2.fov = value
             camera2.updateProjectionMatrix()
           }
           break
         case 'zoom':
-          const camera3 = this.systems.cameraManager.getCurrentCamera()
-          if (camera3) {
-            camera3.zoom = value
-            camera3.updateProjectionMatrix()
+          // Only apply zoom to orthographic camera
+          const orthoCamera = this.systems.cameraManager.getOrthographicCamera()
+          console.log(`🔍 ZOOM DEBUG: Setting zoom to ${value}`)
+          console.log(`🔍 ZOOM DEBUG: Ortho camera exists: ${!!orthoCamera}`)
+          if (orthoCamera) {
+            console.log(`🔍 ZOOM DEBUG: Current zoom before: ${orthoCamera.zoom}`)
+            orthoCamera.zoom = value
+            orthoCamera.updateProjectionMatrix()
+            console.log(`🔍 ZOOM DEBUG: Current zoom after: ${orthoCamera.zoom}`)
           }
           break
+        
+        // Shoulder view parameters
+        case 'shoulderOffsetX':
+        case 'shoulderOffsetY':
+        case 'shoulderOffsetZ':
+        case 'shoulderFOV':
+          this.updateViewParameters('shoulder')
+          break
+        
+        // Overhead view parameters
+        case 'overheadOffsetX':
+        case 'overheadOffsetY':
+        case 'overheadOffsetZ':
+        case 'overheadFrustumSize':
+          this.updateViewParameters('overhead')
+          break
+        
         default:
           logger.debug(LogModule.SYSTEM, `Camera parameter ${parameterId} not handled`)
       }
     } catch (error) {
       logger.error(LogModule.SYSTEM, `Error updating camera parameter ${parameterId}:`, error)
     }
+  }
+
+  /**
+   * Update a specific camera view configuration
+   */
+  private updateViewParameters(view: 'shoulder' | 'overhead'): void {
+    if (!this.systems.cameraManager) return
+
+    const prefix = view
+    const offsetX = this.parameterManager.getParameter('camera', `${prefix}OffsetX`)
+    const offsetY = this.parameterManager.getParameter('camera', `${prefix}OffsetY`)
+    const offsetZ = this.parameterManager.getParameter('camera', `${prefix}OffsetZ`)
+    
+    const offset: any = {
+      position: new THREE.Vector3(offsetX, offsetY, offsetZ)
+    }
+
+    if (view === 'shoulder') {
+      const fov = this.parameterManager.getParameter('camera', `${prefix}FOV`)
+      offset.fov = fov
+    } else if (view === 'overhead') {
+      const frustumSize = this.parameterManager.getParameter('camera', 'overheadFrustumSize')
+      // Store frustum size for orthographic camera update
+      if (this.systems.cameraManager.updateOrthographicFrustum) {
+        this.systems.cameraManager.updateOrthographicFrustum(frustumSize)
+      }
+    }
+
+    this.systems.cameraManager.updateViewOffset(view, offset)
   }
 
   private updatePlayerParameter(parameterId: string, value: any): void {

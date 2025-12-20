@@ -15,6 +15,8 @@ import pulseVertexShader from './shaders/pulse-vertex.glsl'
 import pulseFragmentShader from './shaders/pulse-fragment.glsl'
 import crystalVertexShader from './shaders/crystal-vertex.glsl'
 import crystalFragmentShader from './shaders/crystal-fragment.glsl'
+import titlescreenVertexShader from './shaders/titlescreen-vertex.glsl'
+import titlescreenFragmentShader from './shaders/titlescreen-fragment.glsl'
 
 // Shader registry for easy access
 export const SHADERS = {
@@ -34,6 +36,8 @@ export const SHADERS = {
   'src/shaders/pulse-fragment.glsl': pulseFragmentShader,
   'src/shaders/crystal-vertex.glsl': crystalVertexShader,
   'src/shaders/crystal-fragment.glsl': crystalFragmentShader,
+  'src/shaders/titlescreen-vertex.glsl': titlescreenVertexShader,
+  'src/shaders/titlescreen-fragment.glsl': titlescreenFragmentShader,
 } as const
 
 export type ShaderPath = keyof typeof SHADERS

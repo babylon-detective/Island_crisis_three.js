@@ -13,6 +13,15 @@ uniform float uIslandRadius;
 uniform float uCoastSmoothness;
 uniform float uSeaLevel;
 
+// Spotlight uniforms
+uniform vec3 uSpotlightPosition;
+uniform vec3 uSpotlightDirection;
+uniform vec3 uSpotlightColor;
+uniform float uSpotlightIntensity;
+uniform float uSpotlightAngle;
+uniform float uSpotlightPenumbra;
+uniform float uSpotlightDistance;
+
 varying vec3 vPosition;
 varying vec3 vNormal;
 varying vec2 vUv;
@@ -73,7 +82,7 @@ void main() {
     // Generate base earth texture
     vec3 earthColor = generateEarthTexture(textureCoord, vElevation, vSlope);
     
-    // Dynamic lighting calculation
+    // === SUN LIGHTING ===
     vec3 lightDirection = normalize(uSunDirection);
     vec3 normal = normalize(vNormal);
     
@@ -85,6 +94,30 @@ void main() {
     float ambientLevel = mix(0.05, 0.3, max(0.0, sunElevation)); // Very dark at night, brighter during day
     float lightIntensity = sunDot * 0.8 + ambientLevel;
     
+    // === SPOTLIGHT LIGHTING ===
+    // Calculate direction from fragment to spotlight
+    vec3 spotlightToFragment = vWorldPosition - uSpotlightPosition;
+    float distanceToSpotlight = length(spotlightToFragment);
+    vec3 spotlightDir = normalize(spotlightToFragment);
+    
+    // Calculate angle between spotlight direction and fragment direction
+    float spotlightDot = dot(normalize(uSpotlightDirection), spotlightDir);
+    float spotlightCutoff = cos(uSpotlightAngle);
+    float spotlightOuterCutoff = cos(uSpotlightAngle + uSpotlightPenumbra);
+    
+    // Smooth falloff at spotlight edges
+    float spotlightEffect = smoothstep(spotlightOuterCutoff, spotlightCutoff, spotlightDot);
+    
+    // Distance attenuation
+    float attenuation = 1.0 - smoothstep(0.0, uSpotlightDistance, distanceToSpotlight);
+    
+    // Calculate spotlight contribution
+    float spotlightNdotL = max(dot(normal, -spotlightDir), 0.0);
+    float spotlightContribution = spotlightEffect * attenuation * spotlightNdotL * uSpotlightIntensity;
+    
+    // Combine sun and spotlight lighting
+    lightIntensity += spotlightContribution * 0.8;
+    
     // Rim lighting for depth
     vec3 viewDirection = normalize(cameraPosition - vPosition);
     float rim = 1.0 - max(dot(viewDirection, normal), 0.0);
@@ -92,6 +125,10 @@ void main() {
     
     // Apply lighting to color with sun color influence - modulated by sun intensity
     vec3 lightColor = mix(vec3(0.2, 0.3, 0.6), uSunColor, max(0.0, sunElevation) * uSunIntensity); // Blue tint at night, sun color during day
+    
+    // Add spotlight color contribution
+    lightColor = mix(lightColor, uSpotlightColor, spotlightContribution * 0.5);
+    
     vec3 finalColor = earthColor * lightIntensity * lightColor;
     
     // Add rim lighting for definition - stronger during day, only when sun is present
