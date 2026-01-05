@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { ObjectManager } from './ObjectManager'
 import { AnimationSystem } from './AnimationSystem'
 import { SHADERS, ShaderPath } from '../shaderImports'
@@ -52,7 +53,8 @@ class ShaderLoader {
 // Object configuration interfaces
 export interface ObjectConfig {
   id: string
-  type: 'animated' | 'shader' | 'hologram' | 'custom'
+  type: 'animated' | 'shader' | 'hologram' | 'custom' | 'model'
+  modelPath?: string
   geometry: {
     type: 'box' | 'sphere' | 'cone' | 'cylinder' | 'plane' | 'icosahedron'
     params?: any[]
@@ -123,6 +125,7 @@ export class ObjectLoader {
   private static animationSystem: AnimationSystem
   private static objectManager: ObjectManager
   private static scene: THREE.Scene
+  private static gltfLoader: GLTFLoader = new GLTFLoader()
 
   public static initialize(scene: THREE.Scene, objectManager: ObjectManager, animationSystem: AnimationSystem): void {
     this.scene = scene
@@ -154,6 +157,11 @@ export class ObjectLoader {
       this.loadShaderObjects(),
       this.loadHologramObject()
     ])
+    
+    // Load models separately after initial scene setup
+    this.loadModelObjects().catch(err => {
+      console.error('❌ Model loading failed:', err)
+    })
     
     console.log('✅ Default scene objects loaded')
   }
@@ -613,6 +621,114 @@ export class ObjectLoader {
     }
 
     await this.createObjectFromConfig(fallbackConfig)
+  }
+
+  // Load GLTF/GLB model
+  public static async loadGLTFModel(
+    modelPath: string,
+    id: string,
+    position: [number, number, number] = [0, 0, 0],
+    rotation: [number, number, number] = [0, 0, 0],
+    scale: [number, number, number] = [1, 1, 1]
+  ): Promise<THREE.Group> {
+    return new Promise((resolve, reject) => {
+      this.gltfLoader.load(
+        modelPath,
+        (gltf) => {
+          const model = gltf.scene
+          model.position.set(...position)
+          model.rotation.set(...rotation)
+          model.scale.set(...scale)
+          model.userData = { id, type: 'model', modelPath }
+          
+          // Enable shadows and ensure proper materials for all meshes
+          model.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.castShadow = true
+              child.receiveShadow = true
+              
+              // Replace materials with standard material for proper lighting response
+              const originalMaterial = child.material
+              
+              if (Array.isArray(originalMaterial)) {
+                // Multiple materials
+                child.material = originalMaterial.map(mat => {
+                  const color = mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial
+                    ? mat.color.clone()
+                    : new THREE.Color(0x808080)
+                  
+                  return new THREE.MeshStandardMaterial({
+                    color: color.getHex() === 0x000000 ? 0x808080 : color,
+                    metalness: 0.1,
+                    roughness: 0.8,
+                    side: mat.side || THREE.FrontSide,
+                    transparent: mat.transparent || false,
+                    opacity: mat.opacity || 1
+                  })
+                })
+              } else {
+                // Single material
+                const color = originalMaterial instanceof THREE.MeshStandardMaterial || originalMaterial instanceof THREE.MeshPhysicalMaterial
+                  ? originalMaterial.color.clone()
+                  : new THREE.Color(0x808080)
+                
+                child.material = new THREE.MeshStandardMaterial({
+                  color: color.getHex() === 0x000000 ? 0x808080 : color,
+                  metalness: 0.1,
+                  roughness: 0.8,
+                  side: originalMaterial.side || THREE.FrontSide,
+                  transparent: originalMaterial.transparent || false,
+                  opacity: originalMaterial.opacity || 1
+                })
+              }
+            }
+          })
+          
+          // Add to scene and object manager
+          this.scene.add(model)
+          
+          // Register with ObjectManager using createObject (not registerExternalObject which doesn't exist)
+          // For now, just add to scene - position persistence can be added later
+          
+          console.log(`✅ Loaded model: ${id} from ${modelPath}`)
+          console.log(`📦 Model bounds:`, new THREE.Box3().setFromObject(model))
+          resolve(model)
+        },
+        (progress) => {
+          const percentComplete = (progress.loaded / progress.total) * 100
+          console.log(`Loading ${id}: ${percentComplete.toFixed(2)}%`)
+        },
+        (error) => {
+          console.error(`❌ Failed to load model ${id} from ${modelPath}:`, error)
+          reject(error)
+        }
+      )
+    })
+  }
+
+  // Load model objects
+  private static async loadModelObjects(): Promise<void> {
+    try {
+      // Load grid_01.glb model
+      const gridModel = await this.loadGLTFModel(
+        '/models/environments/grid_01.glb',
+        'grid-01',
+        [0, 0, 0],
+        [0, 0, 0],
+        [1, 1, 1]
+      )
+      
+      // Calculate bounding box and position based on dimensions
+      const boundingBox = new THREE.Box3().setFromObject(gridModel)
+      const size = new THREE.Vector3()
+      boundingBox.getSize(size)
+      
+      // Position the grid: X based on width, Y=0 (ground), Z based on depth
+      gridModel.position.set(size.x, 0, size.z)
+      console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+    } catch (error) {
+      console.warn('⚠️ Failed to load model objects:', error)
+    }
   }
 
   // Get default scene configuration

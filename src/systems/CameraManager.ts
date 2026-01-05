@@ -99,8 +99,8 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
   
   orthographicCamera: {
     frustumSize: 50,
-    height: 50,
-    zoom: 10
+    height: 150,
+    zoom: 0.3
   },
   
   spotlight: {
@@ -118,7 +118,7 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
   
   thirdPersonViews: {
     overhead: {
-      position: new THREE.Vector3(20, 50, 1),
+      position: new THREE.Vector3(20, 150, 1),
       lookAtOffset: new THREE.Vector3(0, 0, 0),
       smoothing: 0.1,
       fov: 60
@@ -173,6 +173,9 @@ export class CameraManager {
   // Player camera properties
   private playerPosition: THREE.Vector3 = new THREE.Vector3(0, 5, 0)
   private playerHeight: number
+  
+  // Orbit camera tracking
+  private orbitCameraOffset: THREE.Vector3 | null = null
   
   // Camera offset tracking
   private currentCameraOffset: THREE.Vector3 = new THREE.Vector3()
@@ -396,8 +399,8 @@ export class CameraManager {
     this.scene.add(this.playerSpotlight)
     this.scene.add(this.playerSpotlight.target)
     
-    // Initially visible for overhead view (default view)
-    this.playerSpotlight.visible = this.currentThirdPersonView === 'overhead'
+    // Always visible
+    this.playerSpotlight.visible = true
     
     const angleDegrees = (this.config.spotlight.angle * 180 / Math.PI).toFixed(1)
     console.log(`💡 Player spotlight initialized - Intensity: ${this.config.spotlight.intensity}, Angle: ${angleDegrees}°, Distance: ${this.config.spotlight.distance}`)
@@ -551,9 +554,27 @@ export class CameraManager {
       this.updateCameraTransition()
     }
     
+    // Update player spotlight (always, in all modes)
+    this.updatePlayerSpotlight()
+    
     // Update active camera based on mode
     if (this.currentMode === 'system') {
+      // Initialize offset on first frame
+      if (!this.orbitCameraOffset) {
+        this.orbitCameraOffset = new THREE.Vector3()
+        this.orbitCameraOffset.copy(this.systemCamera.position).sub(this.playerPosition)
+      }
+      
+      // Keep system camera at offset from player
+      const targetPosition = new THREE.Vector3().copy(this.playerPosition).add(this.orbitCameraOffset)
+      this.systemCamera.position.copy(targetPosition)
+      
+      // Orbit controls target follows player
+      this.orbitControls.target.copy(this.playerPosition)
       this.orbitControls.update()
+      
+      // Update offset after orbit controls modify position
+      this.orbitCameraOffset.copy(this.systemCamera.position).sub(this.playerPosition)
     } else if (this.currentMode === 'player') {
       this.updatePlayerCamera(deltaTime)
     }
@@ -603,21 +624,36 @@ export class CameraManager {
     if (this.currentCamera !== activeCamera) {
       this.currentCamera = activeCamera
       console.log(`📷 Switched to ${useOrthographic ? 'Orthographic' : 'Perspective'} camera`)
+      
+      // Force orthographic zoom to config value when switching
+      if (useOrthographic) {
+        this.orthographicCamera.zoom = this.config.orthographicCamera.zoom
+        this.orthographicCamera.updateProjectionMatrix()
+        console.log(`📷 Orthographic zoom forced to: ${this.orthographicCamera.zoom}`)
+      }
     }
     
     // Calculate target camera offset in world space
     const playerRotation = this.playerControls.yaw
     const rotationMatrix = new THREE.Matrix4().makeRotationY(playerRotation)
     
-    this.targetCameraOffset.copy(offsetConfig.position)
-    this.targetCameraOffset.applyMatrix4(rotationMatrix)
-    
-    // Smooth camera offset transition
-    this.currentCameraOffset.lerp(this.targetCameraOffset, offsetConfig.smoothing)
-    
-    // Set camera position
-    activeCamera.position.copy(this.playerPosition)
-    activeCamera.position.add(this.currentCameraOffset)
+    // For overhead view, use direct Y positioning without rotation
+    if (useOrthographic) {
+      // Direct overhead positioning
+      activeCamera.position.copy(this.playerPosition)
+      activeCamera.position.y += offsetConfig.position.y
+    } else {
+      // Shoulder view uses rotation
+      this.targetCameraOffset.copy(offsetConfig.position)
+      this.targetCameraOffset.applyMatrix4(rotationMatrix)
+      
+      // Smooth camera offset transition
+      this.currentCameraOffset.lerp(this.targetCameraOffset, offsetConfig.smoothing)
+      
+      // Set camera position
+      activeCamera.position.copy(this.playerPosition)
+      activeCamera.position.add(this.currentCameraOffset)
+    }
     
     // Calculate look-at target
     const lookAtTarget = new THREE.Vector3()
@@ -641,9 +677,6 @@ export class CameraManager {
       // Always show player mesh in third person views
       this.playerMesh.visible = true
     }
-    
-    // Update player spotlight
-    this.updatePlayerSpotlight()
   }
 
   /**
@@ -652,44 +685,36 @@ export class CameraManager {
   private updatePlayerSpotlight(): void {
     if (!this.playerSpotlight) return
     
-    // Show spotlight in player mode (all views)
-    const isPlayerMode = this.currentMode === 'player'
-    this.playerSpotlight.visible = isPlayerMode
+    // Spotlight always follows and is always visible
+    this.playerSpotlight.visible = true
     
-    if (isPlayerMode) {
-      // Position spotlight directly above player for tight focused lighting
-      const spotlightHeight = this.config.spotlight.height
-      const cameraOffset = this.config.spotlight.offset
+    // Always update position to follow player
+    const spotlightHeight = this.config.spotlight.height
+    const cameraOffset = this.config.spotlight.offset
+    
+    // Position spotlight above player
+    this.playerSpotlight.position.set(
+      this.playerPosition.x,
+      this.playerPosition.y + spotlightHeight,
+      this.playerPosition.z - cameraOffset
+    )
+    
+    // Point spotlight at player
+    this.playerSpotlight.target.position.copy(this.playerPosition)
+    this.playerSpotlight.target.position.y += 0.5
+    this.playerSpotlight.target.updateMatrixWorld()
+    
+    // Always update land system with spotlight data
+    if (this.landSystem) {
+      this.landSystem.setSpotlightPosition(this.playerSpotlight.position)
       
-      // Position spotlight slightly in front to match orthographic camera view
-      this.playerSpotlight.position.set(
-        this.playerPosition.x,
-        this.playerPosition.y + spotlightHeight,
-        this.playerPosition.z - cameraOffset
-      )
+      // Calculate direction vector from spotlight to target
+      const direction = new THREE.Vector3()
+      direction.subVectors(this.playerSpotlight.target.position, this.playerSpotlight.position).normalize()
+      this.landSystem.setSpotlightDirection(direction)
       
-      // Point spotlight at player feet for clear ground illumination
-      this.playerSpotlight.target.position.copy(this.playerPosition)
-      this.playerSpotlight.target.position.y += 0.5 // Aim at player center
-      this.playerSpotlight.target.updateMatrixWorld()
-      
-      // Update land system with spotlight data
-      if (this.landSystem) {
-        this.landSystem.setSpotlightPosition(this.playerSpotlight.position)
-        
-        // Calculate direction vector from spotlight to target
-        const direction = new THREE.Vector3()
-        direction.subVectors(this.playerSpotlight.target.position, this.playerSpotlight.position).normalize()
-        this.landSystem.setSpotlightDirection(direction)
-        
-        this.landSystem.setSpotlightColor(this.playerSpotlight.color)
-        this.landSystem.setSpotlightIntensity(this.playerSpotlight.intensity)
-      }
-    } else {
-      // Turn off spotlight in shader when not in player mode
-      if (this.landSystem) {
-        this.landSystem.setSpotlightIntensity(0)
-      }
+      this.landSystem.setSpotlightColor(this.playerSpotlight.color)
+      this.landSystem.setSpotlightIntensity(this.playerSpotlight.intensity)
     }
   }
 

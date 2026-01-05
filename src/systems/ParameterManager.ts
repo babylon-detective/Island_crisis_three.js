@@ -127,7 +127,7 @@ export const DEFAULT_PARAMETER_SETS: Record<ParameterCategory, ParameterSet> = {
       { id: 'positionY', category: 'camera', type: 'number', min: -50, max: 50, step: 0.1, defaultValue: 5, currentValue: 5, description: 'Camera Y position', unit: 'units' },
       { id: 'positionZ', category: 'camera', type: 'number', min: -50, max: 50, step: 0.1, defaultValue: 5, currentValue: 5, description: 'Camera Z position', unit: 'units' },
       { id: 'fov', category: 'camera', type: 'number', min: 10, max: 150, step: 1, defaultValue: 75, currentValue: 75, description: 'Field of view', unit: 'degrees' },
-      { id: 'zoom', category: 'camera', type: 'number', min: 0.1, max: 10, step: 0.1, defaultValue: 3, currentValue: 3, description: 'Camera zoom' },
+      { id: 'zoom', category: 'camera', type: 'number', min: 0.1, max: 10, step: 0.1, defaultValue: 0.3, currentValue: 0.3, description: 'Camera zoom' },
       
       // Shoulder View
       { id: 'shoulderOffsetX', category: 'camera', type: 'number', min: -10, max: 10, step: 0.1, defaultValue: 1.2, currentValue: 1.2, description: 'Shoulder: Offset X' },

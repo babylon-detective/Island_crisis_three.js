@@ -201,6 +201,8 @@ export class PlayerController {
     
     const bodyMaterial = new THREE.MeshStandardMaterial({
       color: 0x4a90e2,
+      emissive: 0x2a5080,
+      emissiveIntensity: 0.3,
       roughness: 0.7,
       metalness: 0.3
     })
@@ -215,6 +217,8 @@ export class PlayerController {
     const headGeometry = new THREE.SphereGeometry(this.config.radius * 0.8, 8, 8)
     const headMaterial = new THREE.MeshStandardMaterial({
       color: 0xffcc99, // Skin tone
+      emissive: 0xaa8866,
+      emissiveIntensity: 0.2,
       roughness: 0.8,
       metalness: 0.1
     })
