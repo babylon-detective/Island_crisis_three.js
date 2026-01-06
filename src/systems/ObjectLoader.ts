@@ -126,11 +126,15 @@ export class ObjectLoader {
   private static objectManager: ObjectManager
   private static scene: THREE.Scene
   private static gltfLoader: GLTFLoader = new GLTFLoader()
+  private static landUniforms: { [key: string]: { value: any } } | null = null
 
-  public static initialize(scene: THREE.Scene, objectManager: ObjectManager, animationSystem: AnimationSystem): void {
+  public static initialize(scene: THREE.Scene, objectManager: ObjectManager, animationSystem: AnimationSystem, landUniforms?: { [key: string]: { value: any } }): void {
     this.scene = scene
     this.objectManager = objectManager
     this.animationSystem = animationSystem
+    if (landUniforms) {
+      this.landUniforms = landUniforms
+    }
   }
 
   // Load all objects from configuration
@@ -623,72 +627,75 @@ export class ObjectLoader {
     await this.createObjectFromConfig(fallbackConfig)
   }
 
-  // Load GLTF/GLB model
+  // Load GLTF/GLB model with optional shader material
   public static async loadGLTFModel(
     modelPath: string,
     id: string,
     position: [number, number, number] = [0, 0, 0],
     rotation: [number, number, number] = [0, 0, 0],
-    scale: [number, number, number] = [1, 1, 1]
+    scale: [number, number, number] = [1, 1, 1],
+    useCustomShader: boolean = false,
+    shaderUniforms?: { [key: string]: { value: any } }
   ): Promise<THREE.Group> {
     return new Promise((resolve, reject) => {
       this.gltfLoader.load(
         modelPath,
-        (gltf) => {
+        async (gltf) => {
           const model = gltf.scene
           model.position.set(...position)
           model.rotation.set(...rotation)
           model.scale.set(...scale)
           model.userData = { id, type: 'model', modelPath }
           
-          // Enable shadows and ensure proper materials for all meshes
-          model.traverse((child) => {
+          // Enable shadows and apply materials to all meshes (including nested)
+          model.traverse(async (child) => {
             if (child instanceof THREE.Mesh) {
               child.castShadow = true
               child.receiveShadow = true
               
-              // Replace materials with standard material for proper lighting response
               const originalMaterial = child.material
               
-              if (Array.isArray(originalMaterial)) {
-                // Multiple materials
-                child.material = originalMaterial.map(mat => {
-                  const color = mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial
-                    ? mat.color.clone()
+              if (useCustomShader && shaderUniforms) {
+                // Apply custom shader material with land-like lighting
+                const shaderMaterial = await this.createModelShaderMaterial(originalMaterial, shaderUniforms)
+                child.material = shaderMaterial
+              } else {
+                // Use standard material
+                if (Array.isArray(originalMaterial)) {
+                  child.material = originalMaterial.map(mat => {
+                    const color = mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial
+                      ? mat.color.clone()
+                      : new THREE.Color(0x808080)
+                    
+                    return new THREE.MeshStandardMaterial({
+                      color: color.getHex() === 0x000000 ? 0x808080 : color,
+                      metalness: 0.1,
+                      roughness: 0.8,
+                      side: mat.side || THREE.FrontSide,
+                      transparent: mat.transparent || false,
+                      opacity: mat.opacity || 1
+                    })
+                  })
+                } else {
+                  const color = originalMaterial instanceof THREE.MeshStandardMaterial || originalMaterial instanceof THREE.MeshPhysicalMaterial
+                    ? originalMaterial.color.clone()
                     : new THREE.Color(0x808080)
                   
-                  return new THREE.MeshStandardMaterial({
+                  child.material = new THREE.MeshStandardMaterial({
                     color: color.getHex() === 0x000000 ? 0x808080 : color,
                     metalness: 0.1,
                     roughness: 0.8,
-                    side: mat.side || THREE.FrontSide,
-                    transparent: mat.transparent || false,
-                    opacity: mat.opacity || 1
+                    side: originalMaterial.side || THREE.FrontSide,
+                    transparent: originalMaterial.transparent || false,
+                    opacity: originalMaterial.opacity || 1
                   })
-                })
-              } else {
-                // Single material
-                const color = originalMaterial instanceof THREE.MeshStandardMaterial || originalMaterial instanceof THREE.MeshPhysicalMaterial
-                  ? originalMaterial.color.clone()
-                  : new THREE.Color(0x808080)
-                
-                child.material = new THREE.MeshStandardMaterial({
-                  color: color.getHex() === 0x000000 ? 0x808080 : color,
-                  metalness: 0.1,
-                  roughness: 0.8,
-                  side: originalMaterial.side || THREE.FrontSide,
-                  transparent: originalMaterial.transparent || false,
-                  opacity: originalMaterial.opacity || 1
-                })
+                }
               }
             }
           })
           
-          // Add to scene and object manager
+          // Add to scene
           this.scene.add(model)
-          
-          // Register with ObjectManager using createObject (not registerExternalObject which doesn't exist)
-          // For now, just add to scene - position persistence can be added later
           
           console.log(`✅ Loaded model: ${id} from ${modelPath}`)
           console.log(`📦 Model bounds:`, new THREE.Box3().setFromObject(model))
@@ -706,16 +713,49 @@ export class ObjectLoader {
     })
   }
 
+  // Create shader material for models that mimics land lighting
+  private static async createModelShaderMaterial(
+    originalMaterial: THREE.Material | THREE.Material[],
+    uniforms: { [key: string]: { value: any } }
+  ): Promise<THREE.ShaderMaterial> {
+    // Extract color from original material if possible
+    let baseColor = new THREE.Color(0x808080)
+    const mat = Array.isArray(originalMaterial) ? originalMaterial[0] : originalMaterial
+    if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
+      baseColor = mat.color.clone()
+    }
+
+    // Load default-light shaders
+    const shaders = await ShaderLoader.loadShaderPair({
+      vertexPath: 'src/shaders/default-light-vertex.glsl',
+      fragmentPath: 'src/shaders/default-light-fragment.glsl'
+    })
+
+    // Create shader material with land-like lighting
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        ...uniforms,
+        uModelColor: { value: baseColor }
+      },
+      vertexShader: shaders.vertex,
+      fragmentShader: shaders.fragment,
+      side: THREE.DoubleSide
+    })
+  }
+
   // Load model objects
   private static async loadModelObjects(): Promise<void> {
     try {
-      // Load grid_01.glb model
+      // Load grid_01.glb model with custom shader using landUniforms
+      const useShader = this.landUniforms !== null
       const gridModel = await this.loadGLTFModel(
         '/models/environments/grid_01.glb',
         'grid-01',
         [0, 0, 0],
         [0, 0, 0],
-        [1, 1, 1]
+        [1, 1, 1],
+        useShader,
+        this.landUniforms || undefined
       )
       
       // Calculate bounding box and position based on dimensions
@@ -726,6 +766,7 @@ export class ObjectLoader {
       // Position the grid: X based on width, Y=0 (ground), Z based on depth
       gridModel.position.set(size.x, 0, size.z)
       console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+      console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
     } catch (error) {
       console.warn('⚠️ Failed to load model objects:', error)
     }

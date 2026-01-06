@@ -1,8 +1,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-export type CameraMode = 'system' | 'player'
-export type ThirdPersonView = 'shoulder' | 'overhead'
+export type CameraMode = 'freeview' | 'shoulder'
+export type ThirdPersonView = 'shoulder' // Only shoulder view remains
 
 export interface CameraConfig {
   fov: number
@@ -34,8 +34,8 @@ export interface CameraManagerConfig {
   defaultView: ThirdPersonView
   defaultZoom: number
   
-  // System camera
-  systemCamera: {
+  // Free View camera (orbital camera with free movement)
+  freeViewCamera: {
     fov: number
     position: THREE.Vector3
     targetHeight: number
@@ -47,13 +47,6 @@ export interface CameraManagerConfig {
     sensitivity: number
     smoothing: number
     height: number
-  }
-  
-  // Orthographic camera
-  orthographicCamera: {
-    frustumSize: number
-    height: number
-    zoom: number
   }
   
   // Spotlight
@@ -71,22 +64,19 @@ export interface CameraManagerConfig {
   // Transitions
   transitionDuration: number
   
-  // Third person view configurations
-  thirdPersonViews: {
-    overhead: ThirdPersonCameraOffset
-    shoulder: ThirdPersonCameraOffset
-  }
+  // Shoulder view configuration
+  shoulderView: ThirdPersonCameraOffset
 }
 
 // Default configuration
 const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
-  defaultMode: 'player',
-  defaultView: 'overhead',
+  defaultMode: 'freeview',
+  defaultView: 'shoulder',
   defaultZoom: 2,
   
-  systemCamera: {
+  freeViewCamera: {
     fov: 75,
-    position: new THREE.Vector3(0, 2, 10),
+    position: new THREE.Vector3(0, 2, 20),
     targetHeight: 2
   },
   
@@ -95,12 +85,6 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
     sensitivity: 0.002,
     smoothing: 0.1,
     height: 1.8
-  },
-  
-  orthographicCamera: {
-    frustumSize: 50,
-    height: 150,
-    zoom: 0.3
   },
   
   spotlight: {
@@ -116,19 +100,11 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
   
   transitionDuration: 1.0,
   
-  thirdPersonViews: {
-    overhead: {
-      position: new THREE.Vector3(20, 150, 1),
-      lookAtOffset: new THREE.Vector3(0, 0, 0),
-      smoothing: 0.1,
-      fov: 60
-    },
-    shoulder: {
-      position: new THREE.Vector3(1.2, 1.5, -3.5),
-      lookAtOffset: new THREE.Vector3(0, 1.0, 2),
-      smoothing: 0.15,
-      fov: 70
-    }
+  shoulderView: {
+    position: new THREE.Vector3(1.2, 1.5, -3.5),
+    lookAtOffset: new THREE.Vector3(0, 1.0, 2),
+    smoothing: 0.15,
+    fov: 70
   }
 }
 
@@ -139,15 +115,13 @@ export class CameraManager {
   private config: CameraManagerConfig
   
   // Cameras
-  private systemCamera!: THREE.PerspectiveCamera
-  private playerCamera!: THREE.PerspectiveCamera
-  private orthographicCamera!: THREE.OrthographicCamera
+  private freeViewCamera!: THREE.PerspectiveCamera // Free orbital camera
+  private shoulderCamera!: THREE.PerspectiveCamera // Shoulder view camera
   private currentCamera!: THREE.Camera
   private currentMode: CameraMode
   
-  // Third person view mode
-  private currentThirdPersonView: ThirdPersonView
-  private thirdPersonOffsets: Map<ThirdPersonView, ThirdPersonCameraOffset> = new Map()
+  // Shoulder view configuration
+  private shoulderViewOffset: ThirdPersonCameraOffset
   
   // Player spotlight
   private playerSpotlight: THREE.SpotLight | null = null
@@ -172,6 +146,7 @@ export class CameraManager {
   
   // Player camera properties
   private playerPosition: THREE.Vector3 = new THREE.Vector3(0, 5, 0)
+  private previousPlayerPosition: THREE.Vector3 = new THREE.Vector3(0, 5, 0)
   private playerHeight: number
   
   // Orbit camera tracking
@@ -209,15 +184,11 @@ export class CameraManager {
     
     // Set initial states from config
     this.currentMode = this.config.defaultMode
-    this.currentThirdPersonView = this.config.defaultView
     this.playerHeight = this.config.playerControls.height
     this.transitionDuration = this.config.transitionDuration
     
-    // Initialize third person camera offsets from config
-    this.thirdPersonOffsets = new Map([
-      ['overhead', this.config.thirdPersonViews.overhead],
-      ['shoulder', this.config.thirdPersonViews.shoulder]
-    ])
+    // Initialize shoulder view offset from config
+    this.shoulderViewOffset = this.config.shoulderView
     
     // Initialize cameras
     this.initializeCameras()
@@ -225,7 +196,7 @@ export class CameraManager {
     this.initializePlayerSpotlight()
     this.setupEventListeners()
     
-    console.log(`📷 CameraManager initialized - Mode: ${this.currentMode}, View: ${this.currentThirdPersonView}`)
+    console.log(`📷 CameraManager initialized - Mode: ${this.currentMode === 'freeview' ? 'FREE VIEW' : 'SHOULDER'}`)
   }
 
   // ============================================================================
@@ -236,14 +207,10 @@ export class CameraManager {
     return {
       ...defaults,
       ...overrides,
-      systemCamera: { ...defaults.systemCamera, ...overrides.systemCamera },
+      freeViewCamera: { ...defaults.freeViewCamera, ...overrides.freeViewCamera },
       playerControls: { ...defaults.playerControls, ...overrides.playerControls },
-      orthographicCamera: { ...defaults.orthographicCamera, ...overrides.orthographicCamera },
       spotlight: { ...defaults.spotlight, ...overrides.spotlight },
-      thirdPersonViews: {
-        overhead: { ...defaults.thirdPersonViews.overhead, ...overrides.thirdPersonViews?.overhead },
-        shoulder: { ...defaults.thirdPersonViews.shoulder, ...overrides.thirdPersonViews?.shoulder }
-      }
+      shoulderView: { ...defaults.shoulderView, ...overrides.shoulderView }
     }
   }
 
@@ -269,60 +236,45 @@ export class CameraManager {
   private initializeCameras(): void {
     const aspect = window.innerWidth / window.innerHeight
     
-    // System Camera (for debugging and free observation)
-    this.systemCamera = new THREE.PerspectiveCamera(
-      this.config.systemCamera.fov, 
+    // Free View Camera (orbital camera for free observation)
+    this.freeViewCamera = new THREE.PerspectiveCamera(
+      this.config.freeViewCamera.fov, 
       aspect, 
       0.1, 
       1000
     )
-    this.systemCamera.position.copy(this.config.systemCamera.position)
-    this.systemCamera.name = 'SystemCamera'
+    this.freeViewCamera.position.copy(this.config.freeViewCamera.position)
+    this.freeViewCamera.name = 'FreeViewCamera'
     
-    // Player Camera (third-person views)
-    this.playerCamera = new THREE.PerspectiveCamera(75, aspect, 0.1, 1000)
-    this.playerCamera.position.copy(this.playerPosition)
-    this.playerCamera.position.y += this.playerHeight
-    this.playerCamera.name = 'PlayerCamera'
-    
-    // Orthographic Camera (for isometric overhead view)
-    const frustumSize = this.config.orthographicCamera.frustumSize
-    this.orthographicCamera = new THREE.OrthographicCamera(
-      frustumSize * aspect / -2,
-      frustumSize * aspect / 2,
-      frustumSize / 2,
-      frustumSize / -2,
-      0.1,
+    // Shoulder Camera (third-person shoulder view)
+    this.shoulderCamera = new THREE.PerspectiveCamera(
+      this.shoulderViewOffset.fov, 
+      aspect, 
+      0.1, 
       1000
     )
-    this.orthographicCamera.position.copy(this.playerPosition)
-    this.orthographicCamera.position.y += this.config.orthographicCamera.height
-    this.orthographicCamera.name = 'OrthographicCamera'
-    this.orthographicCamera.zoom = this.config.orthographicCamera.zoom
-    this.orthographicCamera.updateProjectionMatrix()
+    this.shoulderCamera.position.copy(this.playerPosition)
+    this.shoulderCamera.position.y += this.playerHeight
+    this.shoulderCamera.name = 'ShoulderCamera'
     
-    // Set initial camera based on default view
-    this.currentCamera = this.currentThirdPersonView === 'overhead' 
-      ? this.orthographicCamera 
-      : this.playerCamera
+    // Set initial camera based on default mode
+    this.currentCamera = this.currentMode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
     
-    console.log('📷 Cameras initialized: Perspective + Orthographic (Isometric)')
-    console.log(`📷 Current mode: ${this.currentMode}, Current view: ${this.currentThirdPersonView}`)
+    console.log('📷 Cameras initialized: Free View + Shoulder')
+    console.log(`📷 Current mode: ${this.currentMode === 'freeview' ? 'FREE VIEW' : 'SHOULDER'}`)
     console.log(`📷 Current camera is: ${this.currentCamera.name}`)
-    console.log(`📷 Orthographic camera zoom set to: ${this.orthographicCamera.zoom}`)
-    console.log(`📷 Orthographic camera frustumSize: ${this.config.orthographicCamera.frustumSize}`)
   }
 
   private initializeControls(): void {
-    // Orbit controls for system camera
-    this.orbitControls = new OrbitControls(this.systemCamera, this.renderer.domElement)
+    // Orbit controls for free view camera
+    this.orbitControls = new OrbitControls(this.freeViewCamera, this.renderer.domElement)
     this.orbitControls.enableDamping = true
     this.orbitControls.dampingFactor = 0.05
     this.orbitControls.minDistance = 2
     this.orbitControls.maxDistance = 1000
     this.orbitControls.maxPolarAngle = Math.PI * 0.95
     this.orbitControls.minPolarAngle = Math.PI * 0.05
-    this.orbitControls.target.set(0, this.config.systemCamera.targetHeight, 0)
+    this.orbitControls.target.set(0, this.config.freeViewCamera.targetHeight, 0)
     this.orbitControls.update()
     
     // Player controls configuration
@@ -338,12 +290,12 @@ export class CameraManager {
   }
 
   private setupEventListeners(): void {
-    // Mouse movement for player camera
+    // Mouse movement for shoulder camera
     this.container.addEventListener('mousemove', this.onMouseMove.bind(this))
     
-    // Pointer lock for player camera
+    // Pointer lock for shoulder camera
     this.container.addEventListener('click', () => {
-      if (this.currentMode === 'player') {
+      if (this.currentMode === 'shoulder') {
         this.container.requestPointerLock().catch(() => {
           // Pointer lock may fail if not user-initiated, that's okay
         })
@@ -353,12 +305,12 @@ export class CameraManager {
     // Handle pointer lock change
     document.addEventListener('pointerlockchange', this.onPointerLockChange.bind(this))
     
-    // Auto-request pointer lock on initial load if in player mode
+    // Auto-request pointer lock on initial load if in shoulder mode
     // This allows trackpad/mouse input to work immediately
-    if (this.currentMode === 'player') {
+    if (this.currentMode === 'shoulder') {
       // Request pointer lock after a short delay to ensure page is fully loaded
       setTimeout(() => {
-        if (this.currentMode === 'player' && document.pointerLockElement !== this.container) {
+        if (this.currentMode === 'shoulder' && document.pointerLockElement !== this.container) {
           this.container.requestPointerLock().catch(() => {
             // Pointer lock requires user interaction, so this may fail initially
             // User will need to click once to enable it
@@ -421,7 +373,7 @@ export class CameraManager {
     // console.log(`📷 Switching camera mode: ${this.currentMode} → ${mode}`)
 
     const fromCamera = this.currentCamera
-    const toCamera = mode === 'system' ? this.systemCamera : this.playerCamera
+    const toCamera = mode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
 
     if (immediate) {
       this.setActiveCamera(mode, true)
@@ -452,23 +404,23 @@ export class CameraManager {
    */
   private setActiveCamera(mode: CameraMode, requestPointerLock: boolean = false): void {
     this.currentMode = mode
-    this.currentCamera = mode === 'system' ? this.systemCamera : this.playerCamera
+    this.currentCamera = mode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
     
     // Enable/disable appropriate controls
-    this.orbitControls.enabled = (mode === 'system')
-    this.playerControls.enabled = (mode === 'player')
+    this.orbitControls.enabled = (mode === 'freeview')
+    this.playerControls.enabled = (mode === 'shoulder')
     
-    // Handle pointer lock for player mode only when explicitly requested
-    if (mode === 'player' && requestPointerLock) {
+    // Handle pointer lock for shoulder mode only when explicitly requested
+    if (mode === 'shoulder' && requestPointerLock) {
       // Only request pointer lock if we're not already locked
       if (document.pointerLockElement !== this.container) {
         this.container.requestPointerLock().catch((error) => {
                   // console.warn('📷 Pointer lock request failed:', error.message)
-        // console.log('📷 Tip: Click on the canvas first, then press C to switch to player camera')
+        // console.log('📷 Tip: Click on the canvas first, then press C to switch to shoulder camera')
         })
       }
-    } else if (mode === 'system') {
-      // Exit pointer lock when switching to system camera
+    } else if (mode === 'freeview') {
+      // Exit pointer lock when switching to free view camera
       if (document.pointerLockElement === this.container) {
         document.exitPointerLock()
       }
@@ -558,25 +510,34 @@ export class CameraManager {
     this.updatePlayerSpotlight()
     
     // Update active camera based on mode
-    if (this.currentMode === 'system') {
-      // Initialize offset on first frame
+    if (this.currentMode === 'freeview') {
+      // Initialize offset on first frame using config position
       if (!this.orbitCameraOffset) {
         this.orbitCameraOffset = new THREE.Vector3()
-        this.orbitCameraOffset.copy(this.systemCamera.position).sub(this.playerPosition)
+        // Use the configured initial position relative to player
+        this.orbitCameraOffset.copy(this.config.freeViewCamera.position)
+        // Position camera at the configured offset from player
+        this.freeViewCamera.position.copy(this.playerPosition).add(this.orbitCameraOffset)
+        this.previousPlayerPosition.copy(this.playerPosition)
       }
       
-      // Keep system camera at offset from player
-      const targetPosition = new THREE.Vector3().copy(this.playerPosition).add(this.orbitCameraOffset)
-      this.systemCamera.position.copy(targetPosition)
+      // Calculate player movement delta
+      const playerDelta = new THREE.Vector3().subVectors(this.playerPosition, this.previousPlayerPosition)
       
-      // Orbit controls target follows player
-      this.orbitControls.target.copy(this.playerPosition)
+      // Move camera and orbit target by player movement delta (keeps camera following player)
+      this.freeViewCamera.position.add(playerDelta)
+      this.orbitControls.target.add(playerDelta)
+      
+      // Update orbit controls (applies mouse and gamepad rotations with smooth damping)
       this.orbitControls.update()
       
       // Update offset after orbit controls modify position
-      this.orbitCameraOffset.copy(this.systemCamera.position).sub(this.playerPosition)
-    } else if (this.currentMode === 'player') {
-      this.updatePlayerCamera(deltaTime)
+      this.orbitCameraOffset.copy(this.freeViewCamera.position).sub(this.playerPosition)
+      
+      // Store current player position for next frame
+      this.previousPlayerPosition.copy(this.playerPosition)
+    } else if (this.currentMode === 'shoulder') {
+      this.updateShoulderCamera(deltaTime)
     }
   }
 
@@ -607,53 +568,28 @@ export class CameraManager {
   }
 
   /**
-   * Update player camera based on mouse input
+   * Update shoulder camera based on mouse input
    */
-  private updatePlayerCamera(deltaTime: number): void {
+  private updateShoulderCamera(deltaTime: number): void {
     if (!this.playerControls.enabled) return
     
-    // Get current third person offset configuration
-    const offsetConfig = this.thirdPersonOffsets.get(this.currentThirdPersonView)
-    if (!offsetConfig) return
-    
-    // Determine which camera to use
-    const useOrthographic = this.currentThirdPersonView === 'overhead'
-    const activeCamera = useOrthographic ? this.orthographicCamera : this.playerCamera
-    
-    // Update current camera if it changed
-    if (this.currentCamera !== activeCamera) {
-      this.currentCamera = activeCamera
-      console.log(`📷 Switched to ${useOrthographic ? 'Orthographic' : 'Perspective'} camera`)
-      
-      // Force orthographic zoom to config value when switching
-      if (useOrthographic) {
-        this.orthographicCamera.zoom = this.config.orthographicCamera.zoom
-        this.orthographicCamera.updateProjectionMatrix()
-        console.log(`📷 Orthographic zoom forced to: ${this.orthographicCamera.zoom}`)
-      }
-    }
+    // Use shoulder view offset configuration
+    const offsetConfig = this.shoulderViewOffset
     
     // Calculate target camera offset in world space
     const playerRotation = this.playerControls.yaw
     const rotationMatrix = new THREE.Matrix4().makeRotationY(playerRotation)
     
-    // For overhead view, use direct Y positioning without rotation
-    if (useOrthographic) {
-      // Direct overhead positioning
-      activeCamera.position.copy(this.playerPosition)
-      activeCamera.position.y += offsetConfig.position.y
-    } else {
-      // Shoulder view uses rotation
-      this.targetCameraOffset.copy(offsetConfig.position)
-      this.targetCameraOffset.applyMatrix4(rotationMatrix)
-      
-      // Smooth camera offset transition
-      this.currentCameraOffset.lerp(this.targetCameraOffset, offsetConfig.smoothing)
-      
-      // Set camera position
-      activeCamera.position.copy(this.playerPosition)
-      activeCamera.position.add(this.currentCameraOffset)
-    }
+    // Shoulder view uses rotation
+    this.targetCameraOffset.copy(offsetConfig.position)
+    this.targetCameraOffset.applyMatrix4(rotationMatrix)
+    
+    // Smooth camera offset transition
+    this.currentCameraOffset.lerp(this.targetCameraOffset, offsetConfig.smoothing)
+    
+    // Set camera position
+    this.shoulderCamera.position.copy(this.playerPosition)
+    this.shoulderCamera.position.add(this.currentCameraOffset)
     
     // Calculate look-at target
     const lookAtTarget = new THREE.Vector3()
@@ -662,19 +598,17 @@ export class CameraManager {
     lookAtTarget.add(this.playerPosition)
     
     // Make camera look at target
-    activeCamera.lookAt(lookAtTarget)
+    this.shoulderCamera.lookAt(lookAtTarget)
     
-    // Update FOV only for perspective camera
-    if (!useOrthographic && activeCamera instanceof THREE.PerspectiveCamera) {
-      if (activeCamera.fov !== offsetConfig.fov) {
-        activeCamera.fov = offsetConfig.fov
-        activeCamera.updateProjectionMatrix()
-      }
+    // Update FOV
+    if (this.shoulderCamera.fov !== offsetConfig.fov) {
+      this.shoulderCamera.fov = offsetConfig.fov
+      this.shoulderCamera.updateProjectionMatrix()
     }
     
     // Show/hide player mesh based on view
     if (this.playerMesh) {
-      // Always show player mesh in third person views
+      // Always show player mesh in shoulder view
       this.playerMesh.visible = true
     }
   }
@@ -723,13 +657,13 @@ export class CameraManager {
   // ============================================================================
 
   /**
-   * Set player position (affects player camera)
+   * Set player position (affects shoulder camera)
    */
   public setPlayerPosition(position: THREE.Vector3): void {
     this.playerPosition.copy(position)
-    if (this.currentMode === 'player') {
-      this.playerCamera.position.copy(position)
-      this.playerCamera.position.y += this.playerHeight
+    if (this.currentMode === 'shoulder') {
+      this.shoulderCamera.position.copy(position)
+      this.shoulderCamera.position.y += this.playerHeight
     }
   }
 
@@ -759,13 +693,6 @@ export class CameraManager {
   }
 
   /**
-   * Get orthographic camera (for zoom control)
-   */
-  public getOrthographicCamera(): THREE.OrthographicCamera {
-    return this.orthographicCamera
-  }
-
-  /**
    * Get current camera mode
    */
   public getCurrentMode(): CameraMode {
@@ -773,75 +700,32 @@ export class CameraManager {
   }
 
   /**
-   * Get current third person view
-   */
-  public getCurrentThirdPersonView(): ThirdPersonView {
-    return this.currentThirdPersonView
-  }
-
-  /**
-   * Set third person view mode
-   */
-  public setThirdPersonView(view: ThirdPersonView): void {
-    if (this.currentThirdPersonView === view) return
-    
-    console.log(`📷 Switching third person view: ${this.currentThirdPersonView} → ${view}`)
-    this.currentThirdPersonView = view
-    
-    // Toggle spotlight visibility
-    if (this.playerSpotlight) {
-      this.playerSpotlight.visible = (view === 'overhead')
-      console.log(`💡 Spotlight ${view === 'overhead' ? 'ENABLED' : 'DISABLED'} for ${view} view`)
-    }
-    
-    // Reset camera offset for smooth transition
-    const offsetConfig = this.thirdPersonOffsets.get(view)
-    if (offsetConfig) {
-      // Immediately set target offset
-      const playerRotation = this.playerControls.yaw
-      const rotationMatrix = new THREE.Matrix4().makeRotationY(playerRotation)
-      this.targetCameraOffset.copy(offsetConfig.position)
-      this.targetCameraOffset.applyMatrix4(rotationMatrix)
-    }
-  }
-
-  /**
-   * Cycle to next third person view
-   */
-  public cycleThirdPersonView(): void {
-    const views: ThirdPersonView[] = ['shoulder', 'overhead']
-    const currentIndex = views.indexOf(this.currentThirdPersonView)
-    const nextIndex = (currentIndex + 1) % views.length
-    this.setThirdPersonView(views[nextIndex])
-  }
-
-  /**
    * Register player mesh for visibility control
    */
   public registerPlayerMesh(mesh: THREE.Object3D): void {
     this.playerMesh = mesh
-    // Initially show mesh (third person is default)
+    // Always show mesh in shoulder view
     if (this.playerMesh) {
       this.playerMesh.visible = true
     }
   }
 
   /**
-   * Get system camera
+   * Get free view camera
    */
-  public getSystemCamera(): THREE.PerspectiveCamera {
-    return this.systemCamera
+  public getFreeViewCamera(): THREE.PerspectiveCamera {
+    return this.freeViewCamera
   }
 
   /**
-   * Get player camera
+   * Get shoulder camera
    */
-  public getPlayerCamera(): THREE.PerspectiveCamera {
-    return this.playerCamera
+  public getShoulderCamera(): THREE.PerspectiveCamera {
+    return this.shoulderCamera
   }
 
   /**
-   * Get orbit controls (for system camera)
+   * Get orbit controls (for free view camera)
    */
   public getOrbitControls(): OrbitControls {
     return this.orbitControls
@@ -862,24 +746,59 @@ export class CameraManager {
   }
 
   /**
-   * Update player camera rotation from gamepad input
+   * Update camera rotation from gamepad input (works for both shoulder and freeview/orbital modes)
    * @param deltaX - Right stick horizontal movement (-1 to 1)
    * @param deltaY - Right stick vertical movement (-1 to 1)
    * @param deltaTime - Time since last frame in seconds
    */
   public updatePlayerCameraFromGamepad(deltaX: number, deltaY: number, deltaTime: number): void {
-    if (!this.playerControls.enabled || this.currentMode !== 'player') {
-      return
+    if (this.currentMode === 'shoulder') {
+      // Shoulder mode: direct camera control
+      if (!this.playerControls.enabled) {
+        return
+      }
+
+      // Apply gamepad sensitivity (higher than mouse for responsiveness)
+      const gamepadSensitivity = this.playerControls.sensitivity * 100 // Scale up for gamepad
+      
+      this.playerControls.yaw -= deltaX * gamepadSensitivity * deltaTime * 60 // Scale by deltaTime and fps
+      this.playerControls.pitch += deltaY * gamepadSensitivity * deltaTime * 60  // INVERTED: Changed -= to +=
+
+      // Clamp pitch to prevent over-rotation
+      this.playerControls.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.playerControls.pitch))
+    } else if (this.currentMode === 'freeview') {
+      // Free View mode: manually rotate camera using spherical coordinates
+      // This gives smooth rotation similar to OrbitControls mouse dragging
+      const rotateSpeed = 0.08 // Gamepad rotation speed
+      
+      // Get current camera position relative to target
+      const offset = new THREE.Vector3()
+      offset.copy(this.freeViewCamera.position).sub(this.orbitControls.target)
+      
+      // Convert to spherical coordinates
+      const spherical = new THREE.Spherical()
+      spherical.setFromVector3(offset)
+      
+      // Apply rotation deltas (with damping from OrbitControls)
+      spherical.theta -= deltaX * rotateSpeed * deltaTime * 60
+      spherical.phi -= deltaY * rotateSpeed * deltaTime * 60
+      
+      // Clamp phi to prevent gimbal lock (same limits as OrbitControls)
+      spherical.phi = Math.max(
+        this.orbitControls.minPolarAngle,
+        Math.min(this.orbitControls.maxPolarAngle, spherical.phi)
+      )
+      
+      // Convert back to Cartesian and update camera position
+      offset.setFromSpherical(spherical)
+      this.freeViewCamera.position.copy(this.orbitControls.target).add(offset)
+      this.freeViewCamera.lookAt(this.orbitControls.target)
+      
+      // Update orbit camera offset
+      if (this.orbitCameraOffset) {
+        this.orbitCameraOffset.copy(offset)
+      }
     }
-
-    // Apply gamepad sensitivity (higher than mouse for responsiveness)
-    const gamepadSensitivity = this.playerControls.sensitivity * 100 // Scale up for gamepad
-    
-    this.playerControls.yaw -= deltaX * gamepadSensitivity * deltaTime * 60 // Scale by deltaTime and fps
-    this.playerControls.pitch += deltaY * gamepadSensitivity * deltaTime * 60  // INVERTED: Changed -= to +=
-
-    // Clamp pitch to prevent over-rotation
-    this.playerControls.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.playerControls.pitch))
   }
 
   /**
@@ -899,19 +818,11 @@ export class CameraManager {
   private handleResize = (): void => {
     const aspect = window.innerWidth / window.innerHeight
     
-    this.systemCamera.aspect = aspect
-    this.systemCamera.updateProjectionMatrix()
+    this.freeViewCamera.aspect = aspect
+    this.freeViewCamera.updateProjectionMatrix()
     
-    this.playerCamera.aspect = aspect
-    this.playerCamera.updateProjectionMatrix()
-    
-    // Update orthographic camera aspect ratio
-    const frustumSize = this.config.orthographicCamera.frustumSize
-    this.orthographicCamera.left = frustumSize * aspect / -2
-    this.orthographicCamera.right = frustumSize * aspect / 2
-    this.orthographicCamera.top = frustumSize / 2
-    this.orthographicCamera.bottom = frustumSize / -2
-    this.orthographicCamera.updateProjectionMatrix()
+    this.shoulderCamera.aspect = aspect
+    this.shoulderCamera.updateProjectionMatrix()
   }
 
   /**
@@ -921,13 +832,13 @@ export class CameraManager {
     return {
       currentMode: this.currentMode,
       isTransitioning: this.isTransitioning,
-      systemCamera: {
-        position: this.systemCamera.position.toArray(),
-        rotation: this.systemCamera.rotation.toArray()
+      freeViewCamera: {
+        position: this.freeViewCamera.position.toArray(),
+        rotation: this.freeViewCamera.rotation.toArray()
       },
-      playerCamera: {
-        position: this.playerCamera.position.toArray(),
-        rotation: this.playerCamera.rotation.toArray()
+      shoulderCamera: {
+        position: this.shoulderCamera.position.toArray(),
+        rotation: this.shoulderCamera.rotation.toArray()
       },
       playerControls: {
         enabled: this.playerControls.enabled,
@@ -944,38 +855,6 @@ export class CameraManager {
   public setLandSystem(landSystem: any): void {
     this.landSystem = landSystem
     console.log('📷 Land system linked to CameraManager for spotlight updates')
-  }
-
-  /**
-   * Update a specific view's camera offset
-   */
-  public updateViewOffset(view: ThirdPersonView, offset: Partial<ThirdPersonCameraOffset>): void {
-    const currentOffset = this.thirdPersonOffsets.get(view)
-    if (currentOffset) {
-      const updated = { ...currentOffset, ...offset }
-      this.thirdPersonOffsets.set(view, updated)
-      console.log(`📷 Updated ${view} camera view:`, offset)
-    }
-  }
-
-  /**
-   * Get a view's camera offset
-   */
-  public getViewOffset(view: ThirdPersonView): ThirdPersonCameraOffset | undefined {
-    return this.thirdPersonOffsets.get(view)
-  }
-
-  /**
-   * Update orthographic camera frustum size
-   */
-  public updateOrthographicFrustum(frustumSize: number): void {
-    const aspect = this.container.clientWidth / this.container.clientHeight
-    this.orthographicCamera.left = frustumSize * aspect / -2
-    this.orthographicCamera.right = frustumSize * aspect / 2
-    this.orthographicCamera.top = frustumSize / 2
-    this.orthographicCamera.bottom = frustumSize / -2
-    this.orthographicCamera.updateProjectionMatrix()
-    console.log(`📷 Updated orthographic frustum size: ${frustumSize}`)
   }
 
   /**

@@ -624,6 +624,10 @@ class LandSystem {
     this.landUniforms.uSeaLevel.value = level
   }
 
+  public getLandUniforms(): { [key: string]: { value: any } } {
+    return this.landUniforms
+  }
+
   public removeLandPiece(id: string): boolean {
     const index = this.landPieces.findIndex(piece => piece.id === id)
     if (index !== -1) {
@@ -926,6 +930,7 @@ class IntegratedThreeJSApp {
         this.scene, 
         this.collisionSystem, 
         this.cameraManager,
+        this.landSystem?.getLandUniforms(), // Pass land lighting uniforms
         {
           height: 1.8,
           radius: 0.5,
@@ -943,6 +948,38 @@ class IntegratedThreeJSApp {
     // Initialize gamepad handler and connect to player controller
     this.gamepadHandler = this.inputSystem.createGamepadHandler((input) => {
       this.playerController.handleGamepadInput(input)
+      
+      // Handle camera mode toggle (right stick button / R3)
+      if (input.cameraMode) {
+        const currentMode = this.cameraManager.getCurrentMode()
+        const newMode = currentMode === 'freeview' ? 'shoulder' : 'freeview'
+        
+        // Use immediate switch with pointer lock request for gamepad-initiated switches
+        this.cameraManager.switchCamera(newMode, true)
+        
+        // Update the indicator
+        this.updateCameraModeIndicator(newMode)
+        
+        // Toggle player debug wireframe based on debug mode and camera mode
+        if (newMode === 'shoulder' && this.debugState.active) {
+          this.playerController.setDebugVisible(true)
+        } else {
+          this.playerController.setDebugVisible(false)
+        }
+        
+        // Show temporary message
+        if (newMode === 'shoulder') {
+          this.showTemporaryMessage('SHOULDER Camera - Press R3 for Free View', 2000)
+        } else {
+          this.showTemporaryMessage('FREE VIEW Camera - Press R3 for Shoulder View', 2000)
+        }
+      }
+      
+      // Handle menu/pause button (start button)
+      if (input.menu) {
+        console.log('🎮 Menu/Pause button pressed (gamepad)')
+        // TODO: Implement menu/pause functionality
+      }
     })
     this.inputSystem.addHandler(this.gamepadHandler)
     
@@ -1270,10 +1307,8 @@ class IntegratedThreeJSApp {
     // Enable performance monitoring
     performanceMonitor.enable()
     
-    // Show player debug wireframe if in player camera mode
-    if (this.cameraManager.getCurrentMode() === 'player') {
-      this.playerController.setDebugVisible(true)
-    }
+    // Show player debug wireframe (camera mode check removed - no 'player' mode exists)
+    // this.playerController.setDebugVisible(true)
     
     logger.info(LogModule.SYSTEM, 'Debug mode enabled with centralized GUI Manager and Parameter GUI')
   }
@@ -1371,7 +1406,8 @@ class IntegratedThreeJSApp {
     this.setupCameraSwitching()
     
     // Initialize ObjectLoader with required systems
-    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem)
+    // Initialize ObjectLoader with landUniforms for shader materials
+    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem, this.landSystem?.getLandUniforms())
     
     // Load all objects using the unified ObjectLoader system
     await ObjectLoader.loadDefaultScene()
@@ -1461,10 +1497,10 @@ class IntegratedThreeJSApp {
     
     // Add keyboard listener for camera switching
     document.addEventListener('keydown', (event) => {
-      // C key - Switch between system and player cameras
+      // C key - Toggle between FREE VIEW and SHOULDER cameras
       if (event.code === 'KeyC') {
         const currentMode = this.cameraManager.getCurrentMode()
-        const newMode = currentMode === 'system' ? 'player' : 'system'
+        const newMode = currentMode === 'freeview' ? 'shoulder' : 'freeview'
         
         // Use immediate switch with pointer lock request for user-initiated switches
         this.cameraManager.switchCamera(newMode, true)
@@ -1473,7 +1509,7 @@ class IntegratedThreeJSApp {
         this.updateCameraModeIndicator(newMode)
         
         // Toggle player debug wireframe based on debug mode and camera mode
-        if (newMode === 'player' && this.debugState.active) {
+        if (newMode === 'shoulder' && this.debugState.active) {
           this.playerController.setDebugVisible(true)
         } else {
           this.playerController.setDebugVisible(false)
@@ -1481,25 +1517,18 @@ class IntegratedThreeJSApp {
         
         // console.log(`📷 Switched to ${newMode} camera`)
         
-        // Additional guidance for player camera
-        if (newMode === 'player') {
-          const view = this.cameraManager.getCurrentThirdPersonView()
-          this.showTemporaryMessage(`Player Mode: ${view.toUpperCase()} view - V to cycle views`, 3000)
+        // Additional guidance for camera modes
+        if (newMode === 'shoulder') {
+          this.showTemporaryMessage('SHOULDER Camera - Press C for Free View', 2000)
         } else {
-          this.showTemporaryMessage('System Mode - Press C for player movement', 2000)
+          this.showTemporaryMessage('FREE VIEW Camera - Press C for Shoulder View', 2000)
         }
       }
       
-      // V key - Cycle through third person views (only in player mode)
-      if (event.code === 'KeyV') {
-        const currentMode = this.cameraManager.getCurrentMode()
-        if (currentMode === 'player') {
-          this.cameraManager.cycleThirdPersonView()
-          const newView = this.cameraManager.getCurrentThirdPersonView()
-          this.updateCameraViewIndicator(newView)
-          this.showTemporaryMessage(`Camera View: ${newView.toUpperCase()}`, 2000)
-          console.log(`📷 Switched to ${newView} third person view`)
-        }
+      // Enter/Return key - Menu/Pause (placeholder for future menu system)
+      if (event.code === 'Enter' || event.code === 'NumpadEnter') {
+        console.log('🎮 Menu/Pause button pressed')
+        // TODO: Implement menu/pause functionality
       }
     })
     
@@ -1531,13 +1560,10 @@ class IntegratedThreeJSApp {
       pointer-events: none;
       transition: all 0.3s ease;
     `
-    // Initialize with current camera mode and view
+    // Initialize with current camera mode
     const currentMode = this.cameraManager.getCurrentMode()
-    const currentView = this.cameraManager.getCurrentThirdPersonView()
-    indicator.textContent = currentMode === 'player' 
-      ? `Player Camera: ${currentView.toUpperCase()}` 
-      : 'System Camera'
-    if (currentMode === 'player') {
+    indicator.textContent = currentMode === 'freeview' ? 'Camera: FREE VIEW' : 'Camera: SHOULDER'
+    if (currentMode === 'freeview') {
       indicator.style.background = 'rgba(0, 128, 0, 0.8)'
     }
     document.body.appendChild(indicator)
@@ -1546,29 +1572,18 @@ class IntegratedThreeJSApp {
   /**
    * Update the camera mode indicator
    */
-  private updateCameraModeIndicator(mode: 'system' | 'player'): void {
+  private updateCameraModeIndicator(mode: 'freeview' | 'shoulder'): void {
     const indicator = document.getElementById('camera-mode-indicator')
     if (indicator) {
-      if (mode === 'player') {
-        const currentView = this.cameraManager.getCurrentThirdPersonView()
-        indicator.textContent = `Player Camera: ${currentView.toUpperCase()}`
+      if (mode === 'shoulder') {
+        indicator.textContent = 'Camera: SHOULDER'
         indicator.style.background = 'rgba(0, 128, 0, 0.8)'
         indicator.style.color = 'white'
       } else {
-        indicator.textContent = 'System Camera'
-        indicator.style.background = 'rgba(0, 0, 0, 0.7)'
+        indicator.textContent = 'Camera: FREE VIEW'
+        indicator.style.background = 'rgba(30, 144, 255, 0.8)'
         indicator.style.color = 'white'
       }
-    }
-  }
-
-  /**
-   * Update the camera view indicator (for third person view changes)
-   */
-  private updateCameraViewIndicator(view: string): void {
-    const indicator = document.getElementById('camera-mode-indicator')
-    if (indicator) {
-      indicator.textContent = `Player Camera: ${view.toUpperCase()}`
     }
   }
 
@@ -2042,10 +2057,8 @@ class IntegratedThreeJSApp {
       this.lastTime = currentTime
       this.frameCount++
       
-      // Update controls (only for system camera)
-      if (this.cameraManager.getCurrentMode() === 'system') {
-        this.controls.update()
-      }
+      // Update controls (camera system manages this internally now)
+      // this.controls.update()
       
       // Update camera manager
       this.cameraManager.update(deltaTime)

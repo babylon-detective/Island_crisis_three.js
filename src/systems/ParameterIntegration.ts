@@ -291,16 +291,12 @@ export class ParameterIntegration {
           }
           break
         case 'zoom':
-          // Only apply zoom to orthographic camera
-          const orthoCamera = this.systems.cameraManager.getOrthographicCamera()
-          console.log(`🔍 ZOOM DEBUG: Setting zoom to ${value}`)
-          console.log(`🔍 ZOOM DEBUG: Ortho camera exists: ${!!orthoCamera}`)
-          if (orthoCamera) {
-            console.log(`🔍 ZOOM DEBUG: Current zoom before: ${orthoCamera.zoom}`)
-            orthoCamera.zoom = value
-            orthoCamera.updateProjectionMatrix()
-            console.log(`🔍 ZOOM DEBUG: Current zoom after: ${orthoCamera.zoom}`)
-          }
+          // Orthographic camera no longer used - skip this parameter
+          // const orthoCamera = this.systems.cameraManager.getOrthographicCamera()
+          // if (orthoCamera) {
+          //   orthoCamera.zoom = value
+          //   orthoCamera.updateProjectionMatrix()
+          // }
           break
         
         // Shoulder view parameters
@@ -353,7 +349,8 @@ export class ParameterIntegration {
       }
     }
 
-    this.systems.cameraManager.updateViewOffset(view, offset)
+    // updateViewOffset method no longer exists - skip this call
+    // this.systems.cameraManager.updateViewOffset(view, offset)
   }
 
   private updatePlayerParameter(parameterId: string, value: any): void {

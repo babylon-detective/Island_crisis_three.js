@@ -17,6 +17,8 @@ import crystalVertexShader from './shaders/crystal-vertex.glsl'
 import crystalFragmentShader from './shaders/crystal-fragment.glsl'
 import titlescreenVertexShader from './shaders/titlescreen-vertex.glsl'
 import titlescreenFragmentShader from './shaders/titlescreen-fragment.glsl'
+import defaultLightVertexShader from './shaders/default-light-vertex.glsl'
+import defaultLightFragmentShader from './shaders/default-light-fragment.glsl'
 
 // Shader registry for easy access
 export const SHADERS = {
@@ -38,6 +40,8 @@ export const SHADERS = {
   'src/shaders/crystal-fragment.glsl': crystalFragmentShader,
   'src/shaders/titlescreen-vertex.glsl': titlescreenVertexShader,
   'src/shaders/titlescreen-fragment.glsl': titlescreenFragmentShader,
+  'src/shaders/default-light-vertex.glsl': defaultLightVertexShader,
+  'src/shaders/default-light-fragment.glsl': defaultLightFragmentShader,
 } as const
 
 export type ShaderPath = keyof typeof SHADERS

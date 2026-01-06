@@ -5,7 +5,7 @@ import { ConfigManager } from './ConfigManager'
 export interface ManagedObject {
   uuid: string
   id: string
-  type: 'animated' | 'shader' | 'tsl' | 'ocean' | 'land' | 'hologram' | 'custom'
+  type: 'animated' | 'shader' | 'tsl' | 'ocean' | 'land' | 'hologram' | 'custom' | 'model'
   mesh: THREE.Mesh
   shadowMesh?: THREE.Mesh
   userData: any
@@ -24,7 +24,7 @@ export interface ManagedObject {
 
 export interface ObjectConfig {
   id: string
-  type: 'animated' | 'shader' | 'tsl' | 'ocean' | 'land' | 'hologram' | 'custom'
+  type: 'animated' | 'shader' | 'tsl' | 'ocean' | 'land' | 'hologram' | 'custom' | 'model'
   geometry: THREE.BufferGeometry
   material: THREE.Material
   position?: THREE.Vector3

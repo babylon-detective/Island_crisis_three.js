@@ -326,7 +326,8 @@ class GamepadInputHandler extends BaseInputHandler {
     const jump = gamepad.buttons.a
     const run = gamepad.buttons.b || gamepad.rt > 0.5 // B button or right trigger
     const action = gamepad.buttons.x
-    const cameraMode = this.wasButtonPressed('y', gamepad) // Y button for camera mode toggle
+    const cameraMode = this.wasButtonPressed('rs', gamepad) // Right stick button (R3) for camera mode toggle
+    const menu = this.wasButtonPressed('start', gamepad) // Start button for menu/pause
 
     // Send processed input to player controller
     if (this.onPlayerInput) {
@@ -336,7 +337,8 @@ class GamepadInputHandler extends BaseInputHandler {
         jump,
         run,
         action,
-        cameraMode
+        cameraMode,
+        menu
       })
     }
 
@@ -737,6 +739,7 @@ export class InputSystem {
       run: boolean
       action: boolean
       cameraMode: boolean
+      menu: boolean
     }) => void
   ): GamepadInputHandler {
     return new GamepadInputHandler(onPlayerInput)

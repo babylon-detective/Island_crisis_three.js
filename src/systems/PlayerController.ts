@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { CollisionSystem, CollisionVolume, CollidableObject } from './CollisionSystem'
 import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
+import { ObjectLoader } from './ObjectLoader'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -56,6 +57,7 @@ export class PlayerController {
   private scene: THREE.Scene
   private collisionSystem: CollisionSystem
   private cameraManager: CameraManager
+  private landUniforms?: { [key: string]: { value: any } }
   
   // Configuration
   private config: PlayerConfig
@@ -111,24 +113,28 @@ export class PlayerController {
     run: boolean
     action: boolean
     cameraMode: boolean
+    menu: boolean
   } = {
     movement: new THREE.Vector2(),
     camera: new THREE.Vector2(),
     jump: false,
     run: false,
     action: false,
-    cameraMode: false
+    cameraMode: false,
+    menu: false
   }
   
   constructor(
     scene: THREE.Scene,
     collisionSystem: CollisionSystem,
     cameraManager: CameraManager,
+    landUniforms?: { [key: string]: { value: any } },
     config?: Partial<PlayerConfig>
   ) {
     this.scene = scene
     this.collisionSystem = collisionSystem
     this.cameraManager = cameraManager
+    this.landUniforms = landUniforms
     
     // Initialize configuration
     this.config = {
@@ -174,82 +180,69 @@ export class PlayerController {
     this.boundTouchEnd = this.handleTouchEnd.bind(this)
     this.boundTouchCancel = this.handleTouchCancel.bind(this)
     
-    // Initialize player
-    this.initializePlayer()
-    this.setupInputHandlers()
-    this.registerWithCollisionSystem()
+    // Initialize player (async, but don't await to avoid blocking constructor)
+    this.initializePlayer().then(() => {
+      this.registerWithCollisionSystem()
+      logger.info(LogModule.PLAYER, 'PlayerController fully initialized')
+    }).catch(error => {
+      logger.error(LogModule.PLAYER, 'PlayerController initialization failed:', error)
+    })
     
-    logger.info(LogModule.PLAYER, 'PlayerController initialized')
+    this.setupInputHandlers()
+    
+    logger.info(LogModule.PLAYER, 'PlayerController initialized (loading player model...)')
   }
 
   // ============================================================================
   // INITIALIZATION
   // ============================================================================
 
-  private initializePlayer(): void {
-    // Create player mesh group (body + head)
-    const playerGroup = new THREE.Group()
-    playerGroup.name = 'PlayerMesh'
-    
-    // Create body (capsule-like shape)
-    const bodyGeometry = new THREE.CylinderGeometry(
-      this.config.radius,
-      this.config.radius,
-      this.config.height * 0.7, // Body is 70% of total height
-      8
-    )
-    
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-      color: 0x4a90e2,
-      emissive: 0x2a5080,
-      emissiveIntensity: 0.3,
-      roughness: 0.7,
-      metalness: 0.3
-    })
-    
-    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial)
-    bodyMesh.position.y = -this.config.height * 0.15 // Lower body position
-    bodyMesh.castShadow = true
-    bodyMesh.receiveShadow = true
-    playerGroup.add(bodyMesh)
-    
-    // Create head (sphere)
-    const headGeometry = new THREE.SphereGeometry(this.config.radius * 0.8, 8, 8)
-    const headMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffcc99, // Skin tone
-      emissive: 0xaa8866,
-      emissiveIntensity: 0.2,
-      roughness: 0.8,
-      metalness: 0.1
-    })
-    
-    const headMesh = new THREE.Mesh(headGeometry, headMaterial)
-    headMesh.position.y = this.config.height * 0.4 // Top of body
-    headMesh.castShadow = true
-    headMesh.receiveShadow = true
-    playerGroup.add(headMesh)
-    
-    // Add a simple face indicator (eyes)
-    const eyeGeometry = new THREE.SphereGeometry(0.08, 4, 4)
-    const eyeMaterial = new THREE.MeshStandardMaterial({
-      color: 0x000000,
-      emissive: 0x333333
-    })
-    
-    const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
-    leftEye.position.set(-0.15, this.config.height * 0.42, this.config.radius * 0.6)
-    playerGroup.add(leftEye)
-    
-    const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
-    rightEye.position.set(0.15, this.config.height * 0.42, this.config.radius * 0.6)
-    playerGroup.add(rightEye)
-    
-    this.mesh = playerGroup as any // Type cast for compatibility
-    this.mesh.position.copy(this.state.position)
-    this.scene.add(this.mesh)
-    
-    // Register mesh with camera manager for visibility control
-    this.cameraManager.registerPlayerMesh(this.mesh)
+  private async initializePlayer(): Promise<void> {
+    try {
+      // Load player model from GLB file with default-light shader
+      const playerModel = await ObjectLoader.loadGLTFModel(
+        '/models/characters/Ideal_Low_Poly_Male_01.glb',
+        'player-character',
+        [0, 0, 0],
+        [0, 0, 0],
+        [1, 1, 1],
+        true, // Use custom shader for player (default-light)
+        this.landUniforms // Pass land lighting uniforms
+      )
+      
+      // Configure the model
+      playerModel.name = 'PlayerMesh'
+      
+      // Scale and position the model based on player config
+      // Assuming the model is roughly 1.8 units tall, scale to match config.height
+      const modelHeight = 1.8 // Typical character model height
+      const scale = this.config.height / modelHeight
+      playerModel.scale.setScalar(scale)
+      
+      // Center the model at the player position
+      // Most character models have their origin at the feet, which is what we want
+      
+      // Enable shadows for all meshes in the model
+      playerModel.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.castShadow = true
+          child.receiveShadow = true
+        }
+      })
+      
+      this.mesh = playerModel as any // Type cast for compatibility
+      this.mesh.position.copy(this.state.position)
+      // Model is already added to scene by ObjectLoader, just update position
+      
+      // Register mesh with camera manager for visibility control
+      this.cameraManager.registerPlayerMesh(this.mesh)
+      
+      logger.info(LogModule.PLAYER, 'Player model loaded successfully')
+    } catch (error) {
+      logger.error(LogModule.PLAYER, 'Failed to load player model, using fallback', error)
+      // Fallback to generated mesh
+      this.createFallbackPlayerMesh()
+    }
     
     // Create collision volume
     this.collisionVolume = {
@@ -265,6 +258,72 @@ export class PlayerController {
     
     // Create debug wireframe
     this.createDebugWireframe()
+  }
+
+  private createFallbackPlayerMesh(): void {
+    // Original generated mesh code as fallback
+    const playerGroup = new THREE.Group()
+    playerGroup.name = 'PlayerMesh'
+    
+    // Create body (capsule-like shape)
+    const bodyGeometry = new THREE.CylinderGeometry(
+      this.config.radius,
+      this.config.radius,
+      this.config.height * 0.7,
+      8
+    )
+    
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a90e2,
+      emissive: 0x2a5080,
+      emissiveIntensity: 0.3,
+      roughness: 0.7,
+      metalness: 0.3
+    })
+    
+    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial)
+    bodyMesh.position.y = -this.config.height * 0.15
+    bodyMesh.castShadow = true
+    bodyMesh.receiveShadow = true
+    playerGroup.add(bodyMesh)
+    
+    // Create head (sphere)
+    const headGeometry = new THREE.SphereGeometry(this.config.radius * 0.8, 8, 8)
+    const headMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffcc99,
+      emissive: 0xaa8866,
+      emissiveIntensity: 0.2,
+      roughness: 0.8,
+      metalness: 0.1
+    })
+    
+    const headMesh = new THREE.Mesh(headGeometry, headMaterial)
+    headMesh.position.y = this.config.height * 0.4
+    headMesh.castShadow = true
+    headMesh.receiveShadow = true
+    playerGroup.add(headMesh)
+    
+    // Add eyes
+    const eyeGeometry = new THREE.SphereGeometry(0.08, 4, 4)
+    const eyeMaterial = new THREE.MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0x333333
+    })
+    
+    const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
+    leftEye.position.set(-0.15, this.config.height * 0.42, this.config.radius * 0.6)
+    playerGroup.add(leftEye)
+    
+    const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial)
+    rightEye.position.set(0.15, this.config.height * 0.42, this.config.radius * 0.6)
+    playerGroup.add(rightEye)
+    
+    this.mesh = playerGroup as any
+    this.mesh.position.copy(this.state.position)
+    this.scene.add(this.mesh)
+    
+    // Register mesh with camera manager
+    this.cameraManager.registerPlayerMesh(this.mesh)
   }
 
   private createDebugWireframe(): void {
@@ -585,6 +644,7 @@ export class PlayerController {
     run: boolean
     action: boolean
     cameraMode: boolean
+    menu: boolean
   }): void {
     this.gamepadInput = {
       movement: input.movement.clone(),
@@ -592,7 +652,8 @@ export class PlayerController {
       jump: input.jump,
       run: input.run,
       action: input.action,
-      cameraMode: input.cameraMode
+      cameraMode: input.cameraMode,
+      menu: input.menu
     }
     
     // CRITICAL FIX: Update input state immediately when gamepad input changes
@@ -610,6 +671,9 @@ export class PlayerController {
     
     // Update collision system
     this.collisionSystem.updatePlayerPosition(this.state.position)
+    
+    // Don't update until player is initialized
+    if (!this.mesh) return
     
     // Always update physics and visuals
     this.updatePhysics(deltaTime)
@@ -831,6 +895,8 @@ export class PlayerController {
   }
 
   private updateVisuals(): void {
+    if (!this.mesh) return // Guard against uninitialized mesh
+    
     // Update mesh position (offset down from eye level)
     const meshPosition = this.state.position.clone()
     meshPosition.y -= this.config.height / 2
@@ -852,18 +918,19 @@ export class PlayerController {
     this.cameraManager.setPlayerPosition(this.state.position)
     
     // Handle camera rotation from gamepad or touch (two fingers)
-    if (this.input.analogCamera && this.input.analogCamera.length() > 0.1) {
+    if (this.input.analogCamera) {
       const cameraX = this.input.analogCamera.x
       const cameraY = this.input.analogCamera.y
       
-      // Apply deadzone
-      const deadzone = 0.05 // Smaller deadzone for touch input
+      // Apply per-component deadzone for precise control
+      const deadzone = 0.05
       const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
       const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
       
-      // Update camera rotation through camera manager
-      // For touch input, pass the raw delta values (they're already scaled in updateInputState)
-      this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+      // Only update camera if at least one axis has input (works for all camera modes including orbital)
+      if (adjustedX !== 0 || adjustedY !== 0) {
+        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+      }
     }
   }
 
@@ -927,7 +994,7 @@ export class PlayerController {
     this.config = { ...this.config, ...config }
     
     // Update collision volume if dimensions changed
-    if (config.radius !== undefined || config.height !== undefined) {
+    if ((config.radius !== undefined || config.height !== undefined) && this.collisionVolume?.dimensions) {
       this.collisionVolume.dimensions.set(
         this.config.radius,
         this.config.height,
