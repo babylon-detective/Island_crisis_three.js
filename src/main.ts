@@ -21,6 +21,8 @@ import { DebugGUIManager } from './systems/DebugGUIManager'
 import { HUDSystem, HUDData } from './systems/HUDSystem'
 import { InputSystem, GamepadInputHandler } from './systems/InputSystem'
 import { RetroPostProcessingSystem } from './systems/RetroPostProcessingSystem'
+import { PauseManager } from './systems/PauseManager'
+import { PauseOverlay } from './systems/PauseOverlay'
 import { SHADERS, ShaderPath } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
@@ -833,6 +835,10 @@ class IntegratedThreeJSApp {
   private gamepadHandler!: GamepadInputHandler
   private retroPostProcessing!: RetroPostProcessingSystem
   
+  // Pause system
+  private pauseManager: PauseManager = new PauseManager()
+  private pauseOverlay: PauseOverlay = new PauseOverlay()
+  
   // Lighting references for dynamic control
   private ambientLight!: THREE.AmbientLight
   private keyLight!: THREE.DirectionalLight
@@ -920,6 +926,11 @@ class IntegratedThreeJSApp {
     // Initialize HUD system
     this.hudSystem = new HUDSystem()
     
+    // Set up pause overlay hide callback
+    this.pauseOverlay.onHide(() => {
+      this.pauseManager.setPaused(false)
+    })
+    
     // Initialize Input system
     this.inputSystem = new InputSystem(this.renderer.domElement as HTMLCanvasElement)
     
@@ -978,7 +989,7 @@ class IntegratedThreeJSApp {
       // Handle menu/pause button (start button)
       if (input.menu) {
         console.log('🎮 Menu/Pause button pressed (gamepad)')
-        // TODO: Implement menu/pause functionality
+        this.togglePause()
       }
     })
     this.inputSystem.addHandler(this.gamepadHandler)
@@ -1276,30 +1287,7 @@ class IntegratedThreeJSApp {
     this.debugState.gui.domElement.style.right = '0px'
     this.container.appendChild(this.debugState.gui.domElement)
     
-    // Initialize the new centralized Debug GUI Manager
-    this.debugState.debugGUIManager = new DebugGUIManager(this.container, {
-      scene: this.scene,
-      camera: this.camera,
-      renderer: this.renderer,
-      objectManager: this.objectManager,
-      animationSystem: this.animationSystem,
-      collisionSystem: this.collisionSystem,
-      cameraManager: this.cameraManager,
-      playerController: this.playerController,
-      oceanLODSystem: this.oceanLODSystem,
-      landSystem: this.landSystem,
-      sky: this.sky,
-      skyConfig: this.skyConfig,
-      deviceType: this.deviceType,
-      inputMethods: this.inputMethods,
-      parameterManager: this.parameterManager,
-      parameterGUI: this.parameterGUI
-    })
-    
-    this.debugState.debugGUIManager.initialize()
-    
-    // Initialize the Parameter GUI
-    this.parameterGUI.initialize()
+    // Note: DebugGUIManager and ParameterGUI removed - using legacy GUI only
     
     // Add helpers
     this.addHelpers()
@@ -1525,10 +1513,10 @@ class IntegratedThreeJSApp {
         }
       }
       
-      // Enter/Return key - Menu/Pause (placeholder for future menu system)
+      // Enter/Return key - Menu/Pause
       if (event.code === 'Enter' || event.code === 'NumpadEnter') {
         console.log('🎮 Menu/Pause button pressed')
-        // TODO: Implement menu/pause functionality
+        this.togglePause()
       }
     })
     
@@ -1630,6 +1618,21 @@ class IntegratedThreeJSApp {
         }, 300)
       }
     }, duration)
+  }
+
+  /**
+   * Toggle the game pause state
+   */
+  private togglePause(): void {
+    if (this.pauseOverlay.isVisible()) {
+      // If pause overlay is visible, hide it and resume
+      this.pauseOverlay.hide()
+      this.pauseManager.setPaused(false)
+    } else {
+      // Show pause overlay and pause the game
+      this.pauseOverlay.show()
+      this.pauseManager.setPaused(true)
+    }
   }
 
   private addLighting(): void {
@@ -2056,6 +2059,17 @@ class IntegratedThreeJSApp {
       const deltaTime = Math.min((currentTime - (this.lastTime || currentTime)) / 1000, 0.1)
       this.lastTime = currentTime
       this.frameCount++
+      
+      // Skip game updates when paused (but still render)
+      if (this.pauseManager.getPaused()) {
+        // Still render the scene even when paused
+        if (this.retroPostProcessing) {
+          this.retroPostProcessing.render()
+        } else {
+          this.renderer.render(this.scene, this.camera)
+        }
+        return
+      }
       
       // Update controls (camera system manages this internally now)
       // this.controls.update()

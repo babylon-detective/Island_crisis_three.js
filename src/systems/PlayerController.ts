@@ -199,14 +199,14 @@ export class PlayerController {
 
   private async initializePlayer(): Promise<void> {
     try {
-      // Load player model from GLB file with default-light shader
+      // Load player model from GLB file with default-character shader
       const playerModel = await ObjectLoader.loadGLTFModel(
         '/models/characters/Ideal_Low_Poly_Male_01.glb',
         'player-character',
         [0, 0, 0],
         [0, 0, 0],
         [1, 1, 1],
-        true, // Use custom shader for player (default-light)
+        true, // Use custom shader for player (default-character)
         this.landUniforms // Pass land lighting uniforms
       )
       

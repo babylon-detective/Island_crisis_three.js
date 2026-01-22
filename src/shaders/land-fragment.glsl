@@ -1,3 +1,5 @@
+#include ./common/lighting-fragment.glsl
+
 uniform float uTime;
 uniform float uElevation;
 uniform float uRoughness;
@@ -6,21 +8,18 @@ uniform vec3 uLandColor;
 uniform vec3 uRockColor;
 uniform vec3 uSandColor;
 uniform float uMoisture;
-uniform vec3 uSunDirection;
-uniform vec3 uSunColor;
-uniform float uSunIntensity;
 uniform float uIslandRadius;
 uniform float uCoastSmoothness;
 uniform float uSeaLevel;
 
-// Spotlight uniforms
-uniform vec3 uSpotlightPosition;
-uniform vec3 uSpotlightDirection;
-uniform vec3 uSpotlightColor;
-uniform float uSpotlightIntensity;
-uniform float uSpotlightAngle;
-uniform float uSpotlightPenumbra;
-uniform float uSpotlightDistance;
+#ifdef USE_SHADOWMAP
+  #if NUM_DIR_LIGHT_SHADOWS > 0
+    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
+  #endif
+  #if NUM_SPOT_LIGHT_SHADOWS > 0
+    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
+  #endif
+#endif
 
 varying vec3 vPosition;
 varying vec3 vNormal;
@@ -82,69 +81,20 @@ void main() {
     // Generate base earth texture
     vec3 earthColor = generateEarthTexture(textureCoord, vElevation, vSlope);
     
-    // === SUN LIGHTING ===
-    vec3 lightDirection = normalize(uSunDirection);
-    vec3 normal = normalize(vNormal);
+    // Calculate shadows
+    float shadow = 1.0;
+    #ifdef USE_SHADOWMAP
+      shadow = calculateShadows(vDirectionalShadowCoord, vSpotLightShadowCoord);
+    #endif
     
-    // Calculate lighting intensity based on sun position
-    float sunDot = max(dot(normal, lightDirection), 0.0);
-    
-    // Add ambient lighting that varies with sun elevation
-    float sunElevation = lightDirection.y;
-    float ambientLevel = mix(0.05, 0.3, max(0.0, sunElevation)); // Very dark at night, brighter during day
-    float lightIntensity = sunDot * 0.8 + ambientLevel;
-    
-    // === SPOTLIGHT LIGHTING ===
-    // Calculate direction from fragment to spotlight
-    vec3 spotlightToFragment = vWorldPosition - uSpotlightPosition;
-    float distanceToSpotlight = length(spotlightToFragment);
-    vec3 spotlightDir = normalize(spotlightToFragment);
-    
-    // Calculate angle between spotlight direction and fragment direction
-    float spotlightDot = dot(normalize(uSpotlightDirection), spotlightDir);
-    float spotlightCutoff = cos(uSpotlightAngle);
-    float spotlightOuterCutoff = cos(uSpotlightAngle + uSpotlightPenumbra);
-    
-    // Smooth falloff at spotlight edges
-    float spotlightEffect = smoothstep(spotlightOuterCutoff, spotlightCutoff, spotlightDot);
-    
-    // Distance attenuation
-    float attenuation = 1.0 - smoothstep(0.0, uSpotlightDistance, distanceToSpotlight);
-    
-    // Calculate spotlight contribution
-    float spotlightNdotL = max(dot(normal, -spotlightDir), 0.0);
-    float spotlightContribution = spotlightEffect * attenuation * spotlightNdotL * uSpotlightIntensity;
-    
-    // Combine sun and spotlight lighting
-    lightIntensity += spotlightContribution * 0.8;
-    
-    // Rim lighting for depth
-    vec3 viewDirection = normalize(cameraPosition - vPosition);
-    float rim = 1.0 - max(dot(viewDirection, normal), 0.0);
-    rim = smoothstep(0.6, 1.0, rim);
-    
-    // Apply lighting to color with sun color influence - modulated by sun intensity
-    vec3 lightColor = mix(vec3(0.2, 0.3, 0.6), uSunColor, max(0.0, sunElevation) * uSunIntensity); // Blue tint at night, sun color during day
-    
-    // Add spotlight color contribution
-    lightColor = mix(lightColor, uSpotlightColor, spotlightContribution * 0.5);
-    
-    vec3 finalColor = earthColor * lightIntensity * lightColor;
-    
-    // Add rim lighting for definition - stronger during day, only when sun is present
-    float rimStrength = mix(0.1, 0.3, max(0.0, sunElevation)) * uSunIntensity;
-    finalColor += rim * earthColor * rimStrength;
-    
-    // Atmospheric perspective (distance fog) - varies with time of day
-    float distance = length(vPosition - cameraPosition);
-    float fogFactor = smoothstep(200.0, 800.0, distance);
-    
-    // Fog color changes from day (light blue) to night (dark blue)
-    vec3 dayFogColor = vec3(0.8, 0.9, 1.0);
-    vec3 nightFogColor = vec3(0.1, 0.2, 0.4);
-    vec3 fogColor = mix(nightFogColor, dayFogColor, max(0.0, sunElevation));
-    
-    finalColor = mix(finalColor, fogColor, fogFactor * 0.3);
+    // Apply lighting using common lighting system
+    vec3 finalColor = applyLighting(
+      earthColor,
+      vNormal,
+      vPosition,
+      vWorldPosition,
+      shadow
+    );
     
     // Add subtle color variation based on elevation
     float elevationTint = vElevation * 0.1;

@@ -37,7 +37,7 @@ Key commands include:
 - `debugObject(id)`: Debug specific object
 - `moveObject(id, x, y, z)`: Move object to position
 - `showSystemStatus()`: Complete system overview
-- `migrateToObjectManager()`: Migrate legacy objects
+- `migrateToObjectManager()`: Migrate unmanaged objects
 
 ### 💾 Persistent Positions & Locking:
 - ObjectManager automatically saves object states to localStorage

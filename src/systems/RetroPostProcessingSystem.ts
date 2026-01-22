@@ -11,6 +11,8 @@ export class RetroPostProcessingSystem {
   private camera: THREE.Camera
   private composer: any // EffectComposer
   private renderTarget: THREE.WebGLRenderTarget
+  private depthRenderTarget: THREE.WebGLRenderTarget
+  private normalRenderTarget: THREE.WebGLRenderTarget
   private retroPass: THREE.ShaderMaterial
   private retroQuad: THREE.Mesh
   private retroScene: THREE.Scene
@@ -23,7 +25,13 @@ export class RetroPostProcessingSystem {
     ditherAmount: 0.3,     // Dithering intensity (0.0-1.0)
     contrast: 1.2,         // Contrast boost
     saturation: 1.1,       // Saturation boost
-    resolutionScale: 0.75   // Downsample resolution (0.5 = half res, 1.0 = full)
+    resolutionScale: 0.75, // Downsample resolution (0.5 = half res, 1.0 = full)
+    // Edge detection settings
+    edgeThickness: 1.5,         // Edge thickness multiplier
+    edgeIntensity: 0.8,         // Edge opacity (0.0-1.0)
+    edgeColor: new THREE.Color(0x000000), // Edge color (default black)
+    depthEdgeThreshold: 0.01,   // Depth edge sensitivity (0.0 = off)
+    normalEdgeThreshold: 0.3    // Normal edge sensitivity (0.0 = off)
   }
   
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera) {
@@ -39,6 +47,22 @@ export class RetroPostProcessingSystem {
       minFilter: THREE.NearestFilter,  // Pixelated look
       magFilter: THREE.NearestFilter,  // Pixelated look
       format: THREE.RGBAFormat
+    })
+    
+    // Create depth render target for edge detection
+    this.depthRenderTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.FloatType
+    })
+    
+    // Create normal render target for edge detection
+    this.normalRenderTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.FloatType
     })
     
     // Create retro post-processing shader
@@ -136,13 +160,20 @@ export class RetroPostProcessingSystem {
     return new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
+        tDepth: { value: null },
+        tNormal: { value: null },
         uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
         uTime: { value: 0 },
         uPixelSize: { value: this.config.pixelSize },
         uColorLevels: { value: this.config.colorLevels },
         uDitherAmount: { value: this.config.ditherAmount },
         uContrast: { value: this.config.contrast },
-        uSaturation: { value: this.config.saturation }
+        uSaturation: { value: this.config.saturation },
+        uEdgeThickness: { value: this.config.edgeThickness },
+        uEdgeIntensity: { value: this.config.edgeIntensity },
+        uEdgeColor: { value: this.config.edgeColor },
+        uDepthEdgeThreshold: { value: this.config.depthEdgeThreshold },
+        uNormalEdgeThreshold: { value: this.config.normalEdgeThreshold }
       },
       vertexShader,
       fragmentShader
@@ -173,14 +204,28 @@ export class RetroPostProcessingSystem {
     this.retroPass.uniforms.uDitherAmount.value = this.config.ditherAmount
     this.retroPass.uniforms.uContrast.value = this.config.contrast
     this.retroPass.uniforms.uSaturation.value = this.config.saturation
+    this.retroPass.uniforms.uEdgeThickness.value = this.config.edgeThickness
+    this.retroPass.uniforms.uEdgeIntensity.value = this.config.edgeIntensity
+    this.retroPass.uniforms.uEdgeColor.value.copy(this.config.edgeColor)
+    this.retroPass.uniforms.uDepthEdgeThreshold.value = this.config.depthEdgeThreshold
+    this.retroPass.uniforms.uNormalEdgeThreshold.value = this.config.normalEdgeThreshold
+    
+    const oldRenderTarget = this.renderer.getRenderTarget()
     
     // Render scene to render target (downsampled)
-    const oldRenderTarget = this.renderer.getRenderTarget()
     this.renderer.setRenderTarget(this.renderTarget)
     this.renderer.render(this.scene, currentCamera)
     
-    // Set the render target texture for post-processing
+    // Render depth buffer
+    this.renderDepth(currentCamera)
+    
+    // Render normal buffer
+    this.renderNormals(currentCamera)
+    
+    // Set the render target textures for post-processing
     this.retroPass.uniforms.tDiffuse.value = this.renderTarget.texture
+    this.retroPass.uniforms.tDepth.value = this.depthRenderTarget.texture
+    this.retroPass.uniforms.tNormal.value = this.normalRenderTarget.texture
     
     // Create orthographic camera for fullscreen quad
     const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
@@ -194,6 +239,58 @@ export class RetroPostProcessingSystem {
   }
   
   /**
+   * Render depth buffer for edge detection
+   */
+  private renderDepth(camera: THREE.Camera): void {
+    // Store original materials
+    const originalMaterials = new Map<THREE.Object3D, THREE.Material | THREE.Material[]>()
+    
+    this.scene.traverse((object) => {
+      if ((object as THREE.Mesh).isMesh) {
+        const mesh = object as THREE.Mesh
+        originalMaterials.set(mesh, mesh.material)
+        // Use MeshDepthMaterial to render depth
+        mesh.material = new THREE.MeshDepthMaterial({
+          depthPacking: THREE.RGBADepthPacking
+        })
+      }
+    })
+    
+    this.renderer.setRenderTarget(this.depthRenderTarget)
+    this.renderer.render(this.scene, camera)
+    
+    // Restore original materials
+    originalMaterials.forEach((material, mesh) => {
+      (mesh as THREE.Mesh).material = material
+    })
+  }
+  
+  /**
+   * Render normal buffer for edge detection
+   */
+  private renderNormals(camera: THREE.Camera): void {
+    // Store original materials
+    const originalMaterials = new Map<THREE.Object3D, THREE.Material | THREE.Material[]>()
+    
+    this.scene.traverse((object) => {
+      if ((object as THREE.Mesh).isMesh) {
+        const mesh = object as THREE.Mesh
+        originalMaterials.set(mesh, mesh.material)
+        // Use MeshNormalMaterial to render normals
+        mesh.material = new THREE.MeshNormalMaterial()
+      }
+    })
+    
+    this.renderer.setRenderTarget(this.normalRenderTarget)
+    this.renderer.render(this.scene, camera)
+    
+    // Restore original materials
+    originalMaterials.forEach((material, mesh) => {
+      (mesh as THREE.Mesh).material = material
+    })
+  }
+  
+  /**
    * Handle window resize
    */
   public handleResize(): void {
@@ -201,6 +298,8 @@ export class RetroPostProcessingSystem {
     const height = Math.floor(window.innerHeight * this.config.resolutionScale)
     
     this.renderTarget.setSize(width, height)
+    this.depthRenderTarget.setSize(width, height)
+    this.normalRenderTarget.setSize(width, height)
     this.retroPass.uniforms.uResolution.value.set(width, height)
   }
   
@@ -242,6 +341,29 @@ export class RetroPostProcessingSystem {
   }
   
   /**
+   * Set edge detection parameters
+   */
+  public setEdgeThickness(thickness: number): void {
+    this.config.edgeThickness = Math.max(0, thickness)
+  }
+  
+  public setEdgeIntensity(intensity: number): void {
+    this.config.edgeIntensity = Math.max(0, Math.min(1, intensity))
+  }
+  
+  public setEdgeColor(color: THREE.Color): void {
+    this.config.edgeColor.copy(color)
+  }
+  
+  public setDepthEdgeThreshold(threshold: number): void {
+    this.config.depthEdgeThreshold = Math.max(0, threshold)
+  }
+  
+  public setNormalEdgeThreshold(threshold: number): void {
+    this.config.normalEdgeThreshold = Math.max(0, threshold)
+  }
+  
+  /**
    * Get current configuration
    */
   public getConfig() {
@@ -253,6 +375,8 @@ export class RetroPostProcessingSystem {
    */
   public dispose(): void {
     this.renderTarget.dispose()
+    this.depthRenderTarget.dispose()
+    this.normalRenderTarget.dispose()
     this.retroPass.dispose()
     this.retroQuad.geometry.dispose()
   }

@@ -1,5 +1,5 @@
-// Default lighting vertex shader
-// Reusable for any mesh asset that needs sun and spotlight lighting
+// Character vertex shader
+// For flat cel-shaded character models
 
 #include ./common/lighting-vertex.glsl
 

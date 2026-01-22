@@ -1,8 +1,6 @@
 // Shader imports - Vite will handle these as modules
 import oceanVertexShader from './shaders/ocean-vertex.glsl'
 import oceanFragmentShader from './shaders/ocean-fragment.glsl'
-import landVertexShader from './shaders/land-vertex.glsl'
-import landFragmentShader from './shaders/land-fragment.glsl'
 import noiseVertexShader from './shaders/noise-vertex.glsl'
 import noiseFragmentShader from './shaders/noise-fragment.glsl'
 import vertexShader from './shaders/vertex.glsl'
@@ -17,8 +15,34 @@ import crystalVertexShader from './shaders/crystal-vertex.glsl'
 import crystalFragmentShader from './shaders/crystal-fragment.glsl'
 import titlescreenVertexShader from './shaders/titlescreen-vertex.glsl'
 import titlescreenFragmentShader from './shaders/titlescreen-fragment.glsl'
-import defaultLightVertexShader from './shaders/default-light-vertex.glsl'
-import defaultLightFragmentShader from './shaders/default-light-fragment.glsl'
+
+// Common lighting chunks
+import lightingVertexChunk from './shaders/common/lighting-vertex.glsl'
+import lightingFragmentChunk from './shaders/common/lighting-fragment.glsl'
+
+// Shaders that use common lighting (prepend the chunks)
+import defaultCharacterVertexShaderRaw from './shaders/default-character-vertex.glsl'
+import defaultCharacterFragmentShaderRaw from './shaders/default-character-fragment.glsl'
+import landVertexShaderRaw from './shaders/land-vertex.glsl'
+import landFragmentShaderRaw from './shaders/land-fragment.glsl'
+
+// Concatenate common lighting code with shaders that use it
+const defaultCharacterVertexShader = defaultCharacterVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const defaultCharacterFragmentShader = defaultCharacterFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
+const landVertexShader = landVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const landFragmentShader = landFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
 
 // Shader registry for easy access
 export const SHADERS = {
@@ -40,8 +64,8 @@ export const SHADERS = {
   'src/shaders/crystal-fragment.glsl': crystalFragmentShader,
   'src/shaders/titlescreen-vertex.glsl': titlescreenVertexShader,
   'src/shaders/titlescreen-fragment.glsl': titlescreenFragmentShader,
-  'src/shaders/default-light-vertex.glsl': defaultLightVertexShader,
-  'src/shaders/default-light-fragment.glsl': defaultLightFragmentShader,
+  'src/shaders/default-character-vertex.glsl': defaultCharacterVertexShader,
+  'src/shaders/default-character-fragment.glsl': defaultCharacterFragmentShader,
 } as const
 
 export type ShaderPath = keyof typeof SHADERS

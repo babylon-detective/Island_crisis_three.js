@@ -1,0 +1,87 @@
+{
+  "name": "Test Level",
+  "version": "1.0.0",
+  "gridSize": 5,
+  "spawnPoint": [0, 2, 10],
+  "lights": {
+    "sun": {
+      "direction": [0.5, 0.8, 0.2],
+      "color": "#ffffff",
+      "intensity": 1.0
+    },
+    "ambient": {
+      "color": "#404040",
+      "intensity": 0.3
+    }
+  },
+  "objects": [
+    {
+      "id": "ground_plane",
+      "type": "primitive",
+      "geometry": "plane",
+      "size": [100, 100],
+      "position": [0, 0, 0],
+      "rotation": [-1.5708, 0, 0],
+      "color": "#228b22",
+      "collision": "box",
+      "collisionSize": [100, 0.1, 100],
+      "metadata": {
+        "name": "Ground",
+        "tags": ["terrain", "floor"]
+      }
+    },
+    {
+      "id": "platform_01",
+      "type": "primitive",
+      "geometry": "box",
+      "size": [10, 2, 10],
+      "position": [0, 1, 0],
+      "color": "#8b4513",
+      "collision": "box",
+      "metadata": {
+        "name": "Main Platform",
+        "tags": ["platform"]
+      }
+    },
+    {
+      "id": "wall_north",
+      "type": "primitive",
+      "geometry": "box",
+      "size": [20, 5, 1],
+      "position": [0, 2.5, -10],
+      "color": "#696969",
+      "collision": "box",
+      "metadata": {
+        "name": "North Wall",
+        "tags": ["wall", "barrier"]
+      }
+    },
+    {
+      "id": "test_sphere",
+      "type": "primitive",
+      "geometry": "sphere",
+      "size": [2],
+      "position": [10, 3, 0],
+      "color": "#ff6347",
+      "collision": "sphere",
+      "metadata": {
+        "name": "Test Sphere",
+        "tags": ["test", "interactive"]
+      }
+    },
+    {
+      "id": "grid_01_glb",
+      "type": "glb",
+      "path": "public/models/environments/grid_01.glb",
+      "position": [-15, 0, 0],
+      "scale": [1, 1, 1],
+      "collision": "box",
+      "collisionSize": [10, 5, 10],
+      "metadata": {
+        "name": "Grid Model",
+        "tags": ["environment", "imported"],
+        "note": "Replace with actual GLB path"
+      }
+    }
+  ]
+}

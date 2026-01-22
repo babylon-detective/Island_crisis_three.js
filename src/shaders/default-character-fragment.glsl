@@ -1,6 +1,10 @@
-// Default lighting fragment shader
-// Reusable for any mesh asset that needs sun and spotlight lighting
-// Inherits lighting behavior from common lighting system
+// Character shader - flat cel-shaded look with strong outlines
+// Always bright, even in darkness, with stepped lighting
+
+// Enable toon/cel shading with 4 lighting levels
+#define TOON_ENABLED 1
+#define TOON_LEVELS 4.0
+#define RIM_STRENGTH_MULTIPLIER 3.0  // Strong outline effect
 
 #include ./common/lighting-fragment.glsl
 
@@ -27,7 +31,7 @@ void main() {
     shadow = calculateShadows(vDirectionalShadowCoord, vSpotLightShadowCoord);
   #endif
   
-  // Apply lighting using common lighting system
+  // Apply lighting using common lighting system (with toon shading)
   vec3 finalColor = applyLighting(
     uModelColor,
     vNormal,
@@ -35,6 +39,11 @@ void main() {
     vWorldPosition,
     shadow
   );
+  
+  // Boost overall brightness - characters are always visible
+  // Add constant ambient boost so they're never too dark
+  float brightnessBoost = 0.4;  // Minimum 40% brightness
+  finalColor = max(finalColor, uModelColor * brightnessBoost);
   
   gl_FragColor = vec4(finalColor, 1.0);
 }

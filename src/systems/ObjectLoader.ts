@@ -725,10 +725,10 @@ export class ObjectLoader {
       baseColor = mat.color.clone()
     }
 
-    // Load default-light shaders
+    // Load default-character shaders
     const shaders = await ShaderLoader.loadShaderPair({
-      vertexPath: 'src/shaders/default-light-vertex.glsl',
-      fragmentPath: 'src/shaders/default-light-fragment.glsl'
+      vertexPath: 'src/shaders/default-character-vertex.glsl',
+      fragmentPath: 'src/shaders/default-character-fragment.glsl'
     })
 
     // Create shader material with land-like lighting

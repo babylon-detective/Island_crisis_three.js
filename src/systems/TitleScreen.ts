@@ -2,6 +2,9 @@ import * as THREE from 'three'
 import { SHADERS } from '../shaderImports'
 import { RetroPostProcessingSystem } from './RetroPostProcessingSystem'
 
+// Game Hub URL - change this to your actual deployed hub URL
+const HUB_URL = 'https://www.dreamdealer.dev'
+
 export interface TitleScreenConfig {
   onStart: () => void
   onContinue: () => void
@@ -19,6 +22,10 @@ export class TitleScreen {
   private startTime: number = Date.now()
   private config: TitleScreenConfig
   private isActive: boolean = true
+  private selectedIndex: number = 0
+  private menuItems: string[] = ['menu-start', 'menu-continue', 'menu-hub']
+  private gamepadState: { [key: string]: boolean } = {}
+  private lastNavTime: number = 0
 
   constructor(config: TitleScreenConfig) {
     this.config = config
@@ -42,10 +49,12 @@ export class TitleScreen {
     this.uiContainer.innerHTML = `
       <div class="title-main">ISLAND CRISIS</div>
       <div class="title-menu">
-        <div class="menu-item" id="menu-start">START</div>
+        <div class="menu-item selected" id="menu-start">START</div>
         <div class="menu-item" id="menu-continue">CONTINUE</div>
+        <div class="menu-item hub" id="menu-hub">GAME HUB</div>
       </div>
       <div class="loading-text">Loading...</div>
+      <div class="controls-hint">D-pad / Arrows to navigate • A / Enter to select • B / Esc for Hub</div>
     `
     
     document.body.appendChild(this.container)
@@ -107,14 +116,22 @@ export class TitleScreen {
     const startBtn = document.getElementById('menu-start')
     if (startBtn) {
       startBtn.addEventListener('click', () => this.handleStart())
-      startBtn.addEventListener('mouseenter', () => this.playHoverSound())
+      startBtn.addEventListener('mouseenter', () => {
+        this.selectedIndex = 0
+        this.updateMenuSelection()
+        this.playHoverSound()
+      })
     }
     
     // Continue button
     const continueBtn = document.getElementById('menu-continue')
     if (continueBtn) {
       continueBtn.addEventListener('click', () => this.handleContinue())
-      continueBtn.addEventListener('mouseenter', () => this.playHoverSound())
+      continueBtn.addEventListener('mouseenter', () => {
+        this.selectedIndex = 1
+        this.updateMenuSelection()
+        this.playHoverSound()
+      })
       
       // Check if save data exists
       const hasSaveData = this.checkSaveData()
@@ -123,18 +140,122 @@ export class TitleScreen {
       }
     }
     
+    // Hub button
+    const hubBtn = document.getElementById('menu-hub')
+    if (hubBtn) {
+      hubBtn.addEventListener('click', () => this.handleHub())
+      hubBtn.addEventListener('mouseenter', () => {
+        this.selectedIndex = 2
+        this.updateMenuSelection()
+        this.playHoverSound()
+      })
+    }
+    
     // Keyboard navigation
     document.addEventListener('keydown', (e) => {
       if (!this.isActive) return
       
-      if (e.key === 'Enter' || e.key === ' ') {
+      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
         e.preventDefault()
-        this.handleStart()
+        this.navigateMenu(-1)
+      } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        e.preventDefault()
+        this.navigateMenu(1)
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        this.selectCurrentItem()
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        this.handleHub()
       }
     })
     
     // Window resize
     window.addEventListener('resize', () => this.onWindowResize())
+    
+    // Initial menu selection
+    this.updateMenuSelection()
+  }
+  
+  private navigateMenu(direction: number): void {
+    this.selectedIndex = (this.selectedIndex + direction + this.menuItems.length) % this.menuItems.length
+    this.updateMenuSelection()
+    this.playHoverSound()
+  }
+  
+  private updateMenuSelection(): void {
+    this.menuItems.forEach((id, index) => {
+      const item = document.getElementById(id)
+      if (item) {
+        if (index === this.selectedIndex) {
+          item.classList.add('selected')
+        } else {
+          item.classList.remove('selected')
+        }
+      }
+    })
+  }
+  
+  private selectCurrentItem(): void {
+    switch (this.selectedIndex) {
+      case 0:
+        this.handleStart()
+        break
+      case 1:
+        this.handleContinue()
+        break
+      case 2:
+        this.handleHub()
+        break
+    }
+  }
+  
+  private pollGamepad(): void {
+    const gamepads = navigator.getGamepads()
+    const gp = gamepads[0]
+    
+    if (!gp) return
+    
+    const now = Date.now()
+    const navCooldown = 200 // ms between navigation
+    
+    // D-pad or left stick navigation
+    const upPressed = gp.buttons[12]?.pressed || gp.axes[1] < -0.5
+    const downPressed = gp.buttons[13]?.pressed || gp.axes[1] > 0.5
+    
+    if (now - this.lastNavTime > navCooldown) {
+      if (upPressed && !this.gamepadState['up']) {
+        this.navigateMenu(-1)
+        this.lastNavTime = now
+      } else if (downPressed && !this.gamepadState['down']) {
+        this.navigateMenu(1)
+        this.lastNavTime = now
+      }
+    }
+    
+    this.gamepadState['up'] = upPressed
+    this.gamepadState['down'] = downPressed
+    
+    // A button (confirm)
+    const aPressed = gp.buttons[0]?.pressed
+    if (aPressed && !this.gamepadState['a']) {
+      this.selectCurrentItem()
+    }
+    this.gamepadState['a'] = aPressed
+    
+    // B button (hub)
+    const bPressed = gp.buttons[1]?.pressed
+    if (bPressed && !this.gamepadState['b']) {
+      this.handleHub()
+    }
+    this.gamepadState['b'] = bPressed
+    
+    // Start button (confirm)
+    const startPressed = gp.buttons[9]?.pressed
+    if (startPressed && !this.gamepadState['start']) {
+      this.selectCurrentItem()
+    }
+    this.gamepadState['start'] = startPressed
   }
 
   private checkSaveData(): boolean {
@@ -175,6 +296,15 @@ export class TitleScreen {
     })
   }
 
+  private handleHub(): void {
+    if (!this.isActive) return
+    
+    console.log('🎮 Navigating to Game Hub...')
+    this.fadeOut(() => {
+      window.location.href = HUB_URL
+    })
+  }
+
   private fadeOut(callback: () => void): void {
     this.isActive = false
     
@@ -210,6 +340,9 @@ export class TitleScreen {
     if (!this.isActive) return
     
     this.animationId = requestAnimationFrame(this.animate)
+    
+    // Poll gamepad input
+    this.pollGamepad()
     
     // Update time uniform
     if (this.shaderMaterial) {

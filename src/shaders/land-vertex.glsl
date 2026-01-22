@@ -1,3 +1,5 @@
+#include ./common/lighting-vertex.glsl
+
 uniform float uTime;
 uniform float uElevation;
 uniform float uRoughness;
@@ -7,6 +9,15 @@ uniform vec3 uRockColor;
 uniform float uIslandRadius;
 uniform float uCoastSmoothness;
 uniform float uSeaLevel;
+
+#ifdef USE_SHADOWMAP
+  #if NUM_DIR_LIGHT_SHADOWS > 0
+    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
+  #endif
+  #if NUM_SPOT_LIGHT_SHADOWS > 0
+    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
+  #endif
+#endif
 
 varying vec3 vPosition;
 varying vec3 vNormal;
@@ -77,6 +88,11 @@ void main() {
     // World position for lighting calculations
     vec4 worldPosition = modelMatrix * vec4(pos, 1.0);
     vWorldPosition = worldPosition.xyz;
+    
+    // Calculate shadow coordinates using common lighting code
+    #ifdef USE_SHADOWMAP
+      calculateShadowCoords(worldPosition, vDirectionalShadowCoord, vSpotLightShadowCoord);
+    #endif
     
     // Transform position (no displacement applied)
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
