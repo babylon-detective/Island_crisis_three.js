@@ -2416,6 +2416,21 @@ const app = new IntegratedThreeJSApp(
 ;(window as any).debugTerrainHeight = (x: number = 0, z: number = 0) => app.getCollisionSystem().debugTerrainHeight(x, z)
 ;(window as any).getTerrainHeight = (x: number = 0, z: number = 0) => app.getCollisionSystem().getTerrainHeight(x, z)
 ;(window as any).testTerrainFix = () => app.getCollisionSystem().testTerrainFix()
+
+// Initialize Hub Controls for mobile (from dreamdealer.dev)
+// Provides consistent virtual controls across all Game Hub projects
+if (typeof (window as any).HubControls !== 'undefined') {
+  (window as any).HubControls.init({
+    onStart: () => {
+      // Trigger pause via the app's togglePause method
+      if ((app as any).togglePause) {
+        (app as any).togglePause()
+      }
+    },
+    hideExisting: true
+  })
+}
+
 ;(window as any).refreshCollisionMeshes = () => {
   console.log('🔄 Refreshing land meshes for collision...')
   if (app.getLandSystem()) {
