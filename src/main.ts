@@ -2419,17 +2419,23 @@ const app = new IntegratedThreeJSApp(
 
 // Initialize Hub Controls for mobile (from dreamdealer.dev)
 // Provides consistent virtual controls across all Game Hub projects
-if (typeof (window as any).HubControls !== 'undefined') {
-  (window as any).HubControls.init({
-    onStart: () => {
-      // Trigger pause via the app's togglePause method
-      if ((app as any).togglePause) {
-        (app as any).togglePause()
-      }
-    },
-    hideExisting: true
-  })
+function initHubControls() {
+  if (typeof (window as any).HubControls !== 'undefined') {
+    (window as any).HubControls.init({
+      onStart: () => {
+        // Trigger pause via the app's togglePause method
+        if ((app as any).togglePause) {
+          (app as any).togglePause()
+        }
+      },
+      hideExisting: true
+    })
+  } else {
+    // Script may still be loading, try again
+    setTimeout(initHubControls, 100)
+  }
 }
+initHubControls()
 
 ;(window as any).refreshCollisionMeshes = () => {
   console.log('🔄 Refreshing land meshes for collision...')
