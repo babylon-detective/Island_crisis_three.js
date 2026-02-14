@@ -17,6 +17,7 @@ export class PauseOverlay {
   private lastNavTime: number = 0;
   private readonly NAV_COOLDOWN = 150; // ms between navigation inputs
   private onHideCallback: HideCallback | null = null;
+  private startButtonReleased: boolean = false; // Guard: Start must be released before overlay acts on it
 
   constructor() {
     this.options = [
@@ -44,6 +45,7 @@ export class PauseOverlay {
     if (this.container) return; // Already showing
 
     this.selectedIndex = 0;
+    this.startButtonReleased = false; // Start is still held, wait for release
     this.createOverlay();
     this.startInputPolling();
     
@@ -195,6 +197,9 @@ export class PauseOverlay {
   private handleKeyDown = (event: KeyboardEvent): void => {
     if (!this.container) return;
 
+    // Stop propagation so main.ts keyboard handlers don't also fire
+    event.stopPropagation();
+
     const optionsContainer = this.container.querySelector('#pause-options') as HTMLDivElement;
     if (!optionsContainer) return;
 
@@ -252,9 +257,20 @@ export class PauseOverlay {
         this.lastNavTime = now;
       }
 
-      // A button (button 0) or Start button (button 9) - confirm selection
-      if (gamepad.buttons[0]?.pressed || gamepad.buttons[9]?.pressed) {
+      // Track Start button release so we don't immediately act on the press that opened the overlay
+      if (!gamepad.buttons[9]?.pressed) {
+        this.startButtonReleased = true;
+      }
+
+      // A button (button 0) - confirm selection
+      if (gamepad.buttons[0]?.pressed) {
         this.selectCurrentOption();
+        this.lastNavTime = now;
+      }
+
+      // Start button (button 9) - resume, but only after it was released first
+      if (gamepad.buttons[9]?.pressed && this.startButtonReleased) {
+        this.hide();
         this.lastNavTime = now;
       }
 

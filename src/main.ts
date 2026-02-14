@@ -838,6 +838,8 @@ class IntegratedThreeJSApp {
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
   private pauseOverlay: PauseOverlay = new PauseOverlay()
+  private lastPauseToggleTime: number = 0
+  private pauseToggleCooldownMs: number = 250
   
   // Lighting references for dynamic control
   private ambientLight!: THREE.AmbientLight
@@ -1055,6 +1057,21 @@ class IntegratedThreeJSApp {
     return DeviceType.DESKTOP
   }
 
+  private getViewportSize(): { width: number; height: number } {
+    const visualViewport = window.visualViewport
+    if (visualViewport) {
+      return {
+        width: Math.round(visualViewport.width),
+        height: Math.round(visualViewport.height)
+      }
+    }
+
+    return {
+      width: window.innerWidth,
+      height: window.innerHeight
+    }
+  }
+
   private detectInputMethods(): InputMethod[] {
     const methods: InputMethod[] = []
     if ('ontouchstart' in window) methods.push('touch')
@@ -1073,9 +1090,10 @@ class IntegratedThreeJSApp {
   }
 
   private initCamera(): void {
+    const { width, height } = this.getViewportSize()
     this.camera = new THREE.PerspectiveCamera(
       this.cameraConfig.fov,
-      this.cameraConfig.aspect,
+      width / height,
       this.cameraConfig.near,
       this.cameraConfig.far
     )
@@ -1122,7 +1140,8 @@ class IntegratedThreeJSApp {
       throw new Error('WebGL not supported on this device')
     }
     
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
+    const { width, height } = this.getViewportSize()
+    this.renderer.setSize(width, height)
     // Lower pixel ratio for retro look (optional - can be adjusted)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0)) // Reduced from 2.0
     
@@ -1513,8 +1532,9 @@ class IntegratedThreeJSApp {
         }
       }
       
-      // Enter/Return key - Menu/Pause
-      if (event.code === 'Enter' || event.code === 'NumpadEnter') {
+      // Enter/Return key - Menu/Pause (only when overlay is NOT already shown,
+      // to avoid double-toggling; PauseOverlay handles its own Enter key)
+      if ((event.code === 'Enter' || event.code === 'NumpadEnter') && !this.pauseOverlay.isVisible()) {
         console.log('🎮 Menu/Pause button pressed')
         this.togglePause()
       }
@@ -1624,6 +1644,12 @@ class IntegratedThreeJSApp {
    * Toggle the game pause state
    */
   private togglePause(): void {
+    const now = performance.now()
+    if (now - this.lastPauseToggleTime < this.pauseToggleCooldownMs) {
+      return
+    }
+    this.lastPauseToggleTime = now
+
     if (this.pauseOverlay.isVisible()) {
       // If pause overlay is visible, hide it and resume
       this.pauseOverlay.hide()
@@ -1884,6 +1910,10 @@ class IntegratedThreeJSApp {
 
   private setupEventListeners(): void {
     window.addEventListener('resize', this.onWindowResize.bind(this))
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', this.onWindowResize.bind(this))
+      window.visualViewport.addEventListener('scroll', this.onWindowResize.bind(this))
+    }
     document.addEventListener('visibilitychange', this.onVisibilityChange.bind(this))
     
     // Click handler for objects
@@ -1914,9 +1944,10 @@ class IntegratedThreeJSApp {
   }
 
   private onWindowResize(): void {
-    this.camera.aspect = window.innerWidth / window.innerHeight
+    const { width, height } = this.getViewportSize()
+    this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
+    this.renderer.setSize(width, height)
     
     // Update retro post-processing on resize
     if (this.retroPostProcessing) {
@@ -2419,15 +2450,12 @@ const app = new IntegratedThreeJSApp(
 
 // Initialize Hub Controls for mobile (from dreamdealer.dev)
 // Provides consistent virtual controls across all Game Hub projects
+// NOTE: This project has its own InputSystem with native gamepad handling,
+// so we do NOT use the onStart callback (it would double-toggle pause).
+// hub-controls.js is kept for touch virtual controls on mobile only.
 function initHubControls() {
   if (typeof (window as any).HubControls !== 'undefined') {
     (window as any).HubControls.init({
-      onStart: () => {
-        // Trigger pause via the app's togglePause method
-        if ((app as any).togglePause) {
-          (app as any).togglePause()
-        }
-      },
       hideExisting: true
     })
   } else {
