@@ -23,6 +23,9 @@ import { InputSystem, GamepadInputHandler } from './systems/InputSystem'
 import { RetroPostProcessingSystem } from './systems/RetroPostProcessingSystem'
 import { PauseManager } from './systems/PauseManager'
 import { PauseOverlay } from './systems/PauseOverlay'
+import { CharacterAnimationSystem, AnimationClipRegistry, buildQuaterniusToRigifyRemap } from './systems/CharacterAnimationSystem'
+import { AnimationBrowser } from './systems/AnimationBrowser'
+import { AnimationStateMachine, createPlayerStateMachineConfig, AnimStateParams } from './systems/AnimationStateMachine'
 import { SHADERS, ShaderPath } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
@@ -835,6 +838,11 @@ class IntegratedThreeJSApp {
   private gamepadHandler!: GamepadInputHandler
   private retroPostProcessing!: RetroPostProcessingSystem
   
+  // Character animation system (skeletal / GLB clip-based)
+  private characterAnimationSystem: CharacterAnimationSystem = new CharacterAnimationSystem()
+  private playerAnimStateMachine: AnimationStateMachine | null = null
+  private animationBrowser: AnimationBrowser | null = null
+
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
   private pauseOverlay: PauseOverlay = new PauseOverlay()
@@ -1038,6 +1046,9 @@ class IntegratedThreeJSApp {
     this.animate()
     
     this.animationSystem.start()
+
+    // Initialize character animation system and register Quaternius animation set
+    this.initCharacterAnimations()
     
     // Mark as initialized
     this.isInitialized = true
@@ -1048,6 +1059,111 @@ class IntegratedThreeJSApp {
     
     // Show initial help overlay
     this.showInitialHelp()
+  }
+
+  /**
+   * Initialize the character animation system.
+   * Registers the Quaternius Universal Animation Library set and, once the
+   * player model is ready, binds an AnimationStateMachine to the player.
+   */
+  private async initCharacterAnimations(): Promise<void> {
+    try {
+      // Register the Quaternius UAL packed animation set (single GLB with 45 clips)
+      const registry = AnimationClipRegistry.getInstance()
+      registry.registerQuaterniusPackedSet('/models/animations/quaternius', 'UAL1_Standard.glb')
+
+      // Wait briefly for the player model to finish loading, then register it
+      const playerModel = this.playerController.getMesh()
+      if (playerModel) {
+        await this.setupPlayerAnimations(playerModel)
+      } else {
+        // Model not ready yet — retry after a short delay
+        const retryInterval = setInterval(async () => {
+          const mesh = this.playerController.getMesh()
+          if (mesh) {
+            clearInterval(retryInterval)
+            await this.setupPlayerAnimations(mesh)
+          }
+        }, 500)
+        // Give up after 10 seconds
+        setTimeout(() => clearInterval(retryInterval), 10000)
+      }
+    } catch (error) {
+      console.warn('⚠️ Character animation system init skipped (animations will load when GLB files are placed in public/models/animations/quaternius/):', error)
+    }
+  }
+
+  /**
+   * Bind the character animation system to a player model.
+   */
+  private async setupPlayerAnimations(playerModel: THREE.Object3D): Promise<void> {
+    try {
+      await this.characterAnimationSystem.registerCharacter({
+        id: 'player',
+        model: playerModel,
+        animationSetId: 'quaternius-universal',
+        defaultCrossfadeDuration: 0.25,
+        boneRemap: buildQuaterniusToRigifyRemap(),
+      }, true)
+
+      // Create the state machine
+      const params: AnimStateParams = {
+        speed: 0,
+        isGrounded: true,
+        isJumping: false,
+        isFalling: false,
+        isRunning: false,
+        isAttacking: false,
+        isDead: false,
+        isCrouching: false,
+        movementX: 0,
+        movementZ: 0,
+      }
+
+      const config = createPlayerStateMachineConfig('player', () => params)
+      this.playerAnimStateMachine = new AnimationStateMachine(this.characterAnimationSystem)
+      this.playerAnimStateMachine.configure(config)
+
+      // Create animation browser (toggle with ` key)
+      this.animationBrowser = new AnimationBrowser(
+        this.characterAnimationSystem,
+        'player',
+        (browsing) => {
+          // Disable state machine while browsing so it doesn't override manual clip selection
+          if (this.playerAnimStateMachine) {
+            this.playerAnimStateMachine.setEnabled(!browsing)
+          }
+        }
+      )
+
+      console.log('✅ Player character animation system ready (press ` to open animation browser)')
+    } catch (error) {
+      console.warn('⚠️ Player animation binding skipped (animation GLB files not found):', error)
+    }
+  }
+
+  /**
+   * Collect current player state into AnimStateParams for the state machine.
+   */
+  private getPlayerAnimParams(): AnimStateParams {
+    const velocity = this.playerController.getVelocity()
+    const speed = new THREE.Vector2(velocity.x, velocity.z).length()
+    const isGrounded = this.playerController.isOnGround()
+    const isMoving = this.playerController.isMoving()
+    const isRunning = this.playerController.isRunning()
+
+    return {
+      speed,
+      isGrounded,
+      isJumping: velocity.y > 1.0 && !isGrounded,
+      isFalling: velocity.y < -1.0 && !isGrounded,
+      isRunning: isRunning && isMoving,
+      isAttacking: false,
+      isDead: false,
+      isCrouching: false,
+      movementX: velocity.x,
+      movementZ: velocity.z,
+    }
   }
 
   private detectDeviceType(): DeviceType {
@@ -2121,6 +2237,13 @@ class IntegratedThreeJSApp {
       
       // Update animation system
       this.animationSystem.update(currentTime)
+
+      // Update character skeletal animations
+      if (this.playerAnimStateMachine) {
+        this.playerAnimStateMachine.setParams(this.getPlayerAnimParams())
+        this.playerAnimStateMachine.update(deltaTime)
+      }
+      this.characterAnimationSystem.update(deltaTime)
       
       // Update shader material uniforms for all ObjectManager objects
       this.objectManager.getAllObjects().forEach((managedObject) => {

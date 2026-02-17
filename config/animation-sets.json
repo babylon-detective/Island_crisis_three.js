@@ -1,0 +1,31 @@
+{
+  "quaternius-universal": {
+    "displayName": "Quaternius Universal Animation Library",
+    "basePath": "/models/animations/quaternius",
+    "defaultClip": "idle",
+    "clips": [
+      { "name": "idle",            "file": "Idle.glb",            "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.30 },
+      { "name": "walk",            "file": "Walk.glb",            "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.25 },
+      { "name": "run",             "file": "Run_Forward.glb",     "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.20 },
+      { "name": "run_backward",    "file": "Run_Backward.glb",    "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.20 },
+      { "name": "walk_backward",   "file": "Walk_Backward.glb",   "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.25 },
+      { "name": "strafe_left",     "file": "Strafe_Left.glb",     "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.20 },
+      { "name": "strafe_right",    "file": "Strafe_Right.glb",    "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.20 },
+      { "name": "jump",            "file": "Jump.glb",            "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.15 },
+      { "name": "fall",            "file": "Fall.glb",            "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.20 },
+      { "name": "land",            "file": "Land.glb",            "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.15 },
+      { "name": "attack",          "file": "Attack.glb",          "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.15 },
+      { "name": "attack_kick",     "file": "Attack_Kick.glb",     "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.15 },
+      { "name": "block",           "file": "Block.glb",           "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.15 },
+      { "name": "hit",             "file": "Hit.glb",             "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.10 },
+      { "name": "death",           "file": "Death.glb",           "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.30 },
+      { "name": "wave",            "file": "Wave.glb",            "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.30 },
+      { "name": "pick_up",         "file": "Pick_Up.glb",         "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.25 },
+      { "name": "interact",        "file": "Interact.glb",        "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.25 },
+      { "name": "dance",           "file": "Dance.glb",           "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.30 },
+      { "name": "sit",             "file": "Sit.glb",             "loop": false, "timeScale": 1.0, "crossfadeDuration": 0.40 },
+      { "name": "crouch_idle",     "file": "Crouch_Idle.glb",     "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.25 },
+      { "name": "crouch_walk",     "file": "Crouch_Walk.glb",     "loop": true,  "timeScale": 1.0, "crossfadeDuration": 0.25 }
+    ]
+  }
+}

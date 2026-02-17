@@ -17,11 +17,21 @@ For detailed instructions on how to use this boilerplate, including all controls
 This enhanced boilerplate includes:
 - **Ocean LOD System**: Infinite ocean with realistic water simulation
 - **Player Movement**: WASD controls with collision detection
+- **Character Animation System**: Skeletal animation pipeline for GLB/GLTF clips (Quaternius Universal Animation Library)
+- **Animation State Machine**: Priority-based FSM that maps player state to animation clips with crossfade transitions
 - **Advanced Shaders**: Unique shader materials for each object
 - **Debug System**: Comprehensive debugging tools and GUI
 - **Performance Monitoring**: Real-time performance tracking
 - **Collision System**: Physics-based collision detection
 - **Camera Management**: System and player camera modes
+
+### Character Animation Setup
+
+1. Download the [Quaternius Universal Animation Library](https://quaternius.com/packs/ultimateanimatedcharacter.html) (free).
+2. Place `UAL1_Standard.glb` (packed, 45 clips) in `public/models/animations/quaternius/`.
+3. The system auto-loads all clips and retargets them to the Rigify character skeleton via bone remapping.
+4. Press **`` ` ``** (backtick) in-game to open the **Animation Browser** — scroll through clips, adjust speed, test retargeting.
+5. See [INSTRUCTIONS.md](INSTRUCTIONS.md) for the full Blender workflow, bone mapping table, and architecture docs.
 
 [Example](https://sean-bradley.github.io/Three.js-Boilerplate-TS-Vite/)
 
