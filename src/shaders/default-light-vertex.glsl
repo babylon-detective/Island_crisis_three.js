@@ -24,9 +24,14 @@ void main() {
   vWorldPosition = worldPosition.xyz;
   vUv = uv;
   
-  // Calculate shadow coordinates using common lighting code
+  // Calculate shadow coordinates inline
   #ifdef USE_SHADOWMAP
-    calculateShadowCoords(worldPosition, vDirectionalShadowCoord, vSpotLightShadowCoord);
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+      vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPosition;
+    #endif
+    #if NUM_SPOT_LIGHT_SHADOWS > 0
+      vSpotLightShadowCoord[0] = spotShadowMatrix[0] * worldPosition;
+    #endif
   #endif
   
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);

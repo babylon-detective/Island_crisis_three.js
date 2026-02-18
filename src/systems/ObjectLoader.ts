@@ -648,52 +648,78 @@ export class ObjectLoader {
           model.userData = { id, type: 'model', modelPath }
           
           // Enable shadows and apply materials to all meshes (including nested)
-          model.traverse(async (child) => {
+          // Collect meshes synchronously first, then await async shader work
+          // (traverse does NOT await async callbacks)
+          const meshChildren: THREE.Mesh[] = []
+          model.traverse((child) => {
             if (child instanceof THREE.Mesh) {
               child.castShadow = true
               child.receiveShadow = true
-              
-              const originalMaterial = child.material
-              
-              if (useCustomShader && shaderUniforms) {
-                // Apply custom shader material with land-like lighting
-                const shaderMaterial = await this.createModelShaderMaterial(originalMaterial, shaderUniforms)
-                child.material = shaderMaterial
-              } else {
-                // Use standard material
-                if (Array.isArray(originalMaterial)) {
-                  child.material = originalMaterial.map(mat => {
-                    const color = mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial
-                      ? mat.color.clone()
-                      : new THREE.Color(0x808080)
-                    
-                    return new THREE.MeshStandardMaterial({
-                      color: color.getHex() === 0x000000 ? 0x808080 : color,
-                      metalness: 0.1,
-                      roughness: 0.8,
-                      side: mat.side || THREE.FrontSide,
-                      transparent: mat.transparent || false,
-                      opacity: mat.opacity || 1
-                    })
-                  })
-                } else {
-                  const color = originalMaterial instanceof THREE.MeshStandardMaterial || originalMaterial instanceof THREE.MeshPhysicalMaterial
-                    ? originalMaterial.color.clone()
+              meshChildren.push(child)
+            }
+          })
+
+          // Apply materials — await all shader material creations before resolving
+          await Promise.all(meshChildren.map(async (child) => {
+            const originalMaterial = child.material
+            
+            if (useCustomShader) {
+              // Apply custom shader material with land-like lighting
+              const shaderMaterial = await this.createModelShaderMaterial(originalMaterial, shaderUniforms || {})
+              child.material = shaderMaterial
+            } else {
+              // Use standard material
+              if (Array.isArray(originalMaterial)) {
+                child.material = originalMaterial.map(mat => {
+                  const color = mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial
+                    ? mat.color.clone()
                     : new THREE.Color(0x808080)
                   
-                  child.material = new THREE.MeshStandardMaterial({
+                  return new THREE.MeshStandardMaterial({
                     color: color.getHex() === 0x000000 ? 0x808080 : color,
                     metalness: 0.1,
                     roughness: 0.8,
-                    side: originalMaterial.side || THREE.FrontSide,
-                    transparent: originalMaterial.transparent || false,
-                    opacity: originalMaterial.opacity || 1
+                    side: mat.side || THREE.FrontSide,
+                    transparent: mat.transparent || false,
+                    opacity: mat.opacity || 1
                   })
-                }
+                })
+              } else {
+                const color = originalMaterial instanceof THREE.MeshStandardMaterial || originalMaterial instanceof THREE.MeshPhysicalMaterial
+                  ? originalMaterial.color.clone()
+                  : new THREE.Color(0x808080)
+                
+                child.material = new THREE.MeshStandardMaterial({
+                  color: color.getHex() === 0x000000 ? 0x808080 : color,
+                  metalness: 0.1,
+                  roughness: 0.8,
+                  side: originalMaterial.side || THREE.FrontSide,
+                  transparent: originalMaterial.transparent || false,
+                  opacity: originalMaterial.opacity || 1
+                })
               }
             }
-          })
+          }))
           
+          // Apply the first embedded animation clip at frame 0 so the model
+          // shows its authored rest pose (e.g. standing) instead of the raw
+          // skeleton bind pose (T-pose).
+          if (gltf.animations && gltf.animations.length > 0) {
+            const mixer = new THREE.AnimationMixer(model)
+            const clip = gltf.animations[0]
+            const action = mixer.clipAction(clip)
+            action.play()
+            // Force one evaluation to bake the pose onto the bones.
+            // Use a tiny time offset so we sample the first real keyframe.
+            mixer.update(0)
+            // Do NOT call action.stop() — that would revert bones to bind pose.
+            // The mixer is not ticked in the render loop, so the pose stays frozen.
+            // Store animations for later use (e.g. pose cycling)
+            model.userData.animations = gltf.animations
+            model.userData._poseMixer = mixer // keep reference so GC doesn't collect it
+            console.log(`🎬 Applied rest pose from embedded clip "${clip.name}" (${gltf.animations.length} clip(s) total)`)
+          }
+
           // Add to scene
           this.scene.add(model)
           
@@ -718,24 +744,58 @@ export class ObjectLoader {
     originalMaterial: THREE.Material | THREE.Material[],
     uniforms: { [key: string]: { value: any } }
   ): Promise<THREE.ShaderMaterial> {
-    // Extract color from original material if possible
-    let baseColor = new THREE.Color(0x808080)
+    // Extract color from original material and brighten it so the character
+    // stands out against darker environment colours and shadows.
+    let baseColor = new THREE.Color(0xcccccc) // fallback: light grey
     const mat = Array.isArray(originalMaterial) ? originalMaterial[0] : originalMaterial
     if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
       baseColor = mat.color.clone()
+      // Lift the colour toward white – keeps the hue but pushes brightness up
+      baseColor.lerp(new THREE.Color(1.0, 1.0, 1.0), 0.45)
     }
 
-    // Load default-character shaders
+    // Load default-character shaders (lightweight — no common lighting dependency)
     const shaders = await ShaderLoader.loadShaderPair({
       vertexPath: 'src/shaders/default-character-vertex.glsl',
       fragmentPath: 'src/shaders/default-character-fragment.glsl'
     })
 
-    // Create shader material with land-like lighting
+    // Character shader uses its own minimal uniform set.
+    // We still spread the caller's uniforms so land-lighting values are present
+    // for any future multi-pass work, but the character shaders will ignore them.
     return new THREE.ShaderMaterial({
       uniforms: {
         ...uniforms,
-        uModelColor: { value: baseColor }
+        // ---- model colour ----
+        uModelColor:      { value: baseColor },
+
+        // ---- primary dominant light ----
+        uLightDir:        { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+        uLightColor:      { value: new THREE.Color(1.0, 1.0, 0.95) },
+        uLightIntensity:  { value: 1.0 },
+
+        // ---- secondary light (off by default) ----
+        uLight2Dir:       { value: new THREE.Vector3(-0.4, 0.3, -0.6).normalize() },
+        uLight2Color:     { value: new THREE.Color(0.6, 0.7, 1.0) },
+        uLight2Intensity: { value: 0.0 },
+
+        // ---- shading ----
+        uAmbient:         { value: 0.55 },
+        uBrightBoost:     { value: 0.18 },
+        uBands:           { value: 3.0 },
+
+        // ---- rim / back light ----
+        uRimColor:        { value: new THREE.Color(1.0, 1.0, 1.0) },
+        uRimStrength:     { value: 0.45 },
+        uRimPower:        { value: 2.5 },
+
+        // ---- specular ----
+        uSpecStrength:    { value: 0.15 },
+        uSpecPower:       { value: 32.0 },
+
+        // ---- outline ----
+        uOutlineWidth:    { value: 0.38 },
+        uOutlineColor:    { value: new THREE.Color(0.08, 0.06, 0.12) }
       },
       vertexShader: shaders.vertex,
       fragmentShader: shaders.fragment,

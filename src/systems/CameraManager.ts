@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-export type CameraMode = 'freeview' | 'shoulder'
+export type CameraMode = 'freeview' | 'shoulder' | 'thirdperson'
 export type ThirdPersonView = 'shoulder' // Only shoulder view remains
 
 export interface CameraConfig {
@@ -66,17 +66,32 @@ export interface CameraManagerConfig {
   
   // Shoulder view configuration
   shoulderView: ThirdPersonCameraOffset
+
+  // Third-person camera configuration
+  thirdPerson: {
+    distance: number       // Distance behind player
+    height: number         // Height above player pivot
+    lookAtHeight: number   // Height of look-at target above player pivot
+    fov: number
+    smoothing: number      // Position smoothing (0-1, lower = smoother)
+    rotationSmoothing: number // Orbit rotation smoothing
+    pitchMin: number       // Min pitch angle (radians, negative = look down)
+    pitchMax: number       // Max pitch angle (radians)
+    sensitivity: number    // Mouse sensitivity for orbit
+    collisionEnabled: boolean
+    collisionPadding: number
+  }
 }
 
 // Default configuration
 const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
-  defaultMode: 'freeview',
+  defaultMode: 'thirdperson',
   defaultView: 'shoulder',
   defaultZoom: 2,
   
   freeViewCamera: {
     fov: 75,
-    position: new THREE.Vector3(0, 2, 20),
+    position: new THREE.Vector3(0.138, 1.716, -1.884),
     targetHeight: 2
   },
   
@@ -101,10 +116,24 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
   transitionDuration: 1.0,
   
   shoulderView: {
-    position: new THREE.Vector3(1.2, 1.5, -3.5),
-    lookAtOffset: new THREE.Vector3(0, 1.0, 2),
+    position: new THREE.Vector3(1.0, 1.8, -4.0),
+    lookAtOffset: new THREE.Vector3(0, 1.2, 2),
     smoothing: 0.15,
-    fov: 70
+    fov: 65
+  },
+
+  thirdPerson: {
+    distance: 6,
+    height: 2.5,
+    lookAtHeight: 1.2,
+    fov: 60,
+    smoothing: 0.08,
+    rotationSmoothing: 0.12,
+    pitchMin: -Math.PI / 6,   // -30° (look slightly down)
+    pitchMax: Math.PI / 3,    // 60° (look up)
+    sensitivity: 0.003,
+    collisionEnabled: true,
+    collisionPadding: 0.3
   }
 }
 
@@ -117,11 +146,19 @@ export class CameraManager {
   // Cameras
   private freeViewCamera!: THREE.PerspectiveCamera // Free orbital camera
   private shoulderCamera!: THREE.PerspectiveCamera // Shoulder view camera
+  private thirdPersonCamera!: THREE.PerspectiveCamera // Third-person action camera
   private currentCamera!: THREE.Camera
   private currentMode: CameraMode
   
   // Shoulder view configuration
   private shoulderViewOffset: ThirdPersonCameraOffset
+
+  // Third-person orbit state
+  private tpYaw: number = 0
+  private tpPitch: number = 0.3  // Slight downward angle
+  private tpCurrentPos: THREE.Vector3 = new THREE.Vector3()
+  private tpCurrentLookAt: THREE.Vector3 = new THREE.Vector3()
+  private tpInitialised: boolean = false
   
   // Player spotlight
   private playerSpotlight: THREE.SpotLight | null = null
@@ -196,7 +233,7 @@ export class CameraManager {
     this.initializePlayerSpotlight()
     this.setupEventListeners()
     
-    console.log(`📷 CameraManager initialized - Mode: ${this.currentMode === 'freeview' ? 'FREE VIEW' : 'SHOULDER'}`)
+    console.log(`📷 CameraManager initialized - Mode: ${this.currentMode}`)
   }
 
   // ============================================================================
@@ -210,7 +247,8 @@ export class CameraManager {
       freeViewCamera: { ...defaults.freeViewCamera, ...overrides.freeViewCamera },
       playerControls: { ...defaults.playerControls, ...overrides.playerControls },
       spotlight: { ...defaults.spotlight, ...overrides.spotlight },
-      shoulderView: { ...defaults.shoulderView, ...overrides.shoulderView }
+      shoulderView: { ...defaults.shoulderView, ...overrides.shoulderView },
+      thirdPerson: { ...defaults.thirdPerson, ...overrides.thirdPerson }
     }
   }
 
@@ -257,11 +295,27 @@ export class CameraManager {
     this.shoulderCamera.position.y += this.playerHeight
     this.shoulderCamera.name = 'ShoulderCamera'
     
-    // Set initial camera based on default mode
-    this.currentCamera = this.currentMode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
+    // Third-Person Action Camera (orbits around player)
+    this.thirdPersonCamera = new THREE.PerspectiveCamera(
+      this.config.thirdPerson.fov,
+      aspect,
+      0.1,
+      1000
+    )
+    this.thirdPersonCamera.position.copy(this.playerPosition)
+    this.thirdPersonCamera.position.y += this.config.thirdPerson.height
+    this.thirdPersonCamera.position.z -= this.config.thirdPerson.distance
+    this.thirdPersonCamera.name = 'ThirdPersonCamera'
     
-    console.log('📷 Cameras initialized: Free View + Shoulder')
-    console.log(`📷 Current mode: ${this.currentMode === 'freeview' ? 'FREE VIEW' : 'SHOULDER'}`)
+    // Set initial camera based on default mode
+    switch (this.currentMode) {
+      case 'shoulder': this.currentCamera = this.shoulderCamera; break
+      case 'thirdperson': this.currentCamera = this.thirdPersonCamera; break
+      default: this.currentCamera = this.freeViewCamera; break
+    }
+    
+    console.log('📷 Cameras initialized: Free View + Shoulder + Third Person')
+    console.log(`📷 Current mode: ${this.currentMode}`)
     console.log(`📷 Current camera is: ${this.currentCamera.name}`)
   }
 
@@ -295,7 +349,7 @@ export class CameraManager {
     
     // Pointer lock for shoulder camera
     this.container.addEventListener('click', () => {
-      if (this.currentMode === 'shoulder') {
+      if (this.currentMode === 'shoulder' || this.currentMode === 'thirdperson') {
         this.container.requestPointerLock().catch(() => {
           // Pointer lock may fail if not user-initiated, that's okay
         })
@@ -305,12 +359,10 @@ export class CameraManager {
     // Handle pointer lock change
     document.addEventListener('pointerlockchange', this.onPointerLockChange.bind(this))
     
-    // Auto-request pointer lock on initial load if in shoulder mode
-    // This allows trackpad/mouse input to work immediately
-    if (this.currentMode === 'shoulder') {
-      // Request pointer lock after a short delay to ensure page is fully loaded
+    // Auto-request pointer lock on initial load if in shoulder or thirdperson mode
+    if (this.currentMode === 'shoulder' || this.currentMode === 'thirdperson') {
       setTimeout(() => {
-        if (this.currentMode === 'shoulder' && document.pointerLockElement !== this.container) {
+        if ((this.currentMode === 'shoulder' || this.currentMode === 'thirdperson') && document.pointerLockElement !== this.container) {
           this.container.requestPointerLock().catch(() => {
             // Pointer lock requires user interaction, so this may fail initially
             // User will need to click once to enable it
@@ -373,7 +425,12 @@ export class CameraManager {
     // console.log(`📷 Switching camera mode: ${this.currentMode} → ${mode}`)
 
     const fromCamera = this.currentCamera
-    const toCamera = mode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
+    const toCameraMap: Record<CameraMode, THREE.PerspectiveCamera> = {
+      freeview: this.freeViewCamera,
+      shoulder: this.shoulderCamera,
+      thirdperson: this.thirdPersonCamera
+    }
+    const toCamera = toCameraMap[mode]
 
     if (immediate) {
       this.setActiveCamera(mode, true)
@@ -404,23 +461,25 @@ export class CameraManager {
    */
   private setActiveCamera(mode: CameraMode, requestPointerLock: boolean = false): void {
     this.currentMode = mode
-    this.currentCamera = mode === 'freeview' ? this.freeViewCamera : this.shoulderCamera
+    const cameraMap: Record<CameraMode, THREE.PerspectiveCamera> = {
+      freeview: this.freeViewCamera,
+      shoulder: this.shoulderCamera,
+      thirdperson: this.thirdPersonCamera
+    }
+    this.currentCamera = cameraMap[mode]
     
     // Enable/disable appropriate controls
     this.orbitControls.enabled = (mode === 'freeview')
     this.playerControls.enabled = (mode === 'shoulder')
+    // thirdperson uses its own orbit state (tpYaw/tpPitch) via mouse events
     
-    // Handle pointer lock for shoulder mode only when explicitly requested
-    if (mode === 'shoulder' && requestPointerLock) {
-      // Only request pointer lock if we're not already locked
+    // Handle pointer lock for shoulder/thirdperson modes when explicitly requested
+    if ((mode === 'shoulder' || mode === 'thirdperson') && requestPointerLock) {
       if (document.pointerLockElement !== this.container) {
         this.container.requestPointerLock().catch((error) => {
-                  // console.warn('📷 Pointer lock request failed:', error.message)
-        // console.log('📷 Tip: Click on the canvas first, then press C to switch to shoulder camera')
         })
       }
     } else if (mode === 'freeview') {
-      // Exit pointer lock when switching to free view camera
       if (document.pointerLockElement === this.container) {
         document.exitPointerLock()
       }
@@ -434,7 +493,13 @@ export class CameraManager {
   // ============================================================================
 
   private onMouseMove(event: MouseEvent): void {
-    // Only process mouse movement if player controls are enabled
+    // Third-person mode handles its own mouse input
+    if (this.currentMode === 'thirdperson') {
+      this.onMouseMoveThirdPerson(event)
+      return
+    }
+
+    // Only process mouse movement if player controls are enabled (shoulder mode)
     if (!this.playerControls.enabled) {
       return
     }
@@ -494,6 +559,93 @@ export class CameraManager {
   }
 
   // ============================================================================
+  // THIRD-PERSON CAMERA
+  // ============================================================================
+
+  /**
+   * Handle mouse movement for third-person orbit camera
+   */
+  private onMouseMoveThirdPerson(event: MouseEvent): void {
+    let movementX = 0
+    let movementY = 0
+
+    if (document.pointerLockElement === this.container) {
+      movementX = event.movementX || 0
+      movementY = event.movementY || 0
+    } else {
+      // Fallback for non-pointer-lock (trackpad)
+      if (this.lastMouseX === null || this.lastMouseY === null) {
+        this.lastMouseX = event.clientX
+        this.lastMouseY = event.clientY
+        return
+      }
+      movementX = (event.clientX - this.lastMouseX)
+      movementY = (event.clientY - this.lastMouseY)
+      this.lastMouseX = event.clientX
+      this.lastMouseY = event.clientY
+    }
+
+    const sens = this.config.thirdPerson.sensitivity
+    this.tpYaw -= movementX * sens
+    this.tpPitch += movementY * sens  // inverted: mouse up = pitch up = camera goes lower behind
+
+    // Clamp pitch
+    this.tpPitch = Math.max(this.config.thirdPerson.pitchMin, Math.min(this.config.thirdPerson.pitchMax, this.tpPitch))
+  }
+
+  /**
+   * Update third-person camera — orbits around player at configured distance
+   */
+  private updateThirdPersonCamera(deltaTime: number): void {
+    const cfg = this.config.thirdPerson
+
+    // Desired camera position in spherical coordinates around the player
+    const desiredPos = new THREE.Vector3()
+    desiredPos.x = Math.sin(this.tpYaw) * Math.cos(this.tpPitch) * cfg.distance
+    desiredPos.y = Math.sin(this.tpPitch) * cfg.distance + cfg.height
+    desiredPos.z = Math.cos(this.tpYaw) * Math.cos(this.tpPitch) * cfg.distance
+    desiredPos.add(this.playerPosition)
+
+    // Desired look-at target
+    const desiredLookAt = this.playerPosition.clone()
+    desiredLookAt.y += cfg.lookAtHeight
+
+    // Optional: simple raycast collision avoidance against ground
+    if (cfg.collisionEnabled) {
+      // Ensure camera doesn't go below ground + padding
+      const groundY = this.playerPosition.y + cfg.collisionPadding
+      if (desiredPos.y < groundY) {
+        desiredPos.y = groundY
+      }
+    }
+
+    // Smooth interpolation
+    if (!this.tpInitialised) {
+      this.tpCurrentPos.copy(desiredPos)
+      this.tpCurrentLookAt.copy(desiredLookAt)
+      this.tpInitialised = true
+    } else {
+      this.tpCurrentPos.lerp(desiredPos, cfg.smoothing)
+      this.tpCurrentLookAt.lerp(desiredLookAt, cfg.rotationSmoothing)
+    }
+
+    // Apply to camera
+    this.thirdPersonCamera.position.copy(this.tpCurrentPos)
+    this.thirdPersonCamera.lookAt(this.tpCurrentLookAt)
+
+    // Update FOV if changed
+    if (this.thirdPersonCamera.fov !== cfg.fov) {
+      this.thirdPersonCamera.fov = cfg.fov
+      this.thirdPersonCamera.updateProjectionMatrix()
+    }
+
+    // Always show player mesh in third-person
+    if (this.playerMesh) {
+      this.playerMesh.visible = true
+    }
+  }
+
+  // ============================================================================
   // UPDATE METHODS
   // ============================================================================
 
@@ -538,6 +690,8 @@ export class CameraManager {
       this.previousPlayerPosition.copy(this.playerPosition)
     } else if (this.currentMode === 'shoulder') {
       this.updateShoulderCamera(deltaTime)
+    } else if (this.currentMode === 'thirdperson') {
+      this.updateThirdPersonCamera(deltaTime)
     }
   }
 
@@ -725,10 +879,31 @@ export class CameraManager {
   }
 
   /**
+   * Get third-person camera
+   */
+  public getThirdPersonCamera(): THREE.PerspectiveCamera {
+    return this.thirdPersonCamera
+  }
+
+  /**
+   * Get third-person camera yaw (useful for player movement relative to camera)
+   */
+  public getThirdPersonYaw(): number {
+    return this.tpYaw
+  }
+
+  /**
    * Get orbit controls (for free view camera)
    */
   public getOrbitControls(): OrbitControls {
     return this.orbitControls
+  }
+
+  /**
+   * Get the player spotlight (may be null if disabled)
+   */
+  public getPlayerSpotlight(): THREE.SpotLight | null {
+    return this.playerSpotlight
   }
 
   /**
@@ -798,6 +973,12 @@ export class CameraManager {
       if (this.orbitCameraOffset) {
         this.orbitCameraOffset.copy(offset)
       }
+    } else if (this.currentMode === 'thirdperson') {
+      // Third-person mode: orbit around player
+      const gamepadSensitivity = this.config.thirdPerson.sensitivity * 100
+      this.tpYaw -= deltaX * gamepadSensitivity * deltaTime * 60
+      this.tpPitch += deltaY * gamepadSensitivity * deltaTime * 60
+      this.tpPitch = Math.max(this.config.thirdPerson.pitchMin, Math.min(this.config.thirdPerson.pitchMax, this.tpPitch))
     }
   }
 
@@ -823,6 +1004,9 @@ export class CameraManager {
     
     this.shoulderCamera.aspect = aspect
     this.shoulderCamera.updateProjectionMatrix()
+
+    this.thirdPersonCamera.aspect = aspect
+    this.thirdPersonCamera.updateProjectionMatrix()
   }
 
   /**
@@ -839,6 +1023,12 @@ export class CameraManager {
       shoulderCamera: {
         position: this.shoulderCamera.position.toArray(),
         rotation: this.shoulderCamera.rotation.toArray()
+      },
+      thirdPersonCamera: {
+        position: this.thirdPersonCamera.position.toArray(),
+        rotation: this.thirdPersonCamera.rotation.toArray(),
+        yaw: this.tpYaw,
+        pitch: this.tpPitch
       },
       playerControls: {
         enabled: this.playerControls.enabled,

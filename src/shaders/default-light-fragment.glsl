@@ -2,10 +2,7 @@
 // Reusable for any mesh asset that needs sun and spotlight lighting
 // Inherits lighting behavior from common lighting system
 
-#include ./common/lighting-fragment.glsl
-
-uniform vec3 uModelColor;
-
+// Shadow coord varyings must be declared BEFORE the common lighting include
 #ifdef USE_SHADOWMAP
   #if NUM_DIR_LIGHT_SHADOWS > 0
     varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
@@ -14,6 +11,10 @@ uniform vec3 uModelColor;
     varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
   #endif
 #endif
+
+#include ./common/lighting-fragment.glsl
+
+uniform vec3 uModelColor;
 
 varying vec3 vPosition;
 varying vec3 vNormal;
@@ -24,7 +25,7 @@ void main() {
   // Calculate shadows
   float shadow = 1.0;
   #ifdef USE_SHADOWMAP
-    shadow = calculateShadows(vDirectionalShadowCoord, vSpotLightShadowCoord);
+    shadow = calculateShadows();
   #endif
   
   // Apply lighting using common lighting system

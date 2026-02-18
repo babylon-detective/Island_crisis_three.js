@@ -368,6 +368,8 @@ class LandSystem {
   constructor(scene: THREE.Scene) {
     this.scene = scene
     this.landUniforms = {
+      // Three.js light/shadow uniforms — needed for USE_SHADOWMAP in the land shader
+      ...THREE.UniformsLib.lights,
       uTime: { value: 0 },
       uElevation: { value: 8.0 }, // Increased for more dramatic peaks
       uRoughness: { value: 1.2 }, // More terrain variation
@@ -451,7 +453,8 @@ class LandSystem {
         fragmentShader: landShaders.fragment,
         uniforms: this.landUniforms,
         side: THREE.DoubleSide,
-        wireframe: false
+        wireframe: false,
+        lights: true  // Enables USE_SHADOWMAP defines so land receives shadows
       })
       
       // Test compilation by forcing a render check
@@ -767,6 +770,8 @@ interface DebugState {
   active: boolean
   stats: Stats | null
   gui: GUI | null
+  gameplayGui: GUI | null
+  lightingGui: GUI | null
   debugGUIManager: DebugGUIManager | null
   helpers: THREE.Object3D[]
 }
@@ -797,6 +802,23 @@ const Easing = {
       return 0.5 * Math.sin((t - 1) * Math.PI) + 1
     }
   }
+} as const
+
+// ============================================================================
+// PLAYER DEFAULTS — single source of truth for player speed/physics
+// Change values here; they propagate to PlayerController, ParameterManager, & GUI.
+// ============================================================================
+const PLAYER_DEFAULTS = {
+  height: 1.8,
+  radius: 0.5,
+  mass: 70,
+  walkSpeed: 10.0,
+  runSpeed: 50.0,
+  jumpForce: 15.0,
+  gravity: 8.0,
+  groundCheckDistance: 0.1,
+  friction: 0.8,
+  airResistance: 0.95,
 } as const
 
 // ============================================================================
@@ -881,6 +903,8 @@ class IntegratedThreeJSApp {
     active: false,
     stats: null,
     gui: null,
+    gameplayGui: null,
+    lightingGui: null,
     debugGUIManager: null,
     helpers: []
   }
@@ -952,48 +976,16 @@ class IntegratedThreeJSApp {
         this.collisionSystem, 
         this.cameraManager,
         this.landSystem?.getLandUniforms(), // Pass land lighting uniforms
-        {
-          height: 1.8,
-          radius: 0.5,
-          mass: 70,
-          walkSpeed: 2950.0,  // 10x faster (was 25.0)
-          runSpeed: 5200.0,  // 3x sprint speed (was 400.0)
-          jumpForce: 15.0,  // Increased for higher jumps
-          gravity: 8.0,      // CRITICAL FIX: Reduced from 25.0 to 8.0 for better collision detection
-          groundCheckDistance: 0.1,
-          friction: 0.8,
-          airResistance: 0.95
-        }
+        { ...PLAYER_DEFAULTS }
       )
     
     // Initialize gamepad handler and connect to player controller
     this.gamepadHandler = this.inputSystem.createGamepadHandler((input) => {
       this.playerController.handleGamepadInput(input)
       
-      // Handle camera mode toggle (right stick button / R3)
-      if (input.cameraMode) {
-        const currentMode = this.cameraManager.getCurrentMode()
-        const newMode = currentMode === 'freeview' ? 'shoulder' : 'freeview'
-        
-        // Use immediate switch with pointer lock request for gamepad-initiated switches
-        this.cameraManager.switchCamera(newMode, true)
-        
-        // Update the indicator
-        this.updateCameraModeIndicator(newMode)
-        
-        // Toggle player debug wireframe based on debug mode and camera mode
-        if (newMode === 'shoulder' && this.debugState.active) {
-          this.playerController.setDebugVisible(true)
-        } else {
-          this.playerController.setDebugVisible(false)
-        }
-        
-        // Show temporary message
-        if (newMode === 'shoulder') {
-          this.showTemporaryMessage('SHOULDER Camera - Press R3 for Free View', 2000)
-        } else {
-          this.showTemporaryMessage('FREE VIEW Camera - Press R3 for Shoulder View', 2000)
-        }
+      // Handle camera mode toggle (right stick button / R3 or select button)
+      if (input.cameraMode || input.select) {
+        this.cycleCameraMode()
       }
       
       // Handle menu/pause button (start button)
@@ -1047,8 +1039,9 @@ class IntegratedThreeJSApp {
     
     this.animationSystem.start()
 
-    // Initialize character animation system and register Quaternius animation set
-    this.initCharacterAnimations()
+    // Character animation system DISABLED — re-rigging character bones in Blender to match UAL naming.
+    // Uncomment once the character GLB has been re-exported with UAL-compatible bone names.
+    // this.initCharacterAnimations()
     
     // Mark as initialized
     this.isInitialized = true
@@ -1424,6 +1417,15 @@ class IntegratedThreeJSApp {
     
     // Note: DebugGUIManager and ParameterGUI removed - using legacy GUI only
     
+    // Add character shader controls (deferred — waits for player mesh to load)
+    this.playerController.ready.then(() => this.setupCharacterShaderGUI())
+    
+    // Create Gameplay GUI column (separate panel to the left of Controls)
+    this.setupGameplayGUI()
+    
+    // Create Lighting GUI column
+    this.setupLightingGUI()
+    
     // Add helpers
     this.addHelpers()
     
@@ -1451,6 +1453,18 @@ class IntegratedThreeJSApp {
       this.debugState.gui = null
     }
     
+    // Remove gameplay GUI
+    if (this.debugState.gameplayGui) {
+      this.debugState.gameplayGui.destroy()
+      this.debugState.gameplayGui = null
+    }
+    
+    // Remove lighting GUI
+    if (this.debugState.lightingGui) {
+      this.debugState.lightingGui.destroy()
+      this.debugState.lightingGui = null
+    }
+    
     // Dispose of centralized GUI Manager
     if (this.debugState.debugGUIManager) {
       this.debugState.debugGUIManager.dispose()
@@ -1475,6 +1489,319 @@ class IntegratedThreeJSApp {
   // setupGUI method removed - now handled by DebugGUIManager
 
   // All GUI setup methods removed - now handled by DebugGUIManager
+
+  /**
+   * Setup lil-gui controls for the character shader uniforms.
+   * Collects all ShaderMaterials from the player mesh and binds sliders + color pickers.
+   */
+  private setupCharacterShaderGUI(): void {
+    const gui = this.debugState.gui
+    if (!gui) return
+
+    const playerMesh = this.playerController.getMesh()
+    if (!playerMesh) {
+      console.warn('⚠️ Player mesh not available for character shader GUI')
+      return
+    }
+
+    // Collect all ShaderMaterials from the player model
+    const shaderMaterials: THREE.ShaderMaterial[] = []
+    playerMesh.traverse((child: THREE.Object3D) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mat = (child as THREE.Mesh).material
+        if (mat && (mat as THREE.ShaderMaterial).isShaderMaterial) {
+          shaderMaterials.push(mat as THREE.ShaderMaterial)
+        }
+      }
+    })
+
+    if (shaderMaterials.length === 0) {
+      console.warn('⚠️ No ShaderMaterials found on player mesh')
+      return
+    }
+
+    // Read initial values from the first material
+    const ref = shaderMaterials[0].uniforms
+
+    // Proxy object for lil-gui (works with hex strings for colours)
+    const params = {
+      // colour
+      modelColor:     '#' + (ref.uModelColor?.value as THREE.Color).getHexString(),
+      // shading
+      ambient:        ref.uAmbient?.value ?? 0.55,
+      brightBoost:    ref.uBrightBoost?.value ?? 0.18,
+      bands:          ref.uBands?.value ?? 3.0,
+      // primary light (read-only direction set by dominant-light system)
+      lightIntensity: ref.uLightIntensity?.value ?? 1.0,
+      lightColor:     '#' + (ref.uLightColor?.value as THREE.Color ?? new THREE.Color(1,1,0.95)).getHexString(),
+      // secondary light
+      light2Intensity: ref.uLight2Intensity?.value ?? 0.0,
+      light2Color:     '#' + (ref.uLight2Color?.value as THREE.Color ?? new THREE.Color(0.6,0.7,1)).getHexString(),
+      // rim light
+      rimColor:       '#' + (ref.uRimColor?.value as THREE.Color ?? new THREE.Color(1,1,1)).getHexString(),
+      rimStrength:    ref.uRimStrength?.value ?? 0.45,
+      rimPower:       ref.uRimPower?.value ?? 2.5,
+      // specular
+      specStrength:   ref.uSpecStrength?.value ?? 0.15,
+      specPower:      ref.uSpecPower?.value ?? 32.0,
+      // outline
+      outlineWidth:   ref.uOutlineWidth?.value ?? 0.38,
+      outlineColor:   '#' + (ref.uOutlineColor?.value as THREE.Color).getHexString(),
+      // manual light direction override
+      lightDirX:      ref.uLightDir?.value?.x ?? 0.5,
+      lightDirY:      ref.uLightDir?.value?.y ?? 0.8,
+      lightDirZ:      ref.uLightDir?.value?.z ?? 0.3
+    }
+
+    // Helper: update a uniform on every collected material
+    const setUniform = (name: string, value: any) => {
+      for (const mat of shaderMaterials) {
+        if (mat.uniforms[name]) mat.uniforms[name].value = value
+      }
+    }
+    const setColorUniform = (name: string, hex: string) => {
+      for (const mat of shaderMaterials) {
+        if (mat.uniforms[name]) (mat.uniforms[name].value as THREE.Color).set(hex)
+      }
+    }
+
+    const folder = gui.addFolder('🎨 Character Shader')
+
+    // ---- Colour & Shading ----
+    folder.addColor(params, 'modelColor').name('Model Color').onChange((v: string) => setColorUniform('uModelColor', v))
+    folder.add(params, 'ambient',     0,   1,   0.01).name('Ambient').onChange((v: number) => setUniform('uAmbient', v))
+    folder.add(params, 'brightBoost', 0,   0.5, 0.01).name('Bright Boost').onChange((v: number) => setUniform('uBrightBoost', v))
+    folder.add(params, 'bands',       1,   8,   1).name('Toon Bands').onChange((v: number) => setUniform('uBands', v))
+
+    // ---- Rim / Back Light ----
+    const rimFolder = folder.addFolder('💡 Rim Light')
+    rimFolder.addColor(params, 'rimColor').name('Rim Color').onChange((v: string) => setColorUniform('uRimColor', v))
+    rimFolder.add(params, 'rimStrength', 0,   1.5, 0.01).name('Rim Strength').onChange((v: number) => setUniform('uRimStrength', v))
+    rimFolder.add(params, 'rimPower',    0.5, 8.0, 0.1).name('Rim Power').onChange((v: number) => setUniform('uRimPower', v))
+
+    // ---- Specular ----
+    const specFolder = folder.addFolder('✨ Specular')
+    specFolder.add(params, 'specStrength', 0,  0.5, 0.01).name('Spec Strength').onChange((v: number) => setUniform('uSpecStrength', v))
+    specFolder.add(params, 'specPower',    4, 128,  1).name('Spec Power').onChange((v: number) => setUniform('uSpecPower', v))
+    specFolder.close()
+
+    // ---- Outline ----
+    const outFolder = folder.addFolder('🖊️ Outline')
+    outFolder.add(params, 'outlineWidth', 0, 1, 0.01).name('Width').onChange((v: number) => setUniform('uOutlineWidth', v))
+    outFolder.addColor(params, 'outlineColor').name('Color').onChange((v: string) => setColorUniform('uOutlineColor', v))
+    outFolder.close()
+
+    // ---- Dominant Lights (artist overrides) ----
+    const lightFolder = folder.addFolder('☀️ Dominant Lights')
+    lightFolder.addColor(params, 'lightColor').name('Light 1 Color').onChange((v: string) => setColorUniform('uLightColor', v))
+    lightFolder.add(params, 'lightIntensity', 0, 3, 0.01).name('Light 1 Intensity').onChange((v: number) => setUniform('uLightIntensity', v))
+    lightFolder.addColor(params, 'light2Color').name('Light 2 Color').onChange((v: string) => setColorUniform('uLight2Color', v))
+    lightFolder.add(params, 'light2Intensity', 0, 3, 0.01).name('Light 2 Intensity').onChange((v: number) => setUniform('uLight2Intensity', v))
+    lightFolder.close()
+
+    folder.open()
+    console.log(`🎨 Character shader GUI created (${shaderMaterials.length} material(s))`)
+  }
+
+  // ============================================================================
+  // LIGHTING GUI
+  // ============================================================================
+
+  /**
+   * Create a "Lighting" lil-gui panel with World and Local lighting controls.
+   */
+  private setupLightingGUI(): void {
+    if (this.debugState.lightingGui) return
+
+    const gui = new GUI({ title: 'Lighting' })
+    gui.domElement.style.position = 'absolute'
+    gui.domElement.style.top = '0px'
+    gui.domElement.style.right = '490px' // 3rd column to the left
+    this.container.appendChild(gui.domElement)
+    this.debugState.lightingGui = gui
+
+    // ----------------------------------------------------------------
+    // WORLD LIGHTING
+    // ----------------------------------------------------------------
+    const world = gui.addFolder('🌍 World Lighting')
+
+    // --- Ambient ---
+    const ambientParams = {
+      color: '#' + this.ambientLight.color.getHexString(),
+      intensity: this.ambientLight.intensity,
+    }
+    const ambFolder = world.addFolder('Ambient')
+    ambFolder.addColor(ambientParams, 'color').name('Color')
+      .onChange((v: string) => this.ambientLight.color.set(v))
+    ambFolder.add(ambientParams, 'intensity', 0, 2, 0.01).name('Intensity')
+      .onChange((v: number) => { this.ambientLight.intensity = v })
+    ambFolder.open()
+
+    // --- Key Light ---
+    const kl = this.keyLight
+    const keyParams = {
+      color: '#' + kl.color.getHexString(),
+      intensity: kl.intensity,
+      posX: kl.position.x,
+      posY: kl.position.y,
+      posZ: kl.position.z,
+      castShadow: kl.castShadow,
+      shadowRadius: kl.shadow.radius,
+      shadowBias: kl.shadow.bias,
+    }
+    const keyFolder = world.addFolder('☀️ Key Light')
+    keyFolder.addColor(keyParams, 'color').name('Color')
+      .onChange((v: string) => kl.color.set(v))
+    keyFolder.add(keyParams, 'intensity', 0, 5, 0.01).name('Intensity')
+      .onChange((v: number) => { kl.intensity = v })
+    keyFolder.add(keyParams, 'posX', -100, 100, 0.5).name('Pos X')
+      .onChange((v: number) => { kl.position.x = v })
+    keyFolder.add(keyParams, 'posY', 0, 100, 0.5).name('Pos Y')
+      .onChange((v: number) => { kl.position.y = v })
+    keyFolder.add(keyParams, 'posZ', -100, 100, 0.5).name('Pos Z')
+      .onChange((v: number) => { kl.position.z = v })
+    keyFolder.add(keyParams, 'castShadow').name('Cast Shadow')
+      .onChange((v: boolean) => { kl.castShadow = v })
+    keyFolder.add(keyParams, 'shadowRadius', 0, 10, 0.1).name('Shadow Radius')
+      .onChange((v: number) => { kl.shadow.radius = v })
+    keyFolder.add(keyParams, 'shadowBias', -0.01, 0.01, 0.0001).name('Shadow Bias')
+      .onChange((v: number) => { kl.shadow.bias = v })
+    keyFolder.close()
+
+    // --- Fill Light ---
+    const fl = this.fillLight
+    const fillParams = {
+      color: '#' + fl.color.getHexString(),
+      intensity: fl.intensity,
+      posX: fl.position.x,
+      posY: fl.position.y,
+      posZ: fl.position.z,
+    }
+    const fillFolder = world.addFolder('🌙 Fill Light')
+    fillFolder.addColor(fillParams, 'color').name('Color')
+      .onChange((v: string) => fl.color.set(v))
+    fillFolder.add(fillParams, 'intensity', 0, 3, 0.01).name('Intensity')
+      .onChange((v: number) => { fl.intensity = v })
+    fillFolder.add(fillParams, 'posX', -100, 100, 0.5).name('Pos X')
+      .onChange((v: number) => { fl.position.x = v })
+    fillFolder.add(fillParams, 'posY', 0, 100, 0.5).name('Pos Y')
+      .onChange((v: number) => { fl.position.y = v })
+    fillFolder.add(fillParams, 'posZ', -100, 100, 0.5).name('Pos Z')
+      .onChange((v: number) => { fl.position.z = v })
+    fillFolder.close()
+
+    world.open()
+
+    // ----------------------------------------------------------------
+    // LOCAL LIGHTING
+    // ----------------------------------------------------------------
+    const local = gui.addFolder('💡 Local Lighting')
+
+    // --- Player Spotlight ---
+    const spotlight = this.cameraManager.getPlayerSpotlight()
+    if (spotlight) {
+      const RAD2DEG = 180 / Math.PI
+      const DEG2RAD = Math.PI / 180
+      const spotParams = {
+        color: '#' + spotlight.color.getHexString(),
+        intensity: spotlight.intensity,
+        angle: spotlight.angle * RAD2DEG,
+        penumbra: spotlight.penumbra,
+        decay: spotlight.decay,
+        distance: spotlight.distance,
+        posX: spotlight.position.x,
+        posY: spotlight.position.y,
+        posZ: spotlight.position.z,
+        castShadow: spotlight.castShadow,
+        shadowNear: spotlight.shadow.camera.near,
+        shadowFar: spotlight.shadow.camera.far,
+        visible: spotlight.visible,
+      }
+
+      const spotFolder = local.addFolder('🔦 Player Spotlight')
+      spotFolder.add(spotParams, 'visible').name('Enabled')
+        .onChange((v: boolean) => { spotlight.visible = v })
+      spotFolder.addColor(spotParams, 'color').name('Color')
+        .onChange((v: string) => spotlight.color.set(v))
+      spotFolder.add(spotParams, 'intensity', 0, 20, 0.1).name('Intensity')
+        .onChange((v: number) => { spotlight.intensity = v })
+      spotFolder.add(spotParams, 'angle', 1, 90, 0.5).name('Cone Angle (°)')
+        .onChange((v: number) => { spotlight.angle = v * DEG2RAD })
+      spotFolder.add(spotParams, 'penumbra', 0, 1, 0.01).name('Penumbra')
+        .onChange((v: number) => { spotlight.penumbra = v })
+      spotFolder.add(spotParams, 'decay', 0, 5, 0.1).name('Decay')
+        .onChange((v: number) => { spotlight.decay = v })
+      spotFolder.add(spotParams, 'distance', 0, 200, 1).name('Distance')
+        .onChange((v: number) => { spotlight.distance = v })
+      spotFolder.add(spotParams, 'posX', -50, 50, 0.5).name('Offset X')
+        .onChange((v: number) => { spotlight.position.x = v })
+      spotFolder.add(spotParams, 'posY', 0, 100, 0.5).name('Height')
+        .onChange((v: number) => { spotlight.position.y = v })
+      spotFolder.add(spotParams, 'posZ', -50, 50, 0.5).name('Offset Z')
+        .onChange((v: number) => { spotlight.position.z = v })
+      spotFolder.add(spotParams, 'castShadow').name('Cast Shadow')
+        .onChange((v: boolean) => { spotlight.castShadow = v })
+      spotFolder.add(spotParams, 'shadowNear', 0.1, 50, 0.1).name('Shadow Near')
+        .onChange((v: number) => { spotlight.shadow.camera.near = v; spotlight.shadow.camera.updateProjectionMatrix() })
+      spotFolder.add(spotParams, 'shadowFar', 10, 500, 1).name('Shadow Far')
+        .onChange((v: number) => { spotlight.shadow.camera.far = v; spotlight.shadow.camera.updateProjectionMatrix() })
+      spotFolder.open()
+    } else {
+      local.add({ note: 'Spotlight disabled' }, 'note').name('Status').disable()
+    }
+
+    local.open()
+    gui.open()
+    console.log('💡 Lighting GUI created')
+  }
+
+  // ============================================================================
+  // GAMEPLAY GUI
+  // ============================================================================
+
+  /**
+   * Create a "Gameplay" lil-gui panel to the left of the Controls panel.
+   * Exposes walk/run speed, jump force, gravity and friction.
+   */
+  private setupGameplayGUI(): void {
+    if (this.debugState.gameplayGui) return // already created
+
+    const gui = new GUI({ title: 'Gameplay' })
+    gui.domElement.style.position = 'absolute'
+    gui.domElement.style.top = '0px'
+    gui.domElement.style.right = '245px' // offset to the left of the Controls panel (~245px)
+    this.container.appendChild(gui.domElement)
+    this.debugState.gameplayGui = gui
+
+    const config = this.playerController.getConfig()
+
+    const params = {
+      walkSpeed:  config.walkSpeed,
+      runSpeed:   config.runSpeed,
+      jumpForce:  config.jumpForce,
+      gravity:    config.gravity,
+      friction:   config.friction,
+    }
+
+    const movement = gui.addFolder('🏃 Movement')
+    movement.add(params, 'walkSpeed', 10, 1000, 5).name('Walk Speed')
+      .onChange((v: number) => this.playerController.updateConfig({ walkSpeed: v }))
+    movement.add(params, 'runSpeed', 50, 5000, 25).name('Run Speed')
+      .onChange((v: number) => this.playerController.updateConfig({ runSpeed: v }))
+    movement.open()
+
+    const physics = gui.addFolder('⚡ Physics')
+    physics.add(params, 'jumpForce', 1, 30, 0.5).name('Jump Force')
+      .onChange((v: number) => this.playerController.updateConfig({ jumpForce: v }))
+    physics.add(params, 'gravity', 1, 60, 0.5).name('Gravity')
+      .onChange((v: number) => this.playerController.updateConfig({ gravity: v }))
+    physics.add(params, 'friction', 0, 1, 0.01).name('Friction')
+      .onChange((v: number) => this.playerController.updateConfig({ friction: v }))
+    physics.open()
+
+    gui.open()
+    console.log('🎮 Gameplay GUI created')
+  }
 
   private addHelpers(): void {
     // Grid helper
@@ -1571,17 +1898,6 @@ class IntegratedThreeJSApp {
     // Update all systems with current parameter values
     this.parameterIntegration.updateAllSystems()
     
-    // Force sync player speeds from ParameterManager to PlayerController
-    const walkSpeed = this.parameterManager.getParameter('player', 'walkSpeed')
-    const runSpeed = this.parameterManager.getParameter('player', 'runSpeed')
-    if (walkSpeed !== null && runSpeed !== null) {
-      this.playerController.updateConfig({
-        walkSpeed: walkSpeed,
-        runSpeed: runSpeed
-      })
-      // logger.info(LogModule.SYSTEM, `Player speeds synced: walk=${walkSpeed}, run=${runSpeed}`)
-    }
-    
     // Load state "1" as default, or create it if it doesn't exist
     const savedStates = this.parameterManager.getSavedStateNames()
     if (savedStates.includes('1')) {
@@ -1599,6 +1915,13 @@ class IntegratedThreeJSApp {
       this.parameterManager.saveState('1')
       logger.info(LogModule.SYSTEM, 'Created state "1" as default startup state with current parameters')
     }
+    
+    // AUTHORITATIVE speed sync — runs AFTER all localStorage / state loads.
+    // Uses setParameter() so ParameterManager, localStorage, AND PlayerController
+    // all agree on the canonical values from PLAYER_DEFAULTS.
+    this.parameterManager.setParameter('player', 'walkSpeed', PLAYER_DEFAULTS.walkSpeed, 'startup_override')
+    this.parameterManager.setParameter('player', 'runSpeed', PLAYER_DEFAULTS.runSpeed, 'startup_override')
+    this.playerController.updateConfig({ walkSpeed: PLAYER_DEFAULTS.walkSpeed, runSpeed: PLAYER_DEFAULTS.runSpeed })
     
     // Also save an 'initial' state for reference if no saved states exist
     if (savedStates.length === 0) {
@@ -1620,32 +1943,9 @@ class IntegratedThreeJSApp {
     
     // Add keyboard listener for camera switching
     document.addEventListener('keydown', (event) => {
-      // C key - Toggle between FREE VIEW and SHOULDER cameras
+      // C key - Cycle between FREE VIEW, SHOULDER, and THIRD PERSON cameras
       if (event.code === 'KeyC') {
-        const currentMode = this.cameraManager.getCurrentMode()
-        const newMode = currentMode === 'freeview' ? 'shoulder' : 'freeview'
-        
-        // Use immediate switch with pointer lock request for user-initiated switches
-        this.cameraManager.switchCamera(newMode, true)
-        
-        // Update the indicator
-        this.updateCameraModeIndicator(newMode)
-        
-        // Toggle player debug wireframe based on debug mode and camera mode
-        if (newMode === 'shoulder' && this.debugState.active) {
-          this.playerController.setDebugVisible(true)
-        } else {
-          this.playerController.setDebugVisible(false)
-        }
-        
-        // console.log(`📷 Switched to ${newMode} camera`)
-        
-        // Additional guidance for camera modes
-        if (newMode === 'shoulder') {
-          this.showTemporaryMessage('SHOULDER Camera - Press C for Free View', 2000)
-        } else {
-          this.showTemporaryMessage('FREE VIEW Camera - Press C for Shoulder View', 2000)
-        }
+        this.cycleCameraMode()
       }
       
       // Enter/Return key - Menu/Pause (only when overlay is NOT already shown,
@@ -1660,8 +1960,57 @@ class IntegratedThreeJSApp {
     if (this.debugState.active) {
       this.playerController.setDebugVisible(true)
     }
+
+    // Create virtual SELECT button for mobile touch screens
+    this.createMobileSelectButton()
     
     // console.log('📷 Camera controls: C = Switch camera | V = Cycle 3rd person views')
+  }
+
+  /**
+   * Create a virtual SELECT button on mobile for camera mode cycling.
+   * Hidden on devices with a mouse / keyboard.
+   */
+  private createMobileSelectButton(): void {
+    // Only show on touch devices
+    if (!('ontouchstart' in window)) return
+
+    const btn = document.createElement('button')
+    btn.id = 'mobile-select-btn'
+    btn.textContent = '📷'
+    btn.style.cssText = `
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.5);
+      background: rgba(0,0,0,0.45);
+      color: white;
+      font-size: 24px;
+      z-index: 1100;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.15s;
+    `
+    btn.addEventListener('touchstart', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      btn.style.background = 'rgba(255,255,255,0.25)'
+      this.cycleCameraMode()
+    }, { passive: false })
+    btn.addEventListener('touchend', (e) => {
+      e.preventDefault()
+      btn.style.background = 'rgba(0,0,0,0.45)'
+    })
+    document.body.appendChild(btn)
   }
 
   /**
@@ -1684,30 +2033,53 @@ class IntegratedThreeJSApp {
       pointer-events: none;
       transition: all 0.3s ease;
     `
-    // Initialize with current camera mode
-    const currentMode = this.cameraManager.getCurrentMode()
-    indicator.textContent = currentMode === 'freeview' ? 'Camera: FREE VIEW' : 'Camera: SHOULDER'
-    if (currentMode === 'freeview') {
-      indicator.style.background = 'rgba(0, 128, 0, 0.8)'
-    }
     document.body.appendChild(indicator)
+    // Initialize with current camera mode
+    this.updateCameraModeIndicator(this.cameraManager.getCurrentMode())
+  }
+
+  /**
+   * Cycle camera modes: thirdperson → shoulder → freeview → thirdperson …
+   */
+  private cycleCameraMode(): void {
+    const currentMode = this.cameraManager.getCurrentMode()
+    const modeOrder: Array<'freeview' | 'shoulder' | 'thirdperson'> = ['thirdperson', 'shoulder', 'freeview']
+    const idx = modeOrder.indexOf(currentMode)
+    const newMode = modeOrder[(idx + 1) % modeOrder.length]
+
+    this.cameraManager.switchCamera(newMode, true)
+    this.updateCameraModeIndicator(newMode)
+
+    // Toggle player debug wireframe based on debug mode and camera mode
+    if (newMode === 'shoulder' && this.debugState.active) {
+      this.playerController.setDebugVisible(true)
+    } else {
+      this.playerController.setDebugVisible(false)
+    }
+
+    const modeLabels: Record<string, string> = {
+      freeview: 'FREE VIEW',
+      shoulder: 'SHOULDER',
+      thirdperson: 'THIRD PERSON'
+    }
+    this.showTemporaryMessage(`${modeLabels[newMode]} Camera - Press C / Select to cycle`, 2000)
   }
 
   /**
    * Update the camera mode indicator
    */
-  private updateCameraModeIndicator(mode: 'freeview' | 'shoulder'): void {
+  private updateCameraModeIndicator(mode: 'freeview' | 'shoulder' | 'thirdperson'): void {
     const indicator = document.getElementById('camera-mode-indicator')
     if (indicator) {
-      if (mode === 'shoulder') {
-        indicator.textContent = 'Camera: SHOULDER'
-        indicator.style.background = 'rgba(0, 128, 0, 0.8)'
-        indicator.style.color = 'white'
-      } else {
-        indicator.textContent = 'Camera: FREE VIEW'
-        indicator.style.background = 'rgba(30, 144, 255, 0.8)'
-        indicator.style.color = 'white'
+      const labels: Record<string, { text: string; bg: string }> = {
+        freeview: { text: 'Camera: FREE VIEW', bg: 'rgba(30, 144, 255, 0.8)' },
+        shoulder: { text: 'Camera: SHOULDER', bg: 'rgba(0, 128, 0, 0.8)' },
+        thirdperson: { text: 'Camera: THIRD PERSON', bg: 'rgba(180, 80, 220, 0.8)' }
       }
+      const cfg = labels[mode] || labels.freeview
+      indicator.textContent = cfg.text
+      indicator.style.background = cfg.bg
+      indicator.style.color = 'white'
     }
   }
 
@@ -1774,6 +2146,103 @@ class IntegratedThreeJSApp {
       // Show pause overlay and pause the game
       this.pauseOverlay.show()
       this.pauseManager.setPaused(true)
+    }
+  }
+
+  // ============================================================================
+  // DOMINANT LIGHT SELECTION — picks 1-2 strongest lights for character shader
+  // Runs per-frame; pushes results into all player ShaderMaterial uniforms.
+  // ============================================================================
+
+  /** Reusable scratch vectors to avoid per-frame allocations */
+  private _lightScratchDir = new THREE.Vector3()
+
+  private updateCharacterLighting(): void {
+    const playerMesh = this.playerController.getMesh()
+    if (!playerMesh) return
+
+    const playerPos = playerMesh.position
+
+    // ---- Collect candidate lights from the scene ----
+    interface LightCandidate {
+      dir: THREE.Vector3    // direction FROM object TO light (normalised)
+      color: THREE.Color
+      influence: number     // intensity × attenuation
+    }
+    const candidates: LightCandidate[] = []
+
+    this.scene.traverse((obj: THREE.Object3D) => {
+      if (obj === this.ambientLight) return // skip ambient
+      if (!obj.visible) return
+
+      if (obj instanceof THREE.DirectionalLight) {
+        // Directional lights have no position attenuation — influence = intensity
+        const dir = this._lightScratchDir
+          .copy(obj.position)
+          .sub(obj.target.position)
+          .normalize()
+        candidates.push({
+          dir: dir.clone(),
+          color: obj.color.clone(),
+          influence: obj.intensity
+        })
+      } else if (obj instanceof THREE.PointLight) {
+        const dir = this._lightScratchDir.copy(obj.position).sub(playerPos)
+        const dist = dir.length()
+        if (dist < 0.01) return
+        dir.normalize()
+        const attenuation = 1.0 / (1.0 + dist * dist * 0.01)
+        candidates.push({
+          dir: dir.clone(),
+          color: obj.color.clone(),
+          influence: obj.intensity * attenuation
+        })
+      } else if (obj instanceof THREE.SpotLight) {
+        const dir = this._lightScratchDir.copy(obj.position).sub(playerPos)
+        const dist = dir.length()
+        if (dist < 0.01) return
+        dir.normalize()
+        const attenuation = 1.0 / (1.0 + dist * dist * 0.01)
+        candidates.push({
+          dir: dir.clone(),
+          color: obj.color.clone(),
+          influence: obj.intensity * attenuation * 0.5 // spot lights contribute less broadly
+        })
+      }
+    })
+
+    // Sort descending by influence
+    candidates.sort((a, b) => b.influence - a.influence)
+
+    // ---- Push top 1-2 lights into character shader uniforms ----
+    const setAll = (name: string, value: any) => {
+      playerMesh.traverse((child: THREE.Object3D) => {
+        const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
+        if (m?.isShaderMaterial && m.uniforms[name]) {
+          const u = m.uniforms[name]
+          if (value instanceof THREE.Vector3)      (u.value as THREE.Vector3).copy(value)
+          else if (value instanceof THREE.Color)   (u.value as THREE.Color).copy(value)
+          else                                      u.value = value
+        }
+      })
+    }
+
+    // Primary dominant light
+    if (candidates.length >= 1) {
+      const c = candidates[0]
+      setAll('uLightDir',       c.dir)
+      setAll('uLightColor',     c.color)
+      setAll('uLightIntensity', c.influence)
+    }
+
+    // Secondary light (or zero-out)
+    if (candidates.length >= 2) {
+      const c = candidates[1]
+      setAll('uLight2Dir',       c.dir)
+      setAll('uLight2Color',     c.color)
+      setAll('uLight2Intensity', c.influence)
+    } else {
+      setAll('uLight2Intensity', 0.0)
     }
   }
 
@@ -2034,6 +2503,8 @@ class IntegratedThreeJSApp {
     
     // Click handler for objects
     this.renderer.domElement.addEventListener('click', this.onCanvasClick.bind(this))
+    // Double-click handler for freeview mesh selection & zoom
+    this.renderer.domElement.addEventListener('dblclick', this.onCanvasDblClick.bind(this))
     
     // Keyboard shortcuts
     document.addEventListener('keydown', (event) => {
@@ -2053,7 +2524,10 @@ class IntegratedThreeJSApp {
           }
           break
         case 'p':
-          // console.log((window as any).getPerformanceStats())
+          if (this.playerController) {
+            const poseName = this.playerController.cyclePose()
+            console.log(`🧍 Pose: ${poseName}`)
+          }
           break
       }
     })
@@ -2092,8 +2566,10 @@ class IntegratedThreeJSApp {
       -((event.clientY - rect.top) / rect.height) * 2 + 1
     )
     
+    // Use CameraManager's active camera for raycasting
+    const activeCamera = this.cameraManager.getCamera() as THREE.PerspectiveCamera
     const raycaster = new THREE.Raycaster()
-    raycaster.setFromCamera(mouse, this.camera)
+    raycaster.setFromCamera(mouse, activeCamera)
     
     // Get ALL meshes in the scene (recursive traversal)
     const allMeshes: THREE.Mesh[] = []
@@ -2107,8 +2583,7 @@ class IntegratedThreeJSApp {
     
     if (intersects.length > 0) {
       const clickedObject = intersects[0].object as THREE.Mesh
-      // const distance = intersects[0].distance // Unused for now
-      // const point = intersects[0].point // Unused for now
+      const point = intersects[0].point
       
       // Find the mesh index in scene traversal order
       // const meshIndex = allMeshes.findIndex(mesh => mesh.uuid === clickedObject.uuid) // Unused for now
@@ -2190,9 +2665,108 @@ class IntegratedThreeJSApp {
           // console.log('🏔️ Land mesh clicked - no highlight animation (too large)')
         }
       }
+
     } else {
       // console.log('❌ No mesh clicked - clicked on empty space')
     }
+  }
+
+  /**
+   * Double-click handler: in freeview mode, raycast and zoom to selected mesh.
+   */
+  private onCanvasDblClick(event: MouseEvent): void {
+    if (this.cameraManager.getCurrentMode() !== 'freeview') return
+
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    )
+
+    const activeCamera = this.cameraManager.getCamera() as THREE.PerspectiveCamera
+    const raycaster = new THREE.Raycaster()
+    raycaster.setFromCamera(mouse, activeCamera)
+
+    const allMeshes: THREE.Mesh[] = []
+    this.scene.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        allMeshes.push(object)
+      }
+    })
+
+    const intersects = raycaster.intersectObjects(allMeshes)
+    if (intersects.length > 0) {
+      const clickedObject = intersects[0].object as THREE.Mesh
+      const point = intersects[0].point
+      this.zoomToSelection(clickedObject, point)
+    }
+  }
+
+  // ============================================================================
+  // FREEVIEW MESH SELECTION & ZOOM
+  // ============================================================================
+
+  /**
+   * In freeview mode, zoom OrbitControls to the bounding box of the
+   * clicked mesh (or its parent group).  Walks up the hierarchy to find
+   * the nearest meaningful group so that multi-mesh models are framed as
+   * a unit.
+   */
+  private zoomToSelection(clickedMesh: THREE.Object3D, hitPoint: THREE.Vector3): void {
+    // Walk up to find a meaningful parent group (skip Scene)
+    let target: THREE.Object3D = clickedMesh
+    let parent = clickedMesh.parent
+    while (parent && !(parent instanceof THREE.Scene)) {
+      // If the parent is a Group / Object3D with a name or userData.id, treat it as the unit
+      if (parent instanceof THREE.Group || (parent.children.length > 1 && parent.name)) {
+        target = parent
+        break
+      }
+      parent = parent.parent
+    }
+
+    // Compute world-space bounding box of the selection
+    const box = new THREE.Box3().setFromObject(target)
+    if (box.isEmpty()) return
+
+    const center = box.getCenter(new THREE.Vector3())
+    const size = box.getSize(new THREE.Vector3())
+    const maxDim = Math.max(size.x, size.y, size.z)
+    const freeCamera = this.cameraManager.getFreeViewCamera()
+    const fov = freeCamera.fov * (Math.PI / 180)
+    // Distance so the bounding sphere roughly fills 60 % of the viewport
+    const fitDistance = Math.max(maxDim / (2 * Math.tan(fov / 2)) * 1.4, 2)
+
+    const orbitControls = this.cameraManager.getOrbitControls()
+
+    // Smoothly animate target & camera position
+    const startTarget = orbitControls.target.clone()
+    const startPos = freeCamera.position.clone()
+
+    // Desired camera position: keep same direction but at fitDistance from center
+    const direction = startPos.clone().sub(startTarget).normalize()
+    const endPos = center.clone().add(direction.multiplyScalar(fitDistance))
+
+    const duration = 600 // ms
+    const startTime = performance.now()
+
+    const animateZoom = () => {
+      const elapsed = performance.now() - startTime
+      const t = Math.min(elapsed / duration, 1)
+      // Ease-out cubic
+      const ease = 1 - Math.pow(1 - t, 3)
+
+      orbitControls.target.lerpVectors(startTarget, center, ease)
+      freeCamera.position.lerpVectors(startPos, endPos, ease)
+      orbitControls.update()
+
+      if (t < 1) {
+        requestAnimationFrame(animateZoom)
+      } else {
+        this.showTemporaryMessage(`Selected: ${target.name || target.type} (${target.children.length} children)`, 2000)
+      }
+    }
+    requestAnimationFrame(animateZoom)
   }
 
   private animate(): void {
@@ -2226,6 +2800,9 @@ class IntegratedThreeJSApp {
       
       // Update player controller (physics, movement, collision)
       this.playerController.update(deltaTime)
+
+      // Update dominant light selection for the character shader
+      this.updateCharacterLighting()
       
       // Update HUD with current data
       this.updateHUD(deltaTime)

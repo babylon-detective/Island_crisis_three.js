@@ -150,8 +150,8 @@ export const DEFAULT_PARAMETER_SETS: Record<ParameterCategory, ParameterSet> = {
     version: '1.0.0',
     lastModified: Date.now(),
     parameters: [
-      { id: 'walkSpeed', category: 'player', type: 'number', min: 1, max: 500, step: 0.5, defaultValue: 250.0, currentValue: 250.0, description: 'Walk speed', unit: 'units/s' },
-      { id: 'runSpeed', category: 'player', type: 'number', min: 5, max: 800, step: 0.5, defaultValue: 400.0, currentValue: 400.0, description: 'Run speed', unit: 'units/s' },
+      { id: 'walkSpeed', category: 'player', type: 'number', min: 1, max: 500, step: 0.5, defaultValue: 10.0, currentValue: 10.0, description: 'Walk speed', unit: 'units/s' },
+      { id: 'runSpeed', category: 'player', type: 'number', min: 5, max: 800, step: 0.5, defaultValue: 50.0, currentValue: 50.0, description: 'Run speed', unit: 'units/s' },
       { id: 'jumpForce', category: 'player', type: 'number', min: 5, max: 30, step: 0.5, defaultValue: 15.0, currentValue: 15.0, description: 'Jump force', unit: 'units/s' },
       { id: 'gravity', category: 'player', type: 'number', min: 10, max: 50, step: 1, defaultValue: 25.0, currentValue: 25.0, description: 'Gravity strength', unit: 'units/s²' },
       { id: 'radius', category: 'player', type: 'number', min: 0.1, max: 2, step: 0.1, defaultValue: 0.5, currentValue: 0.5, description: 'Player radius', unit: 'units' },

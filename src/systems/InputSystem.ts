@@ -279,7 +279,7 @@ class CameraControlHandler extends BaseInputHandler {
 class GamepadInputHandler extends BaseInputHandler {
   public priority = 15 // Higher priority than camera controls
 
-  private deadzone = 0.1
+  private deadzone = 0.2
   private previousState: GamepadState | null = null
 
   constructor(
@@ -290,6 +290,8 @@ class GamepadInputHandler extends BaseInputHandler {
       run: boolean
       action: boolean
       cameraMode: boolean
+      select: boolean
+      menu: boolean
     }) => void
   ) {
     super()
@@ -324,9 +326,10 @@ class GamepadInputHandler extends BaseInputHandler {
 
     // Button states
     const jump = gamepad.buttons.a
-    const run = gamepad.buttons.b || gamepad.rt > 0.5 // B button or right trigger
+    const run = gamepad.buttons.ls // Hold left stick (L3) to run (like SHIFT on keyboard)
     const action = gamepad.buttons.x
-    const cameraMode = this.wasButtonPressed('rs', gamepad) // Right stick button (R3) for camera mode toggle
+    const cameraMode = this.wasButtonPressed('rs', gamepad) // Right stick (R3) to toggle camera (like C key)
+    const select = this.wasButtonPressed('select', gamepad) // Select/Back button for view cycle
     const menu = this.wasButtonPressed('start', gamepad) // Start button for menu/pause
 
     // Send processed input to player controller
@@ -338,6 +341,7 @@ class GamepadInputHandler extends BaseInputHandler {
         run,
         action,
         cameraMode,
+        select,
         menu
       })
     }
@@ -739,6 +743,7 @@ export class InputSystem {
       run: boolean
       action: boolean
       cameraMode: boolean
+      select: boolean
       menu: boolean
     }) => void
   ): GamepadInputHandler {

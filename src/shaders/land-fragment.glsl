@@ -1,3 +1,14 @@
+// Shadow coord varyings must be declared BEFORE the common lighting include,
+// because calculateShadows() reads from them directly.
+#ifdef USE_SHADOWMAP
+  #if NUM_DIR_LIGHT_SHADOWS > 0
+    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
+  #endif
+  #if NUM_SPOT_LIGHT_SHADOWS > 0
+    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
+  #endif
+#endif
+
 #include ./common/lighting-fragment.glsl
 
 uniform float uTime;
@@ -11,15 +22,6 @@ uniform float uMoisture;
 uniform float uIslandRadius;
 uniform float uCoastSmoothness;
 uniform float uSeaLevel;
-
-#ifdef USE_SHADOWMAP
-  #if NUM_DIR_LIGHT_SHADOWS > 0
-    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
-  #endif
-  #if NUM_SPOT_LIGHT_SHADOWS > 0
-    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
-  #endif
-#endif
 
 varying vec3 vPosition;
 varying vec3 vNormal;
@@ -84,7 +86,7 @@ void main() {
     // Calculate shadows
     float shadow = 1.0;
     #ifdef USE_SHADOWMAP
-      shadow = calculateShadows(vDirectionalShadowCoord, vSpotLightShadowCoord);
+      shadow = calculateShadows();
     #endif
     
     // Apply lighting using common lighting system

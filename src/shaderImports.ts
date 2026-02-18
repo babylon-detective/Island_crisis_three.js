@@ -21,20 +21,13 @@ import lightingVertexChunk from './shaders/common/lighting-vertex.glsl'
 import lightingFragmentChunk from './shaders/common/lighting-fragment.glsl'
 
 // Shaders that use common lighting (prepend the chunks)
-import defaultCharacterVertexShaderRaw from './shaders/default-character-vertex.glsl'
-import defaultCharacterFragmentShaderRaw from './shaders/default-character-fragment.glsl'
+import defaultCharacterVertexShader from './shaders/default-character-vertex.glsl'
+import defaultCharacterFragmentShader from './shaders/default-character-fragment.glsl'
 import landVertexShaderRaw from './shaders/land-vertex.glsl'
 import landFragmentShaderRaw from './shaders/land-fragment.glsl'
 
 // Concatenate common lighting code with shaders that use it
-const defaultCharacterVertexShader = defaultCharacterVertexShaderRaw.replace(
-  '#include ./common/lighting-vertex.glsl',
-  lightingVertexChunk
-)
-const defaultCharacterFragmentShader = defaultCharacterFragmentShaderRaw.replace(
-  '#include ./common/lighting-fragment.glsl',
-  lightingFragmentChunk
-)
+// (Character shaders are standalone — no #include replacement needed)
 const landVertexShader = landVertexShaderRaw.replace(
   '#include ./common/lighting-vertex.glsl',
   lightingVertexChunk

@@ -70,6 +70,15 @@ export class PlayerController {
   private mesh!: THREE.Mesh
   private debugWireframe: THREE.Object3D | null = null
   private isDebugVisible: boolean = false
+
+  // Pose cycling
+  private currentPoseIndex: number = -1 // -1 = rest pose
+  private restPoseQuaternions: Map<string, THREE.Quaternion> = new Map()
+  private posesInitialized: boolean = false
+
+  // Ready promise — resolves once the player model is loaded
+  private _readyResolve!: () => void
+  public readonly ready: Promise<void> = new Promise(resolve => { this._readyResolve = resolve })
   
   // Collision
   private collisionVolume!: CollisionVolume
@@ -113,6 +122,7 @@ export class PlayerController {
     run: boolean
     action: boolean
     cameraMode: boolean
+    select: boolean
     menu: boolean
   } = {
     movement: new THREE.Vector2(),
@@ -121,6 +131,7 @@ export class PlayerController {
     run: false,
     action: false,
     cameraMode: false,
+    select: false,
     menu: false
   }
   
@@ -141,8 +152,8 @@ export class PlayerController {
       height: 1.8,
       radius: 0.5,
       mass: 70,
-      walkSpeed: 250.0,  // 10x faster (was 25.0)
-      runSpeed: 1200.0,  // 3x sprint speed (was 400.0)
+      walkSpeed: 10.0,
+      runSpeed: 50.0,
       jumpForce: 8.0,
       gravity: 20.0,
       groundCheckDistance: 0.6,  // Increased from 0.1 for more reliable ground detection
@@ -175,6 +186,12 @@ export class PlayerController {
     // Bind input handlers
     this.boundKeyDown = this.handleKeyDown.bind(this)
     this.boundKeyUp = this.handleKeyUp.bind(this)
+
+    // Reset all keys when the window loses focus so nothing stays "stuck"
+    window.addEventListener('blur', () => {
+      this.keyStates.clear()
+      this.updateInputState()
+    })
     this.boundTouchStart = this.handleTouchStart.bind(this)
     this.boundTouchMove = this.handleTouchMove.bind(this)
     this.boundTouchEnd = this.handleTouchEnd.bind(this)
@@ -183,8 +200,10 @@ export class PlayerController {
     // Initialize player (async, but don't await to avoid blocking constructor)
     this.initializePlayer().then(() => {
       this.registerWithCollisionSystem()
+      this._readyResolve()
       logger.info(LogModule.PLAYER, 'PlayerController fully initialized')
     }).catch(error => {
+      this._readyResolve() // resolve even on failure so waiters don't hang
       logger.error(LogModule.PLAYER, 'PlayerController initialization failed:', error)
     })
     
@@ -644,6 +663,7 @@ export class PlayerController {
     run: boolean
     action: boolean
     cameraMode: boolean
+    select: boolean
     menu: boolean
   }): void {
     this.gamepadInput = {
@@ -653,6 +673,7 @@ export class PlayerController {
       run: input.run,
       action: input.action,
       cameraMode: input.cameraMode,
+      select: input.select,
       menu: input.menu
     }
     
@@ -1044,6 +1065,191 @@ export class PlayerController {
       mouseLeft: false,
       mouseRight: false
     }
+  }
+
+  // ============================================================================
+  // POSE CYCLING SYSTEM
+  // ============================================================================
+
+  /** Pose definitions – each entry maps bone names to Euler rotations (degrees). */
+  private static readonly POSE_DEFINITIONS: Array<{
+    name: string
+    bones: Record<string, { rx?: number, ry?: number, rz?: number }>
+  }> = [
+    {
+      name: 'T-Pose',
+      bones: {
+        'DEF-upper_arm.L': { rz: 0, rx: 0, ry: 0 },
+        'DEF-upper_arm.R': { rz: 0, rx: 0, ry: 0 },
+        'DEF-forearm.L':   { rz: 0, rx: 0, ry: 0 },
+        'DEF-forearm.R':   { rz: 0, rx: 0, ry: 0 },
+        'DEF-thigh.L':     { rx: 0, ry: 0, rz: 0 },
+        'DEF-thigh.R':     { rx: 0, ry: 0, rz: 0 },
+        'DEF-shin.L':      { rx: 0 },
+        'DEF-shin.R':      { rx: 0 },
+        'DEF-spine.003':   { rx: 0 },
+        'DEF-spine.006':   { rx: 0 },
+      }
+    },
+    {
+      name: 'Arms Up',
+      bones: {
+        'DEF-upper_arm.L': { rz: 60, rx: -45 },
+        'DEF-upper_arm.R': { rz: -60, rx: -45 },
+        'DEF-forearm.L':   { rx: -30 },
+        'DEF-forearm.R':   { rx: -30 },
+        'DEF-spine.003':   { rx: -10 },
+        'DEF-spine.006':   { rx: -15 },
+      }
+    },
+    {
+      name: 'Hands on Hips',
+      bones: {
+        'DEF-upper_arm.L': { rz: 35, rx: 20, ry: -30 },
+        'DEF-upper_arm.R': { rz: -35, rx: 20, ry: 30 },
+        'DEF-forearm.L':   { rx: -80, ry: 15 },
+        'DEF-forearm.R':   { rx: -80, ry: -15 },
+        'DEF-spine.003':   { rx: 5 },
+      }
+    },
+    {
+      name: 'Sitting',
+      bones: {
+        'DEF-thigh.L':     { rx: -90 },
+        'DEF-thigh.R':     { rx: -90 },
+        'DEF-shin.L':      { rx: 90 },
+        'DEF-shin.R':      { rx: 90 },
+        'DEF-upper_arm.L': { rz: 20, rx: -30 },
+        'DEF-upper_arm.R': { rz: -20, rx: -30 },
+        'DEF-forearm.L':   { rx: -50 },
+        'DEF-forearm.R':   { rx: -50 },
+      }
+    },
+    {
+      name: 'Wave',
+      bones: {
+        'DEF-upper_arm.R': { rz: -80, rx: -60 },
+        'DEF-forearm.R':   { rx: -90 },
+        'DEF-hand.R':      { rz: -20 },
+        'DEF-upper_arm.L': { rz: 15 },
+        'DEF-spine.003':   { rx: -5 },
+        'DEF-spine.006':   { rx: -10, ry: -5 },
+      }
+    },
+    {
+      name: 'Fighter',
+      bones: {
+        'DEF-upper_arm.L': { rz: 50, rx: -40, ry: -20 },
+        'DEF-upper_arm.R': { rz: -45, rx: -50, ry: 20 },
+        'DEF-forearm.L':   { rx: -110 },
+        'DEF-forearm.R':   { rx: -100 },
+        'DEF-thigh.L':     { rx: -15, rz: 10 },
+        'DEF-thigh.R':     { rx: -10, rz: -15 },
+        'DEF-shin.L':      { rx: 20 },
+        'DEF-shin.R':      { rx: 15 },
+        'DEF-spine.003':   { rx: -10, ry: 15 },
+        'DEF-spine.006':   { rx: -5 },
+      }
+    },
+    {
+      name: 'Crouch',
+      bones: {
+        'DEF-thigh.L':     { rx: -60, rz: 15 },
+        'DEF-thigh.R':     { rx: -60, rz: -15 },
+        'DEF-shin.L':      { rx: 100 },
+        'DEF-shin.R':      { rx: 100 },
+        'DEF-spine.001':   { rx: 20 },
+        'DEF-spine.003':   { rx: 15 },
+        'DEF-upper_arm.L': { rz: 25, rx: -20 },
+        'DEF-upper_arm.R': { rz: -25, rx: -20 },
+        'DEF-forearm.L':   { rx: -40 },
+        'DEF-forearm.R':   { rx: -40 },
+      }
+    },
+  ]
+
+  /**
+   * Store the rest-pose quaternion of every bone so we can revert later.
+   */
+  private initializePoses(): void {
+    if (this.posesInitialized || !this.mesh) return
+
+    this.mesh.traverse((child) => {
+      if ((child as THREE.Bone).isBone) {
+        this.restPoseQuaternions.set(child.name, child.quaternion.clone())
+      }
+    })
+
+    if (this.restPoseQuaternions.size > 0) {
+      this.posesInitialized = true
+      logger.info(LogModule.PLAYER, `Pose system initialised – ${this.restPoseQuaternions.size} bones cached`)
+    }
+  }
+
+  /**
+   * Apply a pose by index, or revert to rest pose when index === -1.
+   */
+  private applyPose(index: number): void {
+    if (!this.posesInitialized) this.initializePoses()
+    if (!this.posesInitialized) return // still no bones
+
+    // First restore every bone to its rest quaternion
+    this.mesh.traverse((child) => {
+      if ((child as THREE.Bone).isBone) {
+        const rest = this.restPoseQuaternions.get(child.name)
+        if (rest) child.quaternion.copy(rest)
+      }
+    })
+
+    if (index < 0 || index >= PlayerController.POSE_DEFINITIONS.length) return // rest pose
+
+    const poseDef = PlayerController.POSE_DEFINITIONS[index]
+    const DEG2RAD = Math.PI / 180
+
+    this.mesh.traverse((child) => {
+      if ((child as THREE.Bone).isBone && poseDef.bones[child.name]) {
+        const override = poseDef.bones[child.name]
+        const euler = new THREE.Euler(
+          (override.rx ?? 0) * DEG2RAD,
+          (override.ry ?? 0) * DEG2RAD,
+          (override.rz ?? 0) * DEG2RAD,
+          'XYZ'
+        )
+        // Compose: rest * override
+        const rest = this.restPoseQuaternions.get(child.name)!
+        const overrideQuat = new THREE.Quaternion().setFromEuler(euler)
+        child.quaternion.copy(rest).multiply(overrideQuat)
+      }
+    })
+  }
+
+  /**
+   * Cycle to the next pose. Wraps back to rest pose after the last named pose.
+   */
+  public cyclePose(): string {
+    if (!this.posesInitialized) this.initializePoses()
+
+    this.currentPoseIndex++
+    if (this.currentPoseIndex >= PlayerController.POSE_DEFINITIONS.length) {
+      this.currentPoseIndex = -1 // back to rest
+    }
+
+    this.applyPose(this.currentPoseIndex)
+
+    const name = this.currentPoseIndex >= 0
+      ? PlayerController.POSE_DEFINITIONS[this.currentPoseIndex].name
+      : 'Rest Pose'
+
+    logger.info(LogModule.PLAYER, `Pose: ${name}`)
+    return name
+  }
+
+  /**
+   * Get the name of the currently active pose.
+   */
+  public getCurrentPoseName(): string {
+    if (this.currentPoseIndex < 0) return 'Rest Pose'
+    return PlayerController.POSE_DEFINITIONS[this.currentPoseIndex].name
   }
 
   public dispose(): void {

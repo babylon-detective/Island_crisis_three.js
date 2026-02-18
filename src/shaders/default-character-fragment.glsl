@@ -1,49 +1,91 @@
-// Character shader - flat cel-shaded look with strong outlines
-// Always bright, even in darkness, with stepped lighting
+// ============================================================================
+// Character Fragment Shader — Wind-Waker-style cel-shaded with per-object lighting
+// Standalone: does NOT include the common lighting system.
+// Designed for bright, readable characters that pop against any background.
+//
+// Lighting model:
+//   • 1-2 dominant lights selected per object (JS-side, pushed via uniforms)
+//   • Character-space rim/back light for silhouette definition
+//   • Independent ambient & brightness boost (artist-controlled)
+//   • Banded cel-shaded diffuse + hard specular highlight
+//   • Fresnel outline (dark edge)
+// ============================================================================
 
-// Enable toon/cel shading with 4 lighting levels
-#define TOON_ENABLED 1
-#define TOON_LEVELS 4.0
-#define RIM_STRENGTH_MULTIPLIER 3.0  // Strong outline effect
+// ---- primary dominant light ----
+uniform vec3  uLightDir;          // world-space direction (normalised)
+uniform vec3  uLightColor;        // colour of the dominant light
+uniform float uLightIntensity;    // intensity multiplier
 
-#include ./common/lighting-fragment.glsl
+// ---- secondary light (optional, intensity 0 = off) ----
+uniform vec3  uLight2Dir;
+uniform vec3  uLight2Color;
+uniform float uLight2Intensity;
 
-uniform vec3 uModelColor;
+// ---- character colour & shading ----
+uniform vec3  uModelColor;
+uniform float uAmbient;           // ambient brightness   [0–1]  default 0.55
+uniform float uBrightBoost;       // additive emissive lift       default 0.18
+uniform float uBands;             // number of toon bands          default 3.0
 
-#ifdef USE_SHADOWMAP
-  #if NUM_DIR_LIGHT_SHADOWS > 0
-    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
-  #endif
-  #if NUM_SPOT_LIGHT_SHADOWS > 0
-    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
-  #endif
-#endif
+// ---- rim light (character-space, follows the character) ----
+uniform vec3  uRimColor;          // rim/back-light colour         default (1,1,1)
+uniform float uRimStrength;       // rim intensity                 default 0.45
+uniform float uRimPower;          // rim exponent (sharpness)      default 2.5
 
-varying vec3 vPosition;
+// ---- specular ----
+uniform float uSpecStrength;      // specular highlight intensity  default 0.15
+uniform float uSpecPower;         // specular exponent             default 32.0
+
+// ---- outline (dark Fresnel edge) ----
+uniform float uOutlineWidth;      // outline thickness     [0–1]  default 0.38
+uniform vec3  uOutlineColor;      // outline colour                default (0.08,0.06,0.12)
+
 varying vec3 vNormal;
 varying vec3 vWorldPosition;
+varying vec3 vViewPosition;
 varying vec2 vUv;
 
+// ---- helpers ----
+float celDiffuse(vec3 N, vec3 L, float ambient, float bands) {
+  float NdotL   = dot(N, L) * 0.5 + 0.5;      // half-lambert [0,1]
+  float stepped = floor(NdotL * bands) / bands;
+  return mix(ambient, 1.0, stepped);
+}
+
 void main() {
-  // Calculate shadows
-  float shadow = 1.0;
-  #ifdef USE_SHADOWMAP
-    shadow = calculateShadows(vDirectionalShadowCoord, vSpotLightShadowCoord);
-  #endif
-  
-  // Apply lighting using common lighting system (with toon shading)
-  vec3 finalColor = applyLighting(
-    uModelColor,
-    vNormal,
-    vPosition,
-    vWorldPosition,
-    shadow
-  );
-  
-  // Boost overall brightness - characters are always visible
-  // Add constant ambient boost so they're never too dark
-  float brightnessBoost = 0.4;  // Minimum 40% brightness
-  finalColor = max(finalColor, uModelColor * brightnessBoost);
-  
-  gl_FragColor = vec4(finalColor, 1.0);
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(vViewPosition);            // toward camera
+  vec3 L1 = normalize(uLightDir);
+
+  // ==== PRIMARY LIGHT (cel-shaded diffuse) ====
+  float diff1  = celDiffuse(N, L1, uAmbient, max(uBands, 1.0));
+  vec3 litColor = uModelColor * diff1 * uLightColor * uLightIntensity;
+
+  // ==== SECONDARY LIGHT (same treatment, additive) ====
+  if (uLight2Intensity > 0.001) {
+    vec3 L2    = normalize(uLight2Dir);
+    float diff2 = celDiffuse(N, L2, 0.0, max(uBands, 1.0));
+    litColor   += uModelColor * diff2 * uLight2Color * uLight2Intensity;
+  }
+
+  // ==== SPECULAR HIGHLIGHT (hard band, primary light only) ====
+  vec3  H        = normalize(L1 + V);
+  float spec     = pow(max(dot(N, H), 0.0), uSpecPower);
+  float specBand = step(0.5, spec);
+  litColor      += uLightColor * uSpecStrength * specBand;
+
+  // ==== BRIGHTNESS BOOST (emissive-style lift) ====
+  litColor += uModelColor * uBrightBoost;
+
+  // ==== RIM / BACK LIGHT (character-space) ====
+  float rim = 1.0 - max(dot(N, V), 0.0);       // 0 = facing camera, 1 = silhouette
+  rim = pow(rim, uRimPower);
+  litColor += uRimColor * rim * uRimStrength;
+
+  // ==== OUTLINE (dark Fresnel edge, painted over rim) ====
+  float edge    = 1.0 - max(dot(N, V), 0.0);
+  float outline = smoothstep(1.0 - uOutlineWidth, 1.0, edge);
+  litColor      = mix(litColor, uOutlineColor, outline);
+
+  gl_FragColor = vec4(litColor, 1.0);
 }

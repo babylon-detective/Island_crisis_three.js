@@ -70,19 +70,22 @@ float getShadow(sampler2D shadowMap, vec4 shadowCoord) {
   return shadow;
 }
 
-// Calculate shadows from all light sources
-float calculateShadows(vec4 vDirectionalShadowCoords[NUM_DIR_LIGHT_SHADOWS], vec4 vSpotLightShadowCoords[NUM_SPOT_LIGHT_SHADOWS]) {
+// Calculate shadows from all light sources.
+// Reads directly from the varyings declared by the including shader.
+// Caller must declare the vDirectionalShadowCoord / vSpotLightShadowCoord
+// varyings with proper #if guards BEFORE #including this file.
+float calculateShadows() {
   float shadow = 1.0; // Default: no shadow (full light)
   
   #ifdef USE_SHADOWMAP
     // Sample directional light shadows (sun)
     #if NUM_DIR_LIGHT_SHADOWS > 0
-      shadow = getShadow(directionalShadowMap[0], vDirectionalShadowCoords[0]);
+      shadow = getShadow(directionalShadowMap[0], vDirectionalShadowCoord[0]);
     #endif
     
     // Sample spotlight shadows
     #if NUM_SPOT_LIGHT_SHADOWS > 0
-      float spotShadow = getShadow(spotShadowMap[0], vSpotLightShadowCoords[0]);
+      float spotShadow = getShadow(spotShadowMap[0], vSpotLightShadowCoord[0]);
       shadow = min(shadow, spotShadow); // Take darkest shadow
     #endif
   #endif
