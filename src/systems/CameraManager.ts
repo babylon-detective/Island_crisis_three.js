@@ -168,6 +168,10 @@ export class CameraManager {
   
   // Player visual representation
   private playerMesh: THREE.Object3D | null = null
+
+  // Camera collision
+  private cameraRaycaster: THREE.Raycaster = new THREE.Raycaster()
+  private collisionMeshes: THREE.Object3D[] = []
   
   // Controls
   private orbitControls!: OrbitControls
@@ -610,12 +614,32 @@ export class CameraManager {
     const desiredLookAt = this.playerPosition.clone()
     desiredLookAt.y += cfg.lookAtHeight
 
-    // Optional: simple raycast collision avoidance against ground
+    // Camera collision: raycast from look-at target toward desired position
     if (cfg.collisionEnabled) {
-      // Ensure camera doesn't go below ground + padding
+      // Floor clamp — never go below player feet + padding
       const groundY = this.playerPosition.y + cfg.collisionPadding
       if (desiredPos.y < groundY) {
         desiredPos.y = groundY
+      }
+
+      // Raycast from look-at target toward desired camera position
+      if (this.collisionMeshes.length > 0) {
+        const origin = desiredLookAt.clone()
+        const direction = new THREE.Vector3().subVectors(desiredPos, origin)
+        const maxDist = direction.length()
+        if (maxDist > 0.01) {
+          direction.normalize()
+          this.cameraRaycaster.set(origin, direction)
+          this.cameraRaycaster.near = 0
+          this.cameraRaycaster.far = maxDist
+
+          const hits = this.cameraRaycaster.intersectObjects(this.collisionMeshes, true)
+          if (hits.length > 0) {
+            // Pull camera forward to the first hit minus a small safety padding
+            const safeDist = Math.max(hits[0].distance - cfg.collisionPadding, 0.5)
+            desiredPos.copy(origin).addScaledVector(direction, safeDist)
+          }
+        }
       }
     }
 
@@ -1037,6 +1061,23 @@ export class CameraManager {
         sensitivity: this.playerControls.sensitivity
       }
     }
+  }
+
+  /**
+   * Register meshes that the third-person camera should collide with
+   * (terrain, buildings, etc.).  Meshes are tested recursively.
+   */
+  public setCollisionMeshes(meshes: THREE.Object3D[]): void {
+    this.collisionMeshes = meshes
+    console.log(`📷 Camera collision meshes updated (${meshes.length} root objects)`)
+  }
+
+  /**
+   * Append additional meshes to the existing camera collision list.
+   */
+  public addCollisionMeshes(meshes: THREE.Object3D[]): void {
+    this.collisionMeshes.push(...meshes)
+    console.log(`📷 Camera collision meshes appended (+${meshes.length}, total ${this.collisionMeshes.length})`)
   }
 
   /**

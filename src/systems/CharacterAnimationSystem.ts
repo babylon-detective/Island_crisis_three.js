@@ -528,6 +528,10 @@ export class CharacterAnimationSystem {
 
     if (preload) {
       await this.loadAllClips(config.id)
+
+      // Diagnostic: check bone/track name alignment
+      this.logBoneTrackDiagnostics(state)
+
       if (set.defaultClip && state.actions.has(set.defaultClip)) {
         this.play(config.id, set.defaultClip)
       }
@@ -543,6 +547,41 @@ export class CharacterAnimationSystem {
     state.clips.clear()
     this.characters.delete(characterId)
     logger.info(LogModule.SYSTEM, `Unregistered character "${characterId}"`)
+  }
+
+  /**
+   * Log bone names from the model versus track names from loaded clips.
+   * Helps diagnose retargeting mismatches that cause silent animation failures.
+   */
+  private logBoneTrackDiagnostics(state: CharacterAnimationState): void {
+    // Collect bone names from the model
+    const modelBones = extractBoneNamesFromModel(state.model)
+
+    // Collect track bone names from the first loaded clip
+    const firstClipEntry = state.clips.entries().next()
+    if (firstClipEntry.done) {
+      console.warn('🦴 [Anim Diag] No clips loaded — cannot compare bone names')
+      return
+    }
+    const [clipName, clip] = firstClipEntry.value
+    const clipBones = extractBoneNamesFromClip(clip)
+
+    // Find mismatches
+    const inClipNotModel = clipBones.filter(b => !modelBones.includes(b))
+    const inModelNotClip = modelBones.filter(b => !clipBones.includes(b))
+
+    console.log(`🦴 [Anim Diag] Model bones (${modelBones.length}):`, modelBones)
+    console.log(`🦴 [Anim Diag] Clip "${clipName}" track bones (${clipBones.length}):`, clipBones)
+
+    if (inClipNotModel.length > 0) {
+      console.warn(`⚠️ [Anim Diag] Bones in clip but NOT in model (${inClipNotModel.length}):`, inClipNotModel)
+    }
+    if (inModelNotClip.length > 0) {
+      console.warn(`⚠️ [Anim Diag] Bones in model but NOT in clip (${inModelNotClip.length}):`, inModelNotClip)
+    }
+    if (inClipNotModel.length === 0 && inModelNotClip.length === 0) {
+      console.log('✅ [Anim Diag] All bone names match between model and clip')
+    }
   }
 
   // ============================================================================

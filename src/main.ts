@@ -1039,9 +1039,8 @@ class IntegratedThreeJSApp {
     
     this.animationSystem.start()
 
-    // Character animation system DISABLED — re-rigging character bones in Blender to match UAL naming.
-    // Uncomment once the character GLB has been re-exported with UAL-compatible bone names.
-    // this.initCharacterAnimations()
+    // Character animation system — bones renamed in Blender to match UAL naming
+    this.initCharacterAnimations()
     
     // Mark as initialized
     this.isInitialized = true
@@ -1091,29 +1090,28 @@ class IntegratedThreeJSApp {
    */
   private async setupPlayerAnimations(playerModel: THREE.Object3D): Promise<void> {
     try {
+      // Stop the pose-baking mixer that ObjectLoader created (if any) so it
+      // doesn't compete with the CharacterAnimationSystem's new mixer.
+      if (playerModel.userData._poseMixer) {
+        const poseMixer = playerModel.userData._poseMixer as THREE.AnimationMixer
+        poseMixer.stopAllAction()
+        poseMixer.uncacheRoot(playerModel)
+        delete playerModel.userData._poseMixer
+      }
+
       await this.characterAnimationSystem.registerCharacter({
         id: 'player',
         model: playerModel,
         animationSetId: 'quaternius-universal',
         defaultCrossfadeDuration: 0.25,
-        boneRemap: buildQuaterniusToRigifyRemap(),
+        // boneRemap removed — character bones renamed in Blender to match UAL directly
       }, true)
 
-      // Create the state machine
-      const params: AnimStateParams = {
-        speed: 0,
-        isGrounded: true,
-        isJumping: false,
-        isFalling: false,
-        isRunning: false,
-        isAttacking: false,
-        isDead: false,
-        isCrouching: false,
-        movementX: 0,
-        movementZ: 0,
-      }
-
-      const config = createPlayerStateMachineConfig('player', () => params)
+      // Create the state machine — pass a getter that reads the FSM's own
+      // internal params (updated each frame via setParams in the update loop)
+      const config = createPlayerStateMachineConfig('player', () => {
+        return this.playerAnimStateMachine!.getParams() as AnimStateParams
+      })
       this.playerAnimStateMachine = new AnimationStateMachine(this.characterAnimationSystem)
       this.playerAnimStateMachine.configure(config)
 
@@ -1148,8 +1146,8 @@ class IntegratedThreeJSApp {
     return {
       speed,
       isGrounded,
-      isJumping: velocity.y > 1.0 && !isGrounded,
-      isFalling: velocity.y < -1.0 && !isGrounded,
+      isJumping: velocity.y > 2.0 && !isGrounded,
+      isFalling: velocity.y < -3.0 && !isGrounded,
       isRunning: isRunning && isMoving,
       isAttacking: false,
       isDead: false,
@@ -1846,6 +1844,9 @@ class IntegratedThreeJSApp {
       if (landMeshes.length > 0) {
         this.collisionSystem.registerLandMeshes(landMeshes)
         console.log(`🏔️ Registered ${landMeshes.length} land meshes for primitive collision detection`)
+
+        // Also register land meshes for third-person camera collision
+        this.cameraManager.setCollisionMeshes(landMeshes)
       }
       
       // Link land system to camera manager for spotlight updates
@@ -1866,8 +1867,16 @@ class IntegratedThreeJSApp {
     // This ensures saved positions override default positions from JSON config
     this.objectManager.loadPersistentStates()
     
-    // Log loaded positions for debugging
+    // Also register loaded object meshes for camera collision (buildings, props, etc.)
     const allObjects = this.objectManager.getAllObjects()
+    const objectMeshes = allObjects
+      .filter(obj => obj.type === 'model' || obj.type === 'custom')
+      .map(obj => obj.mesh as THREE.Object3D)
+    if (objectMeshes.length > 0) {
+      this.cameraManager.addCollisionMeshes(objectMeshes)
+    }
+
+    // Log loaded positions for debugging
     const tslObjects = allObjects.filter(obj => obj.type === 'tsl' || obj.id.includes('tsl'))
     if (tslObjects.length > 0) {
       console.log(`📦 Loaded ${tslObjects.length} TSL objects with positions:`)

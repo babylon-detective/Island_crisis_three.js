@@ -364,23 +364,29 @@ export function createPlayerStateMachineConfig(
     // Attack — high priority
     { from: '*', to: 'attack',         condition: () => p().isAttacking && p().isGrounded, priority: 90 },
 
-    // Jump / Fall / Land
-    { from: '*', to: 'jump',           condition: () => p().isJumping && p().isGrounded, priority: 80 },
-    { from: '*', to: 'fall',           condition: () => p().isFalling && !p().isGrounded, priority: 70 },
-    { from: 'fall', to: 'land',        condition: () => p().isGrounded && !p().isJumping, priority: 75 },
-    { from: 'jump', to: 'fall',        condition: () => !p().isGrounded && p().isFalling, priority: 72 },
+    // Jump → fall chain (only from jump state, not wildcard)
+    { from: 'jump', to: 'fall',        condition: () => !p().isGrounded && p().isFalling, priority: 82 },
+
+    // Jump initiation
+    { from: 'idle', to: 'jump',        condition: () => p().isJumping, priority: 80 },
+    { from: 'walk', to: 'jump',        condition: () => p().isJumping, priority: 80 },
+    { from: 'run',  to: 'jump',        condition: () => p().isJumping, priority: 80 },
+
+    // Fall — only from grounded states when truly airborne (NOT from land)
+    { from: 'idle', to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'walk', to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'run',  to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+
+    // Land — only from fall
+    { from: 'fall', to: 'land',        condition: () => p().isGrounded, priority: 75 },
 
     // Crouch
     { from: '*', to: 'crouch_walk',    condition: () => p().isCrouching && p().speed > 0.5 && p().isGrounded, priority: 55 },
     { from: '*', to: 'crouch_idle',    condition: () => p().isCrouching && p().speed <= 0.5 && p().isGrounded, priority: 50 },
 
-    // Locomotion
-    { from: '*', to: 'run',            condition: () => p().isRunning && p().speed > 3.0 && p().isGrounded && p().movementZ > 0, priority: 40 },
-    { from: '*', to: 'run_backward',   condition: () => p().isRunning && p().speed > 3.0 && p().isGrounded && p().movementZ < 0, priority: 39 },
-    { from: '*', to: 'walk',           condition: () => p().speed > 0.5 && p().speed <= 3.0 && p().isGrounded && p().movementZ >= 0, priority: 30 },
-    { from: '*', to: 'walk_backward',  condition: () => p().speed > 0.5 && p().speed <= 3.0 && p().isGrounded && p().movementZ < 0, priority: 29 },
-    { from: '*', to: 'strafe_left',    condition: () => p().speed > 0.5 && p().isGrounded && p().movementX < -0.5 && Math.abs(p().movementZ) < 0.3, priority: 25 },
-    { from: '*', to: 'strafe_right',   condition: () => p().speed > 0.5 && p().isGrounded && p().movementX > 0.5 && Math.abs(p().movementZ) < 0.3, priority: 25 },
+    // Locomotion — thresholds tuned for walkSpeed=10, runSpeed=50
+    { from: '*', to: 'run',            condition: () => p().isRunning && p().speed > 2.0 && p().isGrounded, priority: 40 },
+    { from: '*', to: 'walk',           condition: () => p().speed > 0.5 && !p().isRunning && p().isGrounded, priority: 30 },
 
     // Idle — lowest priority, fallback
     { from: '*', to: 'idle',           condition: () => p().speed <= 0.5 && p().isGrounded && !p().isCrouching, priority: 0 },

@@ -70,6 +70,8 @@ export class PlayerController {
   private mesh!: THREE.Mesh
   private debugWireframe: THREE.Object3D | null = null
   private isDebugVisible: boolean = false
+  private meshGroundOffset: number = 0 // Runtime-adjustable Y offset for mesh placement (positive = move mesh down)
+  private _debugFrameCount: number = 0 // Counter for periodic debug logging
 
   // Pose cycling
   private currentPoseIndex: number = -1 // -1 = rest pose
@@ -156,7 +158,7 @@ export class PlayerController {
       runSpeed: 50.0,
       jumpForce: 8.0,
       gravity: 20.0,
-      groundCheckDistance: 0.6,  // Increased from 0.1 for more reliable ground detection
+      groundCheckDistance: 0.3,  // Distance below feet to check for ground
       friction: 0.8,
       airResistance: 0.95,
       ...config
@@ -232,14 +234,19 @@ export class PlayerController {
       // Configure the model
       playerModel.name = 'PlayerMesh'
       
-      // Scale and position the model based on player config
-      // Assuming the model is roughly 1.8 units tall, scale to match config.height
-      const modelHeight = 1.8 // Typical character model height
-      const scale = this.config.height / modelHeight
+      // Compute bounding box for scaling reference
+      // NOTE: Box3.setFromObject uses raw geometry (bind pose), NOT skinned positions.
+      // For skinned meshes, don't use bbox.min.y as foot offset — it won't match
+      // the animated pose. Instead, rely on animations placing feet at y=0 relative
+      // to the skeleton root, and place the mesh origin at capsuleBottom.
+      const bbox = new THREE.Box3().setFromObject(playerModel)
+      const actualHeight = bbox.max.y - bbox.min.y
+      
+      // Scale model so it matches the configured capsule height
+      const scale = this.config.height / actualHeight
       playerModel.scale.setScalar(scale)
       
-      // Center the model at the player position
-      // Most character models have their origin at the feet, which is what we want
+      logger.info(LogModule.PLAYER, `Model bbox: height=${actualHeight.toFixed(2)}, scale=${scale.toFixed(3)}, bboxMinY=${bbox.min.y.toFixed(3)}, bboxMaxY=${bbox.max.y.toFixed(3)}`)
       
       // Enable shadows for all meshes in the model
       playerModel.traverse((child) => {
@@ -918,15 +925,73 @@ export class PlayerController {
   private updateVisuals(): void {
     if (!this.mesh) return // Guard against uninitialized mesh
     
-    // Update mesh position (offset down from eye level)
+    // Update mesh position
+    // state.position = capsule center. Place mesh origin at capsuleBottom.
+    // UAL animations are authored with feet at y=0 relative to skeleton root,
+    // so capsuleBottom = ground level = correct mesh origin placement.
     const meshPosition = this.state.position.clone()
     meshPosition.y -= this.config.height / 2
+    meshPosition.y -= this.meshGroundOffset // Runtime-adjustable fine-tuning
     this.mesh.position.copy(meshPosition)
     
-    // Rotate player mesh to face movement direction
-    // Get camera yaw from camera manager
-    const cameraYaw = this.cameraManager.getPlayerControls().yaw
-    this.mesh.rotation.y = cameraYaw
+    // DEBUG: Log position diagnostics every ~120 frames (~2 sec)
+    this._debugFrameCount++
+    if (this._debugFrameCount % 120 === 1) {
+      const groundHeight = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
+      // Check root bone world position if skeleton exists
+      let rootBoneWorldY = 'N/A'
+      let pelvisBoneWorldY = 'N/A'
+      this.mesh.traverse((child: any) => {
+        if (child.isBone && child.name === 'root') {
+          const worldPos = new THREE.Vector3()
+          child.getWorldPosition(worldPos)
+          rootBoneWorldY = worldPos.y.toFixed(3)
+        }
+        if (child.isBone && child.name === 'pelvis') {
+          const worldPos = new THREE.Vector3()
+          child.getWorldPosition(worldPos)
+          pelvisBoneWorldY = worldPos.y.toFixed(3)
+        }
+      })
+      console.log(`📐 Position Debug:`, {
+        capsuleCenter: this.state.position.y.toFixed(3),
+        meshOriginY: meshPosition.y.toFixed(3),
+        groundHeight: groundHeight.toFixed(3),
+        meshGroundOffset: this.meshGroundOffset.toFixed(3),
+        capsuleBottom: (this.state.position.y - this.config.height / 2).toFixed(3),
+        rootBoneWorldY,
+        pelvisBoneWorldY,
+        onGround: this.state.onGround,
+        velocityY: this.state.velocity.y.toFixed(3)
+      })
+    }
+    
+    // Rotate player mesh to face movement direction (smooth turn)
+    const vx = this.state.velocity.x
+    const vz = this.state.velocity.z
+    const horizontalSpeed = Math.sqrt(vx * vx + vz * vz)
+
+    if (horizontalSpeed > 0.5) {
+      // Calculate target yaw from velocity direction
+      const targetYaw = Math.atan2(vx, vz)
+      // Smoothly interpolate current rotation toward target
+      let currentYaw = this.mesh.rotation.y
+      // Shortest-arc delta
+      let delta = targetYaw - currentYaw
+      // Wrap delta to [-PI, PI]
+      delta = ((delta + Math.PI) % (Math.PI * 2)) - Math.PI
+      if (delta < -Math.PI) delta += Math.PI * 2
+      // Turn speed (radians per second) — higher = snappier
+      const turnSpeed = 12.0
+      const maxStep = turnSpeed * (1 / 60) // approximate per-frame step
+      if (Math.abs(delta) > maxStep) {
+        currentYaw += Math.sign(delta) * maxStep
+      } else {
+        currentYaw = targetYaw
+      }
+      this.mesh.rotation.y = currentYaw
+    }
+    // When not moving, keep the last facing direction (don't snap to camera)
     
     // Update debug wireframe
     if (this.debugWireframe) {
@@ -1036,6 +1101,15 @@ export class PlayerController {
 
   public isDebugWireframeVisible(): boolean {
     return this.isDebugVisible
+  }
+
+  public setMeshGroundOffset(offset: number): void {
+    this.meshGroundOffset = offset
+    logger.info(LogModule.PLAYER, `Mesh ground offset set to ${offset.toFixed(3)}`)
+  }
+
+  public getMeshGroundOffset(): number {
+    return this.meshGroundOffset
   }
 
   public getStatus(): object {

@@ -59,9 +59,9 @@ export class CollisionSystem {
   // ============================================================================
   // Increase this value to raise collision detection higher (positive = up)
   // Decrease this value to lower collision detection (negative = down)
-  // Working value: 0.9 (adjusts collision to match flat land mesh surface)
+  // Raycast already returns the actual surface intersection Y — no offset needed.
   // You can also adjust at runtime using: collisionSystem.setGroundHeightOffset(value)
-  private groundHeightOffset: number = 0.9
+  private groundHeightOffset: number = 0
 
   constructor() {
     logger.info(LogModule.COLLISION, 'CollisionSystem initialized with performance optimizations')
@@ -281,7 +281,7 @@ export class CollisionSystem {
 
     if (hasAnyCollision) {
       const correctedPosition = position.clone()
-      correctedPosition.add(collisionNormal.clone().multiplyScalar(maxPenetration + 0.01))
+      correctedPosition.add(collisionNormal.clone().multiplyScalar(maxPenetration))
 
       return {
         hasCollision: true,

@@ -531,6 +531,16 @@ export class ConsoleCommands {
     }
   }
 
+  public setMeshGroundOffset(offset: number): void {
+    if ((this.app as any).playerController) {
+      const playerController = (this.app as any).playerController
+      playerController.setMeshGroundOffset(offset)
+      console.log(`🎮 Mesh ground offset set to ${offset} (positive = lower mesh)`)
+    } else {
+      console.warn('⚠️ PlayerController not available')
+    }
+  }
+
   // ============================================================================
   // PERFORMANCE AND DEBUGGING
   // ============================================================================
@@ -1072,6 +1082,7 @@ export class ConsoleCommands {
     win.setPlayerPosition = (x: number, y: number, z: number) => this.setPlayerPosition(x, y, z)
     win.getPlayerStatus = () => this.getPlayerStatus()
     win.togglePlayerDebug = () => this.togglePlayerDebug()
+    win.setMeshGroundOffset = (offset: number) => this.setMeshGroundOffset(offset)
     
     // Collision System Commands
     win.testCollision = (x: number = 0, y: number = 10, z: number = 0) => this.testCollision(x, y, z)
