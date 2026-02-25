@@ -100,6 +100,11 @@ export class PlayerController {
     activeTouches: Map<number, { x: number, y: number, startX: number, startY: number, prevX: number, prevY: number }>
     movementTouch: number | null // ID of touch used for movement (one finger when only one touch)
     lookTouches: number[] // IDs of touches used for looking (two fingers)
+    runTouch: number | null // ID of movement touch that activated double-tap-hold run
+    lastTapTime: number
+    lastTapX: number
+    lastTapY: number
+    virtualJumpPressed: boolean
     lastMovementDelta: THREE.Vector2
     lastLookDelta: THREE.Vector2
     movementDirection: THREE.Vector2 // Continuous movement direction from touch position
@@ -107,6 +112,11 @@ export class PlayerController {
     activeTouches: new Map(),
     movementTouch: null,
     lookTouches: [],
+    runTouch: null,
+    lastTapTime: 0,
+    lastTapX: 0,
+    lastTapY: 0,
+    virtualJumpPressed: false,
     lastMovementDelta: new THREE.Vector2(),
     lastLookDelta: new THREE.Vector2(),
     movementDirection: new THREE.Vector2() // For continuous movement based on touch position
@@ -441,8 +451,9 @@ export class PlayerController {
     this.input.backward = keyBackward || touchBackward || gamepadBackward
     this.input.left = keyLeft || touchLeft || gamepadLeft
     this.input.right = keyRight || touchRight || gamepadRight
-    this.input.jump = keyJump || this.gamepadInput.jump
-    this.input.run = keyRun || this.gamepadInput.run
+    const touchRun = this.touchState.runTouch !== null && this.touchState.activeTouches.has(this.touchState.runTouch)
+    this.input.jump = keyJump || this.gamepadInput.jump || this.touchState.virtualJumpPressed
+    this.input.run = keyRun || this.gamepadInput.run || touchRun
     this.input.camera = keyCamera || this.gamepadInput.cameraMode
     
     // Store analog values for smooth movement (prioritize gamepad, then touch)
@@ -460,7 +471,8 @@ export class PlayerController {
     if (this.touchState.lookTouches.length >= 2) {
       // Convert touch delta to camera rotation
       // Use higher sensitivity for touch since deltas are pixel-based
-      const lookSensitivity = 0.003 // Increased for better touch responsiveness
+      // Increased for faster two-finger hold/drag camera rotation.
+      const lookSensitivity = 0.006
       // Use the look delta even if small - let the camera manager handle deadzone
       this.input.analogCamera = this.touchState.lastLookDelta.clone().multiplyScalar(lookSensitivity)
     } else {
@@ -491,6 +503,22 @@ export class PlayerController {
       }
       
       this.touchState.activeTouches.set(touch.identifier, touchInfo)
+
+      // Double-tap + hold detection for running (applies to single-finger movement touch)
+      const now = performance.now()
+      const dt = now - this.touchState.lastTapTime
+      const dx = touch.clientX - this.touchState.lastTapX
+      const dy = touch.clientY - this.touchState.lastTapY
+      const distSq = dx * dx + dy * dy
+      const isDoubleTap = dt < 320 && distSq < (64 * 64)
+
+      if (isDoubleTap) {
+        this.touchState.runTouch = touch.identifier
+      }
+
+      this.touchState.lastTapTime = now
+      this.touchState.lastTapX = touch.clientX
+      this.touchState.lastTapY = touch.clientY
     }
     
     // Reassign touch roles based on total number of touches
@@ -507,6 +535,7 @@ export class PlayerController {
       // No touches - clear everything
       this.touchState.movementTouch = null
       this.touchState.lookTouches = []
+      this.touchState.runTouch = null
       this.touchState.movementDirection.set(0, 0)
       this.touchState.lastLookDelta.set(0, 0)
     } else if (touchCount === 1) {
@@ -514,11 +543,15 @@ export class PlayerController {
       const touchId = Array.from(this.touchState.activeTouches.keys())[0]
       this.touchState.movementTouch = touchId
       this.touchState.lookTouches = []
+      if (this.touchState.runTouch !== touchId) {
+        this.touchState.runTouch = null
+      }
       // Reset movement direction when starting new touch
       this.touchState.movementDirection.set(0, 0)
     } else {
       // Two or more fingers = camera look only (use first two touches)
       this.touchState.movementTouch = null
+      this.touchState.runTouch = null
       this.touchState.movementDirection.set(0, 0)
       const touchIds = Array.from(this.touchState.activeTouches.keys())
       this.touchState.lookTouches = touchIds.slice(0, 2) // Use first two touches for camera
@@ -638,6 +671,10 @@ export class PlayerController {
     for (let i = 0; i < event.changedTouches.length; i++) {
       const touch = event.changedTouches[i]
       const touchId = touch.identifier
+
+      if (this.touchState.runTouch === touchId) {
+        this.touchState.runTouch = null
+      }
       
       this.touchState.activeTouches.delete(touchId)
     }
@@ -686,6 +723,11 @@ export class PlayerController {
     
     // CRITICAL FIX: Update input state immediately when gamepad input changes
     // This ensures gamepad input is processed even without keyboard events
+    this.updateInputState()
+  }
+
+  public setVirtualJumpPressed(pressed: boolean): void {
+    this.touchState.virtualJumpPressed = pressed
     this.updateInputState()
   }
 

@@ -1,0 +1,11 @@
+# Build and local artifacts
+node_modules
+dist
+.vercel
+
+# Blender source files exceed Vercel per-file limit (100MB)
+**/*.blend
+**/*.blend1
+
+# Editor/system files
+.DS_Store

@@ -1987,56 +1987,110 @@ class IntegratedThreeJSApp {
       this.playerController.setDebugVisible(true)
     }
 
-    // Create virtual SELECT button for mobile touch screens
-    this.createMobileSelectButton()
+    // Create mobile touch action buttons (camera / jump / start)
+    this.createMobileActionButtons()
     
     // console.log('📷 Camera controls: C = Switch camera | V = Cycle 3rd person views')
   }
 
   /**
-   * Create a virtual SELECT button on mobile for camera mode cycling.
-   * Hidden on devices with a mouse / keyboard.
+   * Create mobile touch action buttons:
+   * - Camera (upper-left): cycle gameplay camera modes
+   * - A (lower-right): jump while held/pressed
+   * - Start (bottom-center): toggle pause menu
    */
-  private createMobileSelectButton(): void {
+  private createMobileActionButtons(): void {
     // Only show on touch devices
     if (!('ontouchstart' in window)) return
 
-    const btn = document.createElement('button')
-    btn.id = 'mobile-select-btn'
-    btn.textContent = '📷'
-    btn.style.cssText = `
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      border: 2px solid rgba(255,255,255,0.5);
-      background: rgba(0,0,0,0.45);
-      color: white;
-      font-size: 24px;
-      z-index: 1100;
-      touch-action: manipulation;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: background 0.15s;
-    `
-    btn.addEventListener('touchstart', (e) => {
+    const touchControlScale = 0.85
+    const scaleSize = (value: number): number => Math.max(1, Math.round(value * touchControlScale))
+
+    const createButton = (id: string, text: string, style: string): HTMLButtonElement => {
+      const existing = document.getElementById(id)
+      if (existing) existing.remove()
+
+      const btn = document.createElement('button')
+      btn.id = id
+      btn.textContent = text
+      btn.style.cssText = `
+        position: fixed;
+        width: ${scaleSize(56)}px;
+        height: ${scaleSize(56)}px;
+        border-radius: 50%;
+        border: 2px solid rgba(255,255,255,0.5);
+        background: rgba(0,0,0,0.45);
+        color: white;
+        font-size: ${scaleSize(22)}px;
+        z-index: 1100;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.15s;
+        ${style}
+      `
+      document.body.appendChild(btn)
+      return btn
+    }
+
+    // Camera button (upper-left)
+    const cameraBtn = createButton(
+      'mobile-camera-btn',
+      '📷',
+      `top: ${scaleSize(20)}px; left: ${scaleSize(20)}px;`
+    )
+    cameraBtn.addEventListener('touchstart', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      btn.style.background = 'rgba(255,255,255,0.25)'
+      cameraBtn.style.background = 'rgba(255,255,255,0.25)'
       this.cycleCameraMode()
     }, { passive: false })
-    btn.addEventListener('touchend', (e) => {
+    cameraBtn.addEventListener('touchend', (e) => {
       e.preventDefault()
-      btn.style.background = 'rgba(0,0,0,0.45)'
+      cameraBtn.style.background = 'rgba(0,0,0,0.45)'
     })
-    document.body.appendChild(btn)
+
+    // Jump button A (lower-right)
+    const jumpBtn = createButton(
+      'mobile-jump-btn',
+      'A',
+      `right: ${scaleSize(20)}px; bottom: ${scaleSize(20)}px;`
+    )
+    const setJumpPressed = (pressed: boolean): void => {
+      this.playerController.setVirtualJumpPressed(pressed)
+      jumpBtn.style.background = pressed ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.45)'
+    }
+    jumpBtn.addEventListener('touchstart', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setJumpPressed(true)
+    }, { passive: false })
+    jumpBtn.addEventListener('touchend', (e) => {
+      e.preventDefault()
+      setJumpPressed(false)
+    })
+    jumpBtn.addEventListener('touchcancel', () => setJumpPressed(false))
+
+    // Start button (center-bottom) for pause toggle
+    const startBtn = createButton(
+      'mobile-start-btn',
+      'START',
+      `left: 50%; bottom: ${scaleSize(20)}px; transform: translateX(-50%); width: ${scaleSize(88)}px; border-radius: ${scaleSize(18)}px; font-size: ${scaleSize(12)}px;`
+    )
+    startBtn.addEventListener('touchstart', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      startBtn.style.background = 'rgba(255,255,255,0.25)'
+      this.togglePause()
+    }, { passive: false })
+    startBtn.addEventListener('touchend', (e) => {
+      e.preventDefault()
+      startBtn.style.background = 'rgba(0,0,0,0.45)'
+    })
   }
 
   /**
@@ -3204,23 +3258,6 @@ const app = new IntegratedThreeJSApp(
 ;(window as any).debugTerrainHeight = (x: number = 0, z: number = 0) => app.getCollisionSystem().debugTerrainHeight(x, z)
 ;(window as any).getTerrainHeight = (x: number = 0, z: number = 0) => app.getCollisionSystem().getTerrainHeight(x, z)
 ;(window as any).testTerrainFix = () => app.getCollisionSystem().testTerrainFix()
-
-// Initialize Hub Controls for mobile (from dreamdealer.dev)
-// Provides consistent virtual controls across all Game Hub projects
-// NOTE: This project has its own InputSystem with native gamepad handling,
-// so we do NOT use the onStart callback (it would double-toggle pause).
-// hub-controls.js is kept for touch virtual controls on mobile only.
-function initHubControls() {
-  if (typeof (window as any).HubControls !== 'undefined') {
-    (window as any).HubControls.init({
-      hideExisting: true
-    })
-  } else {
-    // Script may still be loading, try again
-    setTimeout(initHubControls, 100)
-  }
-}
-initHubControls()
 
 ;(window as any).refreshCollisionMeshes = () => {
   console.log('🔄 Refreshing land meshes for collision...')
