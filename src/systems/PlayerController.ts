@@ -154,8 +154,8 @@ export class PlayerController {
       height: 1.8,
       radius: 0.5,
       mass: 70,
-      walkSpeed: 10.0,
-      runSpeed: 50.0,
+      walkSpeed: 1.4,   // m/s — matches UAL walk animation cycle
+      runSpeed: 5.0,    // m/s — matches UAL run animation cycle
       jumpForce: 8.0,
       gravity: 20.0,
       groundCheckDistance: 0.3,  // Distance below feet to check for ground

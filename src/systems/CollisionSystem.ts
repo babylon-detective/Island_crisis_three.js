@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { logger, LogModule } from './Logger'
+import { HeightmapCollider } from './HeightmapCollider'
 
 export interface CollisionVolume {
   type: 'box' | 'sphere' | 'capsule'
@@ -38,6 +39,7 @@ interface LandMeshInfo {
 export class CollisionSystem {
   private collidableObjects: Map<string, CollidableObject> = new Map()
   private landMeshes: LandMeshInfo[] = []
+  private heightmaps: HeightmapCollider[] = [] // Baked heightmap colliders for GLB models
   private raycaster: THREE.Raycaster = new THREE.Raycaster()
   private tempVector: THREE.Vector3 = new THREE.Vector3()
   private tempVector2: THREE.Vector3 = new THREE.Vector3()
@@ -65,6 +67,44 @@ export class CollisionSystem {
 
   constructor() {
     logger.info(LogModule.COLLISION, 'CollisionSystem initialized with performance optimizations')
+  }
+
+  // ============================================================================
+  // HEIGHTMAP REGISTRATION
+  // ============================================================================
+
+  /**
+   * Register a pre-baked heightmap collider for fast ground-height queries.
+   * Heightmaps are checked before raycasting against land meshes.
+   */
+  public registerHeightmap(heightmap: HeightmapCollider): void {
+    this.heightmaps.push(heightmap)
+    logger.info(LogModule.COLLISION, `Registered heightmap "${heightmap.id}" (${heightmap.cols}×${heightmap.rows})`)
+  }
+
+  /**
+   * Re-bake a specific heightmap by id (call after model transform changes).
+   */
+  public async rebakeHeightmap(id: string): Promise<boolean> {
+    const hm = this.heightmaps.find(h => h.id === id)
+    if (!hm) {
+      console.warn(`⚠️ No heightmap with id "${id}" registered`)
+      return false
+    }
+    // Clear ground height cache since bounds/values changed
+    this.groundHeightCache.clear()
+    return await hm.rebake()
+  }
+
+  /**
+   * Re-bake all registered heightmaps (call after bulk transform changes).
+   */
+  public async rebakeAllHeightmaps(): Promise<void> {
+    this.groundHeightCache.clear()
+    for (const hm of this.heightmaps) {
+      await hm.rebake()
+    }
+    logger.info(LogModule.COLLISION, `Re-baked ${this.heightmaps.length} heightmap(s)`)
   }
 
   // ============================================================================
@@ -456,12 +496,22 @@ export class CollisionSystem {
    * Uses mesh world matrix to ensure correct coordinate transformation
    */
   private getGroundHeightOptimized(x: number, z: number): number {
-    if (this.landMeshes.length === 0) {
+    if (this.landMeshes.length === 0 && this.heightmaps.length === 0) {
       console.warn(`⚠️ No land meshes registered! Player will sink. Falling back to ocean level (-2.0)`)
       return -2.0 // Ocean surface level
     }
 
     let maxGroundHeight = -2.0 // Start with ocean surface level
+
+    // ── 1. Check baked heightmaps first (O(1) per heightmap) ──
+    for (const hm of this.heightmaps) {
+      const h = hm.getHeight(x, z)
+      if (h !== null && h > maxGroundHeight) {
+        maxGroundHeight = h
+      }
+    }
+    
+    // ── 2. Check raycasted land meshes ──
     
     // Use raycasting to get exact surface height at this point
     const allMeshes = this.landMeshes.map(info => info.mesh)

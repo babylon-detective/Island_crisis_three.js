@@ -384,12 +384,12 @@ export function createPlayerStateMachineConfig(
     { from: '*', to: 'crouch_walk',    condition: () => p().isCrouching && p().speed > 0.5 && p().isGrounded, priority: 55 },
     { from: '*', to: 'crouch_idle',    condition: () => p().isCrouching && p().speed <= 0.5 && p().isGrounded, priority: 50 },
 
-    // Locomotion — thresholds tuned for walkSpeed=10, runSpeed=50
-    { from: '*', to: 'run',            condition: () => p().isRunning && p().speed > 2.0 && p().isGrounded, priority: 40 },
-    { from: '*', to: 'walk',           condition: () => p().speed > 0.5 && !p().isRunning && p().isGrounded, priority: 30 },
+    // Locomotion — thresholds tuned for walkSpeed=1.4, runSpeed=5.0
+    { from: '*', to: 'run',            condition: () => p().isRunning && p().speed > 0.5 && p().isGrounded, priority: 40 },
+    { from: '*', to: 'walk',           condition: () => p().speed > 0.2 && !p().isRunning && p().isGrounded, priority: 30 },
 
     // Idle — lowest priority, fallback
-    { from: '*', to: 'idle',           condition: () => p().speed <= 0.5 && p().isGrounded && !p().isCrouching, priority: 0 },
+    { from: '*', to: 'idle',           condition: () => p().speed <= 0.2 && p().isGrounded && !p().isCrouching, priority: 0 },
   ]
 
   return {

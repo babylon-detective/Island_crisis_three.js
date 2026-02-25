@@ -25,39 +25,27 @@ const titleScreen = new TitleScreen({
 })
 
 /**
- * Preload assets and initialize the main game
+ * Preload assets and initialize the main game.
+ * Runs while the title screen is still visible — loading text updates
+ * give feedback to the player.
  */
 async function startGame(): Promise<void> {
   console.log('🎮 Starting game initialization...')
   
   try {
-    // Update loading text
+    // Phase 1 — dynamic-import the main module (parses code, sets up singletons)
     titleScreen.updateLoadingText('Loading game assets...')
-    
-    // Preload phase 1: Critical assets
-    await preloadCriticalAssets()
-    titleScreen.updateLoadingText('Initializing systems...')
-    
-    // Preload phase 2: Game systems
-    await preloadGameSystems()
-    titleScreen.updateLoadingText('Building world...')
-    
-    // Preload phase 3: World content
-    await preloadWorldContent()
-    titleScreen.updateLoadingText('Ready!')
-    
-    // Small delay before launching
-    await delay(500)
-    
-    // Import and initialize main game
     const { initializeGame } = await import('./main')
     
-    // Hide loading text
-    titleScreen.hideLoadingText()
+    // Phase 2 — initialise all systems & load world content.
+    // Pass a progress callback so the title screen shows real status.
+    titleScreen.updateLoadingText('Building world...')
+    await initializeGame(isNewGame, (text: string) => {
+      titleScreen.updateLoadingText(text)
+    })
     
-    // Initialize game with the appropriate mode
-    await initializeGame(isNewGame)
-    
+    // Done — title screen will now fade out (handled by TitleScreen.handleStart)
+    titleScreen.updateLoadingText('Ready!')
     console.log('🎮 Game loaded successfully!')
     
   } catch (error) {
@@ -66,36 +54,3 @@ async function startGame(): Promise<void> {
   }
 }
 
-/**
- * Preload critical assets (shaders, essential textures)
- */
-async function preloadCriticalAssets(): Promise<void> {
-  // Simulate asset loading - replace with actual asset loading
-  await delay(300)
-  console.log('✅ Critical assets loaded')
-}
-
-/**
- * Preload game systems (physics, collision, etc.)
- */
-async function preloadGameSystems(): Promise<void> {
-  // Simulate system initialization - replace with actual system loading
-  await delay(300)
-  console.log('✅ Game systems loaded')
-}
-
-/**
- * Preload world content (models, terrain, etc.)
- */
-async function preloadWorldContent(): Promise<void> {
-  // Simulate content loading - replace with actual content loading
-  await delay(300)
-  console.log('✅ World content loaded')
-}
-
-/**
- * Utility delay function
- */
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}

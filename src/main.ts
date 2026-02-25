@@ -812,8 +812,8 @@ const PLAYER_DEFAULTS = {
   height: 1.8,
   radius: 0.5,
   mass: 70,
-  walkSpeed: 10.0,
-  runSpeed: 50.0,
+  walkSpeed: 1.4,   // m/s — matches UAL walk animation
+  runSpeed: 5.0,    // m/s — matches UAL run animation
   jumpForce: 15.0,
   gravity: 8.0,
   groundCheckDistance: 0.1,
@@ -922,10 +922,14 @@ class IntegratedThreeJSApp {
     // Initialize management systems (scene will be initialized in init())
     this.configManager = new ConfigManager()
     
-    this.init()
+    // NOTE: Do NOT call this.init() here.
+    // The constructor runs at module-import time (singleton), but init() is
+    // called explicitly by initializeGame() after the title screen is ready.
+    // Calling it here would race with the initializeGame() call and double-
+    // initialise everything (two renderers, two scenes, black screen).
   }
 
-  public async init(): Promise<void> {
+  public async init(onProgress?: (text: string) => void): Promise<void> {
     // Prevent double initialization
     if (this.isInitialized) {
       console.log('⚠️ Game already initialized, ensuring animation loop is running...')
@@ -1032,7 +1036,7 @@ class IntegratedThreeJSApp {
     // Set up locked position checker for animation system (using ObjectManager)
     this.animationSystem.setLockedPositionChecker((uuid: string) => this.objectManager.getLockedPositions().has(uuid))
     
-    await this.createContent()
+    await this.createContent(onProgress)
     
     this.setupEventListeners()
     this.animate()
@@ -1782,9 +1786,9 @@ class IntegratedThreeJSApp {
     }
 
     const movement = gui.addFolder('🏃 Movement')
-    movement.add(params, 'walkSpeed', 10, 1000, 5).name('Walk Speed')
+    movement.add(params, 'walkSpeed', 0.5, 10, 0.1).name('Walk Speed')
       .onChange((v: number) => this.playerController.updateConfig({ walkSpeed: v }))
-    movement.add(params, 'runSpeed', 50, 5000, 25).name('Run Speed')
+    movement.add(params, 'runSpeed', 1, 20, 0.5).name('Run Speed')
       .onChange((v: number) => this.playerController.updateConfig({ runSpeed: v }))
     movement.open()
 
@@ -1825,12 +1829,18 @@ class IntegratedThreeJSApp {
     this.debugState.helpers = []
   }
 
-  private async createContent(): Promise<void> {
+  private async createContent(onProgress?: (text: string) => void): Promise<void> {
+    const progress = (msg: string) => { if (onProgress) onProgress(msg) }
+
+    progress('Creating lighting...')
     this.addLighting()
     this.createSkySystem()
+
+    progress('Building ocean...')
     await this.createOceanSystem()
     
     // Create land system first
+    progress('Building terrain...')
     await this.createLandSystem()
     
     // CRITICAL FIX: Connect collision system to land system AFTER creation
@@ -1858,10 +1868,11 @@ class IntegratedThreeJSApp {
     
     // Initialize ObjectLoader with required systems
     // Initialize ObjectLoader with landUniforms for shader materials
-    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem, this.landSystem?.getLandUniforms())
+    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem, this.landSystem?.getLandUniforms(), this.collisionSystem)
     
     // Load all objects using the unified ObjectLoader system
-    await ObjectLoader.loadDefaultScene()
+    progress('Loading scene objects...')
+    await ObjectLoader.loadDefaultScene(progress)
     
     // CRITICAL FIX: Load saved positions AFTER objects are created
     // This ensures saved positions override default positions from JSON config
@@ -1895,6 +1906,7 @@ class IntegratedThreeJSApp {
     }
     
     // Initialize parameter integration after all systems are created
+    progress('Configuring systems...')
     this.parameterIntegration = new ParameterIntegration(this.parameterManager, {
       oceanSystem: this.oceanLODSystem,
       landSystem: this.landSystem,
@@ -1952,9 +1964,14 @@ class IntegratedThreeJSApp {
     
     // Add keyboard listener for camera switching
     document.addEventListener('keydown', (event) => {
-      // C key - Cycle between FREE VIEW, SHOULDER, and THIRD PERSON cameras
+      // C key - Cycle between SHOULDER and THIRD PERSON gameplay cameras
       if (event.code === 'KeyC') {
         this.cycleCameraMode()
+      }
+
+      // F key - Toggle FREE VIEW debug camera (keyboard-only, not part of gameplay cycle)
+      if (event.code === 'KeyF') {
+        this.toggleFreeViewCamera()
       }
       
       // Enter/Return key - Menu/Pause (only when overlay is NOT already shown,
@@ -2048,13 +2065,24 @@ class IntegratedThreeJSApp {
   }
 
   /**
-   * Cycle camera modes: thirdperson → shoulder → freeview → thirdperson …
+   * Cycle gameplay camera modes: thirdperson → shoulder → thirdperson …
+   * Free view is NOT part of this cycle — use F key or debug options.
    */
   private cycleCameraMode(): void {
     const currentMode = this.cameraManager.getCurrentMode()
-    const modeOrder: Array<'freeview' | 'shoulder' | 'thirdperson'> = ['thirdperson', 'shoulder', 'freeview']
-    const idx = modeOrder.indexOf(currentMode)
-    const newMode = modeOrder[(idx + 1) % modeOrder.length]
+
+    // If currently in freeview (debug), snap back to thirdperson
+    if (currentMode === 'freeview') {
+      this.cameraManager.switchCamera('thirdperson', true)
+      this.updateCameraModeIndicator('thirdperson')
+      this.playerController.setDebugVisible(false)
+      this.showTemporaryMessage('THIRD PERSON Camera - Press C / Select to cycle', 2000)
+      return
+    }
+
+    const gameplayCycle: Array<'shoulder' | 'thirdperson'> = ['thirdperson', 'shoulder']
+    const idx = gameplayCycle.indexOf(currentMode as 'shoulder' | 'thirdperson')
+    const newMode = gameplayCycle[(idx + 1) % gameplayCycle.length]
 
     this.cameraManager.switchCamera(newMode, true)
     this.updateCameraModeIndicator(newMode)
@@ -2067,11 +2095,31 @@ class IntegratedThreeJSApp {
     }
 
     const modeLabels: Record<string, string> = {
-      freeview: 'FREE VIEW',
       shoulder: 'SHOULDER',
       thirdperson: 'THIRD PERSON'
     }
     this.showTemporaryMessage(`${modeLabels[newMode]} Camera - Press C / Select to cycle`, 2000)
+  }
+
+  /**
+   * Toggle FREE VIEW debug camera (keyboard F key only).
+   * Not available on gamepad or mobile — debug-only.
+   */
+  private toggleFreeViewCamera(): void {
+    const currentMode = this.cameraManager.getCurrentMode()
+    if (currentMode === 'freeview') {
+      // Return to thirdperson
+      this.cameraManager.switchCamera('thirdperson', true)
+      this.updateCameraModeIndicator('thirdperson')
+      this.playerController.setDebugVisible(false)
+      this.showTemporaryMessage('Exiting FREE VIEW → THIRD PERSON', 2000)
+    } else {
+      // Enter freeview
+      this.cameraManager.switchCamera('freeview', true)
+      this.updateCameraModeIndicator('freeview')
+      this.playerController.setDebugVisible(this.debugState.active)
+      this.showTemporaryMessage('FREE VIEW Camera (debug) — Press F to exit', 2000)
+    }
   }
 
   /**
@@ -3260,11 +3308,11 @@ export {
 }
 
 // Export initialization function for titlescreen
-export async function initializeGame(isNewGame: boolean = true): Promise<void> {
+export async function initializeGame(isNewGame: boolean = true, onProgress?: (text: string) => void): Promise<void> {
   console.log(`🎮 Initializing game (${isNewGame ? 'New Game' : 'Continue'})...`)
   
   // The app is already initialized as a singleton, just call init
-  await app.init()
+  await app.init(onProgress)
   
   if (!isNewGame) {
     // Load saved game state if continuing

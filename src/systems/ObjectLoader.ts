@@ -2,6 +2,8 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { ObjectManager } from './ObjectManager'
 import { AnimationSystem } from './AnimationSystem'
+import { CollisionSystem } from './CollisionSystem'
+import { HeightmapCollider } from './HeightmapCollider'
 import { SHADERS, ShaderPath } from '../shaderImports'
 import objectPositionsConfig from '../config/objectPositions.json'
 
@@ -127,13 +129,17 @@ export class ObjectLoader {
   private static scene: THREE.Scene
   private static gltfLoader: GLTFLoader = new GLTFLoader()
   private static landUniforms: { [key: string]: { value: any } } | null = null
+  private static collisionSystem: CollisionSystem | null = null
 
-  public static initialize(scene: THREE.Scene, objectManager: ObjectManager, animationSystem: AnimationSystem, landUniforms?: { [key: string]: { value: any } }): void {
+  public static initialize(scene: THREE.Scene, objectManager: ObjectManager, animationSystem: AnimationSystem, landUniforms?: { [key: string]: { value: any } }, collisionSystem?: CollisionSystem): void {
     this.scene = scene
     this.objectManager = objectManager
     this.animationSystem = animationSystem
     if (landUniforms) {
       this.landUniforms = landUniforms
+    }
+    if (collisionSystem) {
+      this.collisionSystem = collisionSystem
     }
   }
 
@@ -153,7 +159,7 @@ export class ObjectLoader {
   }
 
   // Load default scene objects
-  public static async loadDefaultScene(): Promise<void> {
+  public static async loadDefaultScene(onProgress?: (text: string) => void): Promise<void> {
     console.log('🔄 Loading default scene objects...')
     
     await Promise.all([
@@ -162,10 +168,8 @@ export class ObjectLoader {
       this.loadHologramObject()
     ])
     
-    // Load models separately after initial scene setup
-    this.loadModelObjects().catch(err => {
-      console.error('❌ Model loading failed:', err)
-    })
+    // Load models (awaited so heightmap baking completes before scene reports ready)
+    await this.loadModelObjects(onProgress)
     
     console.log('✅ Default scene objects loaded')
   }
@@ -804,9 +808,11 @@ export class ObjectLoader {
   }
 
   // Load model objects
-  private static async loadModelObjects(): Promise<void> {
+  private static async loadModelObjects(onProgress?: (text: string) => void): Promise<void> {
+    const progress = (msg: string) => { if (onProgress) onProgress(msg) }
     try {
       // Load grid_01.glb model with custom shader using landUniforms
+      progress('Loading grid model...')
       const useShader = this.landUniforms !== null
       const gridModel = await this.loadGLTFModel(
         '/models/environments/grid_01.glb',
@@ -827,8 +833,50 @@ export class ObjectLoader {
       gridModel.position.set(size.x, 0, size.z)
       console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
       console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
+
+      // Bake heightmap collision for the grid (async — yields to event loop between row batches)
+      if (this.collisionSystem) {
+        const gridHeightmap = await HeightmapCollider.fromObject(gridModel, 32, 'grid-01', 0.5, (pct) => {
+          progress(`Baking grid collision... ${pct}%`)
+        })
+        this.collisionSystem.registerHeightmap(gridHeightmap)
+      }
     } catch (error) {
       console.warn('⚠️ Failed to load model objects:', error)
+    }
+
+    // Load landscape_island.glb next to the main terrain plane
+    try {
+      progress('Loading island model...')
+      const useShader = this.landUniforms !== null
+      const islandModel = await this.loadGLTFModel(
+        '/models/environments/landscape_island.glb',
+        'landscape-island',
+        [0, 0, 0],
+        [0, 0, 0],
+        [1, 1, 1],
+        useShader,
+        this.landUniforms || undefined
+      )
+
+      // Measure the island and place it next to the terrain plane (plane spans -50..+50 on X)
+      const bbox = new THREE.Box3().setFromObject(islandModel)
+      const size = new THREE.Vector3()
+      bbox.getSize(size)
+      // Place at the positive-X edge of the plane, same Y=0 as the terrain
+      const xPos = 50 + size.x / 2
+      islandModel.position.set(xPos, 0, 0)
+      console.log(`🏝️ Landscape island positioned at (${xPos.toFixed(2)}, 0, 0) — size (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+
+      // Bake heightmap collision for the island (async — yields to event loop between row batches)
+      if (this.collisionSystem) {
+        const islandHeightmap = await HeightmapCollider.fromObject(islandModel, 32, 'landscape-island', 0.5, (pct) => {
+          progress(`Baking island collision... ${pct}%`)
+        })
+        this.collisionSystem.registerHeightmap(islandHeightmap)
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to load landscape island:', error)
     }
   }
 

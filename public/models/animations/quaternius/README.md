@@ -1,12 +1,37 @@
-# Quaternius Animation Files
+# Quaternius Universal Animation Library (UAL)
 
-Place animation files from the **Quaternius Universal Animation Library** in this directory.
+Animation clips for the Island Crisis character pipeline. This directory holds
+GLB files from the [Quaternius Universal Animation Library](https://quaternius.com/packs/ultimateanimatedcharacter.html).
 
-## Download
+## Setup
 
-Download the free animation pack from:
-- https://quaternius.com/packs/ultimateanimatedcharacter.html
-- Or from the itch.io page
+1. Download the free animation pack from https://quaternius.com/packs/ultimateanimatedcharacter.html
+2. Place `UAL1_Standard.glb` (packed, ~7.7 MB, 45 clips) in this directory
+3. Restart the dev server — clips load automatically via `config/animation-sets.json`
+4. Press **`` ` ``** (backtick) in-game to open the **Animation Browser**
+
+## Blender → Three.js Animation Workflow
+
+```
+Quaternius UAL Pack
+  └─ UAL1_Standard.glb (45 clips, 65-joint UE skeleton)
+       │
+       ▼
+  CharacterAnimationSystem
+       ├─ GLTFLoader extracts animation clips
+       ├─ Maps internal clip names → friendly names (animation-sets.json)
+       ├─ Binds to character's AnimationMixer
+       └─ AnimationStateMachine drives transitions
+            └─ 14 states, priority-based rules
+```
+
+**Character skeleton requirement:** The character model must use UAL bone
+naming (65 joints: `pelvis`, `spine_01`, `upperarm_l`, etc.). Use
+`scripts/rerig_to_ual_skeleton.py` in Blender to re-rig a Rigify character,
+or `scripts/rename_rigify_to_ual.py` to rename DEF- bones.
+
+If the character keeps Rigify naming, pass `buildQuaterniusToRigifyRemap()` at
+registration time for runtime bone remapping.
 
 ## Packed Format (Recommended)
 
@@ -16,7 +41,8 @@ all animation clips:
 **`UAL1_Standard.glb`** (~7.7 MB, 45 clips, 65-joint UE-style skeleton)
 
 The system loads this once and extracts individual clips by their internal name.
-All 45 clips are mapped to friendly names:
+
+### Full Clip Inventory (45 clips)
 
 | Source Clip (in GLB) | Friendly Name | Loop | Category |
 |---|---|---|---|
@@ -66,6 +92,15 @@ All 45 clips are mapped to friendly names:
 | `Swim_Idle_Loop` | swim_idle | Yes | Swimming |
 | `A_TPose` | tpose | No | Reference |
 
+### Currently Registered (22 clips used by state machine)
+
+`idle`, `walk`, `run`, `run_backward`, `walk_backward`, `strafe_left`,
+`strafe_right`, `jump`, `fall`, `land`, `attack`, `attack_kick`, `block`,
+`hit`, `death`, `wave`, `pick_up`, `interact`, `dance`, `sit`, `crouch_idle`,
+`crouch_walk`
+
+Configured in `config/animation-sets.json`.
+
 ## Split Format (Alternative)
 
 If you have individual GLB files (one clip per file), switch to
@@ -77,19 +112,29 @@ If you have individual GLB files (one clip per file), switch to
 The UAL uses a **UE-style skeleton** (65 joints: `root`, `pelvis`, `spine_01`,
 `upperarm_l`, `thigh_r`, etc.).
 
-If your character model uses a different skeleton (e.g. Blender Rigify with
-`DEF-` bones), the system provides a `BoneRemapTable` to translate bone names
-at load time. See `buildQuaterniusToRigifyRemap()` in
-`CharacterAnimationSystem.ts`.
+### Zero-Remap Export (Recommended)
 
-**For zero-remap Blender export**, rename your Rigify DEF- bones to match UAL
-naming before exporting:
-- `DEF-spine` → `pelvis`
-- `DEF-spine.001` → `spine_01`
-- `DEF-upper_arm.L` → `upperarm_l`
-- etc.
+Re-rig your character in Blender using `scripts/rerig_to_ual_skeleton.py`:
 
-See `INSTRUCTIONS.md` for the full bone mapping table and Blender workflow.
+1. Open your character `.blend` file
+2. Set `UAL_GLB_PATH` in the script to point to `UAL1_Standard.glb`
+3. Run the script — it replaces the Rigify armature with the UAL skeleton
+4. Export as GLB — bone names match exactly, no runtime remapping needed
+
+### Runtime Remapping (Alternative)
+
+If keeping Rigify naming, use `buildQuaterniusToRigifyRemap()`:
+
+```ts
+await charAnimSystem.registerCharacter({
+  id: 'player',
+  model: playerModel,
+  animationSetId: 'quaternius-universal',
+  boneRemap: buildQuaterniusToRigifyRemap(),
+})
+```
+
+See `INSTRUCTIONS.md` for the full bone mapping table.
 
 ## Testing
 
@@ -102,3 +147,4 @@ scroll through all loaded clips to verify retargeting quality.
 - The packed file format is more efficient (one HTTP request vs. 45).
 - Clips are cached globally — multiple characters sharing the same set don't
   re-download the GLB.
+- Walk/run speeds are tuned to 1.4 / 5.0 m/s to match UAL animation cycles.

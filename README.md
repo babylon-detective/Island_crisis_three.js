@@ -1,77 +1,94 @@
-# 3D Garden
+# Island Crisis
 
-A comprehensive Three.js application with advanced features including Xbox controller support, intelligent terrain collision, ocean LOD system, player movement, HUD interface, and extensive debugging tools.
+A 3D action game built with Three.js featuring Wind Waker–style cel-shaded characters, skeletal animation, heightmap-based terrain collision, multi-LOD ocean, and a custom GLSL shader pipeline. Models and environments are authored in Blender and exported as GLB for runtime consumption.
 
-This boilerplate is supplementary to <!--my book titled [**Three.js and TypeScript**](https://amzn.to/3FahROZ) and--> my **ThreeJS and TypeScript** courses at [Udemy](https://www.udemy.com/course/threejs-tutorials/?referralCode=4C7E1DE91C3E42F69D0F) and [YouTube (Channel membership required)](https://www.youtube.com/playlist?list=PLKWUX7aMnlEKTmkBqwjc-tZgULJdNBjEd)
+## Documentation
 
-[Introductory Video](https://youtu.be/cZWAqrJhtvQ&list=PLKWUX7aMnlEKTmkBqwjc-tZgULJdNBjEd)
+| Document | Contents |
+|----------|----------|
+| [INSTRUCTIONS.md](INSTRUCTIONS.md) | Full system architecture — Blender ↔ Three.js pipeline, shaders, collision, animation, controls |
+| [public/models/animations/quaternius/README.md](public/models/animations/quaternius/README.md) | Animation clip inventory and retargeting guide |
 
-[Course Discount Coupons](https://sbcode.net/coupons#threejs)
+## Tech Stack
 
-## 📖 Instructions & Controls
+| Component | Version / Tool |
+|-----------|---------------|
+| Runtime | Three.js `^0.176.0` |
+| Language | TypeScript `^5.7.3` |
+| Bundler | Vite `^6.3.5` + `vite-plugin-glsl` |
+| Shading | Raw GLSL via `ShaderMaterial` (no TSL yet) |
+| 3D Authoring | Blender (models, environments, rigging) |
+| Animations | Quaternius Universal Animation Library (UAL) |
 
-For detailed instructions on how to use this boilerplate, including all controls, console commands, and features, see **[INSTRUCTIONS.md](INSTRUCTIONS.md)**.
+## Project Structure
 
-## Boilerplate Overview
+```
+├── config/
+│   ├── animation-sets.json        # Clip registry (file → name mapping)
+│   └── levels/                    # JSON level descriptors
+├── public/models/
+│   ├── characters/                # Character GLBs (Blender → GLB)
+│   ├── environments/              # Terrain & island GLBs
+│   └── animations/quaternius/     # UAL animation pack
+├── scripts/
+│   ├── rename_rigify_to_ual.py    # Blender: rename DEF- bones to UAL
+│   └── rerig_to_ual_skeleton.py   # Blender: full re-rig to UAL skeleton
+├── src/
+│   ├── shaders/                   # All GLSL vertex/fragment shaders
+│   │   └── common/                # Shared lighting & shadow chunks
+│   ├── systems/                   # Game systems (TS modules)
+│   └── main.ts                    # Entry point & game loop
+└── vite.config.js
+```
 
-This enhanced boilerplate includes:
-- **Ocean LOD System**: Infinite ocean with realistic water simulation
-- **Player Movement**: WASD controls with collision detection
-- **Character Animation System**: Skeletal animation pipeline for GLB/GLTF clips (Quaternius Universal Animation Library)
-- **Animation State Machine**: Priority-based FSM that maps player state to animation clips with crossfade transitions
-- **Advanced Shaders**: Unique shader materials for each object
-- **Debug System**: Comprehensive debugging tools and GUI
-- **Performance Monitoring**: Real-time performance tracking
-- **Collision System**: Physics-based collision detection
-- **Camera Management**: System and player camera modes
+## Blender → Three.js Pipeline (Summary)
 
-### Character Animation Setup
+```
+Blender                          Three.js Runtime
+───────                          ────────────────
+Character .blend                 
+  │ re-rig to UAL skeleton       
+  │ (rerig_to_ual_skeleton.py)   
+  └─► .glb (65 UAL bones)  ───► ObjectLoader → PlayerController
+                                    │ custom cel-shader (ShaderMaterial)
+                                    └─► AnimationMixer + StateMachine
+                                    
+Environment .blend               
+  └─► .glb  ───────────────────► ObjectLoader → land shader
+                                    └─► HeightmapCollider (baked grid)
+                                        └─► CollisionSystem (O(1) queries)
 
-1. Download the [Quaternius Universal Animation Library](https://quaternius.com/packs/ultimateanimatedcharacter.html) (free).
-2. Place `UAL1_Standard.glb` (packed, 45 clips) in `public/models/animations/quaternius/`.
-3. The system auto-loads all clips and retargets them to the Rigify character skeleton via bone remapping.
-4. Press **`` ` ``** (backtick) in-game to open the **Animation Browser** — scroll through clips, adjust speed, test retargeting.
-5. See [INSTRUCTIONS.md](INSTRUCTIONS.md) for the full Blender workflow, bone mapping table, and architecture docs.
+UAL1_Standard.glb (45 clips) ──► CharacterAnimationSystem
+                                    └─► AnimationStateMachine (14 states)
+```
 
-[Example](https://sean-bradley.github.io/Three.js-Boilerplate-TS-Vite/)
+See [INSTRUCTIONS.md](INSTRUCTIONS.md) for the full pipeline documentation.
 
-![](docs/screengrab.jpg)
-
-## Installing
+## Quick Start
 
 ```bash
-git clone https://github.com/babylon-detective/3D-Garden.git
-cd 3D-Garden
+git clone <repo-url>
+cd Island_crisis_three.js
 npm install
 ```
 
 ### Develop
 
-```
+```bash
 npm run dev
 ```
 
-Visit [http://localhost:5173/](http://localhost:5173/)
+Visit http://localhost:5173/
 
-### Build Production
+### Build
 
 ```bash
 npm run build
 npm run preview
 ```
 
-Visit [http://localhost:4173/](http://localhost:4173/)
-
-### Deploy to GitHub pages
-
-If you forked this repository, then you can publish your changes to GitHub pages.
+### Deploy to GitHub Pages
 
 ```bash
 npm run deploy
 ```
-
-Visit `https://<your github username>.github.io/3D-Garden/`
-
-E.g.,
-
-[https://sean-bradley.github.io/Three.js-Boilerplate-TS-Vite/](https://sean-bradley.github.io/Three.js-Boilerplate-TS-Vite/)

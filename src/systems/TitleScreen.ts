@@ -6,8 +6,8 @@ import { RetroPostProcessingSystem } from './RetroPostProcessingSystem'
 const HUB_URL = 'https://www.dreamdealer.dev'
 
 export interface TitleScreenConfig {
-  onStart: () => void
-  onContinue: () => void
+  onStart: () => Promise<void>
+  onContinue: () => Promise<void>
 }
 
 export class TitleScreen {
@@ -270,17 +270,23 @@ export class TitleScreen {
     // You can add Web Audio API sound here
   }
 
-  private handleStart(): void {
+  private async handleStart(): Promise<void> {
     if (!this.isActive) return
+    this.isActive = false // prevent double-clicks while loading
     
     console.log('🎮 Starting new game...')
+    
+    // Load the game while the title screen is still visible.
+    // The onStart callback updates loading text as it progresses.
+    await this.config.onStart()
+    
+    // Content is ready — fade out and reveal the running game
     this.fadeOut(() => {
-      this.config.onStart()
       this.dispose()
     })
   }
 
-  private handleContinue(): void {
+  private async handleContinue(): Promise<void> {
     if (!this.isActive) return
     
     const hasSaveData = this.checkSaveData()
@@ -288,10 +294,15 @@ export class TitleScreen {
       console.log('⚠️ No save data found')
       return
     }
+    this.isActive = false // prevent double-clicks while loading
     
     console.log('🎮 Continuing game...')
+    
+    // Load the game while the title screen is still visible
+    await this.config.onContinue()
+    
+    // Content is ready — fade out and reveal the running game
     this.fadeOut(() => {
-      this.config.onContinue()
       this.dispose()
     })
   }

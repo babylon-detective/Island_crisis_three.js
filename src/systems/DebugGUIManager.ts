@@ -237,11 +237,11 @@ export class DebugGUIManager {
     if (!config) return
     
     // Movement speed
-    this.folders.player.add(config, 'walkSpeed', 10, 500, 5)
+    this.folders.player.add(config, 'walkSpeed', 0.5, 10, 0.1)
       .name('Walk Speed')
     
     // Run speed
-    this.folders.player.add(config, 'runSpeed', 50, 2000, 10)
+    this.folders.player.add(config, 'runSpeed', 1, 20, 0.5)
       .name('Run Speed')
     
     // Jump force

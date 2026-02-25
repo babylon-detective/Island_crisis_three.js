@@ -1115,6 +1115,14 @@ export class ConsoleCommands {
     win.showLandBounds = () => ConsoleCommands.showLandBounds()
     win.movePlayerToSafePosition = () => ConsoleCommands.movePlayerToSafePosition()
     win.refreshCollisionSystem = () => this.refreshCollisionSystem()
+    win.rebakeCollision = (id?: string) => {
+      if (!this.app.collisionSystem) { console.warn('No collision system'); return }
+      if (id) {
+        this.app.collisionSystem.rebakeHeightmap(id)
+      } else {
+        this.app.collisionSystem.rebakeAllHeightmaps()
+      }
+    }
     win.checkPlayerSpeeds = () => this.checkPlayerSpeeds()
     win.syncPlayerSpeeds = () => this.syncPlayerSpeeds()
     win.diagnosePlayerIssues = () => this.diagnosePlayerIssues()
