@@ -160,8 +160,29 @@ export class PauseOverlay {
       
       // Mouse click
       optionEl.addEventListener('click', () => {
+        this.selectedIndex = index;
         this.selectCurrentOption();
       });
+
+      // Touch tap (mobile) — use touchend for reliable tap-to-select behavior
+      optionEl.addEventListener('touchstart', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.selectedIndex = index;
+        this.renderOptions(container);
+      }, { passive: false });
+
+      optionEl.addEventListener('touchend', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.selectedIndex = index;
+        this.selectCurrentOption();
+      }, { passive: false });
+
+      optionEl.addEventListener('touchcancel', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, { passive: false });
 
       container.appendChild(optionEl);
     });

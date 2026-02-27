@@ -2022,7 +2022,8 @@ class IntegratedThreeJSApp {
         background: rgba(0,0,0,0.45);
         color: white;
         font-size: ${scaleSize(22)}px;
-        z-index: 1100;
+        z-index: 12000;
+        pointer-events: auto;
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
         user-select: none;
@@ -2037,20 +2038,49 @@ class IntegratedThreeJSApp {
       return btn
     }
 
+    const consumeEvent = (e: Event): void => {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    const bindPress = (btn: HTMLButtonElement, onPress: () => void, onRelease?: () => void): void => {
+      let lastPressTime = 0
+      const guardWindowMs = 120
+
+      const tryPress = (e: Event) => {
+        consumeEvent(e)
+        const now = performance.now()
+        if (now - lastPressTime < guardWindowMs) return
+        lastPressTime = now
+        onPress()
+      }
+
+      btn.addEventListener('pointerdown', tryPress, { passive: false })
+      btn.addEventListener('touchstart', tryPress, { passive: false })
+      btn.addEventListener('click', tryPress, { passive: false })
+
+      if (onRelease) {
+        const release = (e: Event) => {
+          consumeEvent(e)
+          onRelease()
+        }
+        btn.addEventListener('pointerup', release, { passive: false })
+        btn.addEventListener('touchend', release, { passive: false })
+        btn.addEventListener('touchcancel', release, { passive: false })
+        btn.addEventListener('pointercancel', release, { passive: false })
+      }
+    }
+
     // Camera button (upper-left)
     const cameraBtn = createButton(
       'mobile-camera-btn',
       '📷',
-      `top: ${scaleSize(20)}px; left: ${scaleSize(20)}px;`
+      `top: calc(env(safe-area-inset-top, 0px) + ${scaleSize(12)}px); left: calc(env(safe-area-inset-left, 0px) + ${scaleSize(12)}px);`
     )
-    cameraBtn.addEventListener('touchstart', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
+    bindPress(cameraBtn, () => {
       cameraBtn.style.background = 'rgba(255,255,255,0.25)'
-      this.cycleCameraMode()
-    }, { passive: false })
-    cameraBtn.addEventListener('touchend', (e) => {
-      e.preventDefault()
+      this.toggleMobileGameplayCamera()
+    }, () => {
       cameraBtn.style.background = 'rgba(0,0,0,0.45)'
     })
 
@@ -2064,16 +2094,11 @@ class IntegratedThreeJSApp {
       this.playerController.setVirtualJumpPressed(pressed)
       jumpBtn.style.background = pressed ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.45)'
     }
-    jumpBtn.addEventListener('touchstart', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
+    bindPress(jumpBtn, () => {
       setJumpPressed(true)
-    }, { passive: false })
-    jumpBtn.addEventListener('touchend', (e) => {
-      e.preventDefault()
+    }, () => {
       setJumpPressed(false)
     })
-    jumpBtn.addEventListener('touchcancel', () => setJumpPressed(false))
 
     // Start button (center-bottom) for pause toggle
     const startBtn = createButton(
@@ -2081,14 +2106,10 @@ class IntegratedThreeJSApp {
       'START',
       `left: 50%; bottom: ${scaleSize(20)}px; transform: translateX(-50%); width: ${scaleSize(88)}px; border-radius: ${scaleSize(18)}px; font-size: ${scaleSize(12)}px;`
     )
-    startBtn.addEventListener('touchstart', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
+    bindPress(startBtn, () => {
       startBtn.style.background = 'rgba(255,255,255,0.25)'
       this.togglePause()
-    }, { passive: false })
-    startBtn.addEventListener('touchend', (e) => {
-      e.preventDefault()
+    }, () => {
       startBtn.style.background = 'rgba(0,0,0,0.45)'
     })
   }
@@ -2153,6 +2174,29 @@ class IntegratedThreeJSApp {
       thirdperson: 'THIRD PERSON'
     }
     this.showTemporaryMessage(`${modeLabels[newMode]} Camera - Press C / Select to cycle`, 2000)
+  }
+
+  /**
+   * Mobile camera button behavior: swap strictly between SHOULDER and THIRD PERSON.
+   */
+  private toggleMobileGameplayCamera(): void {
+    const currentMode = this.cameraManager.getCurrentMode()
+    const targetMode: 'shoulder' | 'thirdperson' = currentMode === 'shoulder' ? 'thirdperson' : 'shoulder'
+
+    this.cameraManager.switchCamera(targetMode, true)
+    this.updateCameraModeIndicator(targetMode)
+
+    if (targetMode === 'shoulder' && this.debugState.active) {
+      this.playerController.setDebugVisible(true)
+    } else {
+      this.playerController.setDebugVisible(false)
+    }
+
+    const modeLabels: Record<'shoulder' | 'thirdperson', string> = {
+      shoulder: 'SHOULDER',
+      thirdperson: 'THIRD PERSON'
+    }
+    this.showTemporaryMessage(`${modeLabels[targetMode]} Camera`, 1200)
   }
 
   /**
