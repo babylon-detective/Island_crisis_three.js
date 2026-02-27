@@ -121,6 +121,7 @@ export class PlayerController {
     lastLookDelta: new THREE.Vector2(),
     movementDirection: new THREE.Vector2() // For continuous movement based on touch position
   }
+  private touchCameraActive: boolean = false
   private boundTouchStart: (event: TouchEvent) => void
   private boundTouchMove: (event: TouchEvent) => void
   private boundTouchEnd: (event: TouchEvent) => void
@@ -472,12 +473,14 @@ export class PlayerController {
       // Convert touch delta to camera rotation
       // Use higher sensitivity for touch since deltas are pixel-based
       // Increased for faster two-finger hold/drag camera rotation.
-      const lookSensitivity = 0.006
+      const lookSensitivity = 0.02
       // Use the look delta even if small - let the camera manager handle deadzone
       this.input.analogCamera = this.touchState.lastLookDelta.clone().multiplyScalar(lookSensitivity)
+      this.touchCameraActive = true
     } else {
       // No two-finger touch, use gamepad or clear
       this.input.analogCamera = this.gamepadInput.camera.clone()
+      this.touchCameraActive = false
     }
     
     // Reset touch deltas after processing (they'll be updated on next touch move)
@@ -1051,13 +1054,16 @@ export class PlayerController {
       const cameraY = this.input.analogCamera.y
       
       // Apply per-component deadzone for precise control
-      const deadzone = 0.05
+      const deadzone = this.touchCameraActive ? 0.01 : 0.05
       const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
       const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
       
       // Only update camera if at least one axis has input (works for all camera modes including orbital)
       if (adjustedX !== 0 || adjustedY !== 0) {
-        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+        // Touch camera deltas are pixel-derived and need extra gain compared to
+        // normalized gamepad stick input.
+        const touchBoost = this.touchCameraActive ? 1.8 : 1.0
+        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX * touchBoost, adjustedY * touchBoost, deltaTime)
       }
     }
   }
