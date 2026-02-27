@@ -104,7 +104,7 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
   
   spotlight: {
     enabled: true,
-    intensity: 6,
+    intensity: 3,
     angle: Math.PI / 8, // 22.5 degrees
     penumbra: 0.3,
     decay: 2,
@@ -162,6 +162,7 @@ export class CameraManager {
   
   // Player spotlight
   private playerSpotlight: THREE.SpotLight | null = null
+  private spotlightNightFactor: number = 1
   
   // Land system reference
   private landSystem: any = null
@@ -796,9 +797,11 @@ export class CameraManager {
    */
   private updatePlayerSpotlight(): void {
     if (!this.playerSpotlight) return
-    
-    // Spotlight always follows and is always visible
-    this.playerSpotlight.visible = true
+
+    // Spotlight follows player, but intensity/visibility are controlled by day-night cycle.
+    const effectiveIntensity = this.config.spotlight.intensity * this.spotlightNightFactor
+    this.playerSpotlight.intensity = effectiveIntensity
+    this.playerSpotlight.visible = effectiveIntensity > 0.01
     
     // Always update position to follow player
     const spotlightHeight = this.config.spotlight.height
@@ -826,8 +829,16 @@ export class CameraManager {
       this.landSystem.setSpotlightDirection(direction)
       
       this.landSystem.setSpotlightColor(this.playerSpotlight.color)
-      this.landSystem.setSpotlightIntensity(this.playerSpotlight.intensity)
+      this.landSystem.setSpotlightIntensity(effectiveIntensity)
     }
+  }
+
+  /**
+   * Set day/night blend for the player spotlight.
+   * 0 = fully off (day), 1 = full configured intensity (night).
+   */
+  public setPlayerSpotlightNightFactor(factor: number): void {
+    this.spotlightNightFactor = THREE.MathUtils.clamp(factor, 0, 1)
   }
 
   // ============================================================================

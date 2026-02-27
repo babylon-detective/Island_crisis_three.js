@@ -22,6 +22,7 @@ export class RetroPostProcessingSystem {
     enabled: true,
     pixelSize: 2.0,        // Lower = more pixelated (1.0 = very pixelated, 4.0 = less)
     colorLevels: 8.0,      // Number of color quantization levels (4-16 typical)
+    ditheringEnabled: true,
     ditherAmount: 0.3,     // Dithering intensity (0.0-1.0)
     contrast: 1.2,         // Contrast boost
     saturation: 1.1,       // Saturation boost
@@ -96,6 +97,7 @@ export class RetroPostProcessingSystem {
       uniform float uTime;
       uniform float uPixelSize;
       uniform float uColorLevels;
+      uniform float uDitheringEnabled;
       uniform float uDitherAmount;
       uniform float uContrast;
       uniform float uSaturation;
@@ -145,10 +147,12 @@ export class RetroPostProcessingSystem {
         // Quantize/posterize colors
         color.rgb = quantizeColor(color.rgb, uColorLevels);
         
-        // Apply dithering
-        vec2 ditherCoord = gl_FragCoord.xy;
-        float dither = ditherPattern(ditherCoord) - 0.5;
-        color.rgb += dither * uDitherAmount / uColorLevels;
+        // Apply dithering (can be hard-disabled)
+        if (uDitheringEnabled > 0.5) {
+          vec2 ditherCoord = gl_FragCoord.xy;
+          float dither = ditherPattern(ditherCoord) - 0.5;
+          color.rgb += dither * uDitherAmount / uColorLevels;
+        }
         
         // Clamp to valid range
         color.rgb = clamp(color.rgb, 0.0, 1.0);
@@ -166,6 +170,7 @@ export class RetroPostProcessingSystem {
         uTime: { value: 0 },
         uPixelSize: { value: this.config.pixelSize },
         uColorLevels: { value: this.config.colorLevels },
+        uDitheringEnabled: { value: this.config.ditheringEnabled ? 1.0 : 0.0 },
         uDitherAmount: { value: this.config.ditherAmount },
         uContrast: { value: this.config.contrast },
         uSaturation: { value: this.config.saturation },
@@ -201,6 +206,7 @@ export class RetroPostProcessingSystem {
     )
     this.retroPass.uniforms.uPixelSize.value = this.config.pixelSize
     this.retroPass.uniforms.uColorLevels.value = this.config.colorLevels
+    this.retroPass.uniforms.uDitheringEnabled.value = this.config.ditheringEnabled ? 1.0 : 0.0
     this.retroPass.uniforms.uDitherAmount.value = this.config.ditherAmount
     this.retroPass.uniforms.uContrast.value = this.config.contrast
     this.retroPass.uniforms.uSaturation.value = this.config.saturation
@@ -330,6 +336,13 @@ export class RetroPostProcessingSystem {
    */
   public setDitherAmount(amount: number): void {
     this.config.ditherAmount = Math.max(0, Math.min(1, amount))
+  }
+
+  /**
+   * Enable/disable dithering overlay entirely.
+   */
+  public setDitheringEnabled(enabled: boolean): void {
+    this.config.ditheringEnabled = enabled
   }
   
   /**

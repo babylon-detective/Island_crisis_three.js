@@ -889,13 +889,13 @@ class IntegratedThreeJSApp {
   private sky: Sky | null = null
   private sun: THREE.Vector3 = new THREE.Vector3()
   private skyConfig: SkyConfig = {
-    turbidity: 10,
-    rayleigh: 3,
+    turbidity: 7,
+    rayleigh: 2.2,
     mieCoefficient: 0.005,
     mieDirectionalG: 0.7,
     elevation: 2,
     azimuth: 180,
-    exposure: 0.5
+    exposure: 0.42
   }
   
   // Debug system
@@ -1691,6 +1691,27 @@ class IntegratedThreeJSApp {
     fillFolder.add(fillParams, 'posZ', -100, 100, 0.5).name('Pos Z')
       .onChange((v: number) => { fl.position.z = v })
     fillFolder.close()
+
+    // --- Retro Post-Processing ---
+    const postFxFolder = world.addFolder('🧪 Post FX')
+    if (this.retroPostProcessing) {
+      const retroConfig = this.retroPostProcessing.getConfig()
+      const postFxParams = {
+        dithering: retroConfig.ditheringEnabled ?? (retroConfig.ditherAmount > 0.0001),
+        ditherAmount: Math.max(retroConfig.ditherAmount, 0.3)
+      }
+
+      postFxFolder.add(postFxParams, 'dithering').name('Dithering')
+        .onChange((enabled: boolean) => {
+          const current = this.retroPostProcessing.getConfig().ditherAmount
+          if (current > 0.0001) postFxParams.ditherAmount = current
+          this.retroPostProcessing.setDitheringEnabled(enabled)
+          this.retroPostProcessing.setDitherAmount(enabled ? postFxParams.ditherAmount : 0)
+        })
+    } else {
+      postFxFolder.add({ note: 'Retro post FX unavailable' }, 'note').name('Status').disable()
+    }
+    postFxFolder.close()
 
     world.open()
 
@@ -2494,7 +2515,7 @@ class IntegratedThreeJSApp {
       
       // Adjust light intensity based on sun elevation (realistic day/night cycle)
       const sunElevation = this.skyConfig.elevation
-      const intensity = Math.max(0.1, Math.sin(THREE.MathUtils.degToRad(sunElevation)) * 1.2)
+      const intensity = Math.max(0.0, Math.sin(THREE.MathUtils.degToRad(sunElevation)) * 1.25)
       directionalLight.intensity = intensity
       
       // Adjust light color based on time of day (sunset/sunrise colors)
@@ -2517,6 +2538,13 @@ class IntegratedThreeJSApp {
       }
       
       directionalLight.color.copy(finalColor)
+
+      // Player spotlight day/night response:
+      // - Off during daytime
+      // - Gradually ramps up as sun sets / scene darkens
+      // nightFactor: 0 at bright day, 1 at night
+      const nightFactor = 1.0 - THREE.MathUtils.smoothstep(sunElevation, -2, 18)
+      this.cameraManager.setPlayerSpotlightNightFactor(nightFactor)
       
       // Update ocean shader uniforms to match sun position, color, and intensity
       if (this.oceanLODSystem) {

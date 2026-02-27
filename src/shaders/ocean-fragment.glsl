@@ -58,11 +58,11 @@ void main() {
     vec3 sunDir = normalize(uSunDirection);
     float sunElevation = sunDir.y;
     
-    // Sun is only effective when above horizon AND has intensity
-    float sunVisibility = step(0.0, sunElevation) * uSunIntensity; // 0 when sun below horizon
+    // Smooth day-night transition (avoid abrupt step at horizon)
+    float sunVisibility = smoothstep(-0.18, 0.25, sunElevation) * clamp(uSunIntensity, 0.0, 1.25);
     
     // Water color responds to sun presence - much darker at night
-    float colorIntensity = mix(0.2, 1.0, sunVisibility); // Darker base at night
+    float colorIntensity = mix(0.08, 1.12, sunVisibility); // Dark night water, brighter daytime response
     shallowColor *= colorIntensity;
     deepColor *= colorIntensity;
     
@@ -78,7 +78,7 @@ void main() {
     float surfaceLighting = max(0.0, sunDot) * sunVisibility; // Only positive when sun hits surface from above
     
     // Ambient lighting varies dramatically between day and night
-    float ambientLevel = mix(0.05, 0.3, sunVisibility); // Much darker at night
+    float ambientLevel = mix(0.02, 0.22, sunVisibility); // Keep night dark, day less flat
     
     // Final lighting combines surface lighting with ambient
     float lightIntensity = surfaceLighting * 0.8 + ambientLevel;
@@ -92,7 +92,7 @@ void main() {
     vec3 sunHighlight = uSunColor * sunSpec * uReflectionStrength * specularStrength;
     
     // Sky reflection - changes from day to night
-    vec3 daySkyColor = vec3(0.4, 0.7, 1.0); // Light blue sky
+    vec3 daySkyColor = vec3(0.22, 0.45, 0.75); // Deeper day sky reflection (less white horizon)
     vec3 nightSkyColor = vec3(0.1, 0.1, 0.2); // Dark night sky
     vec3 skyReflection = mix(nightSkyColor, daySkyColor, sunVisibility);
     vec3 reflectedColor = skyReflection * fresnelFactor * uReflectionStrength;
@@ -129,10 +129,10 @@ void main() {
     // Distance-based fog/haze - changes with day/night
     float distance = length(vWorldPosition - cameraPosition);
     float fog = 1.0 - exp(-distance * 0.001);
-    vec3 dayFogColor = vec3(0.7, 0.8, 0.9);
+    vec3 dayFogColor = vec3(0.45, 0.58, 0.72);
     vec3 nightFogColor = vec3(0.1, 0.15, 0.3);
     vec3 fogColor = mix(nightFogColor, dayFogColor, sunVisibility);
-    finalColor = mix(finalColor, fogColor, fog * 0.3);
+    finalColor = mix(finalColor, fogColor, fog * 0.18);
     
     // Alpha based on depth and fresnel
     float alpha = mix(uTransparency, 1.0, fresnelFactor);
