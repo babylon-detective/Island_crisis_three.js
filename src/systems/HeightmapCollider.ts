@@ -6,7 +6,7 @@ import * as THREE from 'three'
  * with bilinear interpolation instead of per-frame raycasts.
  *
  * Usage:
- *   const hm = await HeightmapCollider.fromObject(model, 32)
+ *   const hm = HeightmapCollider.fromObject(model, 64)
  *   const y = hm.getHeight(worldX, worldZ) // returns ground Y or null if outside
  */
 export class HeightmapCollider {
@@ -28,7 +28,7 @@ export class HeightmapCollider {
   /** Source object reference for re-baking */
   private sourceObject: THREE.Object3D | null = null
   /** Resolution used when baking */
-  private resolution: number = 32
+  private resolution: number = 64
   /** Padding used when baking */
   private padding: number = 0.5
 
@@ -63,20 +63,16 @@ export class HeightmapCollider {
    * onto the given object's meshes.
    *
    * @param object  The THREE.Object3D (Group/Mesh) to sample
-   * @param resolution  Grid resolution along the longest axis (default 32)
+   * @param resolution  Grid resolution along the longest axis (default 64)
    * @param id  Optional identifier for debug logging
    * @param padding  Extra world units to pad around the bounding box (default 0.5)
-   * @param onProgress  Optional callback for progress reporting (0-100)
    */
   static async fromObject(
     object: THREE.Object3D,
-    resolution: number = 32,
+    resolution: number = 64,
     id: string = 'heightmap',
-    padding: number = 0.5,
-    onProgress?: (pct: number) => void
+    padding: number = 0.5
   ): Promise<HeightmapCollider> {
-    const t0 = performance.now()
-
     // Make sure world matrices are up-to-date
     object.updateMatrixWorld(true)
 
@@ -99,47 +95,30 @@ export class HeightmapCollider {
       cols = Math.max(2, Math.round(resolution * (spanX / spanZ)))
     }
 
-    // Collect all child meshes for raycasting and pre-compute their
-    // world bounding boxes for fast early-rejection per ray.
+    // Collect all child meshes for raycasting
     const meshes: THREE.Mesh[] = []
-    const meshBounds: THREE.Box3[] = []
-    const meshQuats: THREE.Quaternion[] = []
     object.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         meshes.push(child)
-        const b = new THREE.Box3().setFromObject(child)
-        meshBounds.push(b)
-        meshQuats.push(child.getWorldQuaternion(new THREE.Quaternion()))
       }
     })
 
     const raycaster = new THREE.Raycaster()
     const rayOrigin = new THREE.Vector3()
     const rayDir = new THREE.Vector3(0, -1, 0)
-    const rayStartY = bbox.max.y + 10 // just above the model
+    const rayStartY = bbox.max.y + 100 // well above
 
     const heights = new Float32Array(rows * cols)
     // Initialise with -Infinity so missed cells are clearly "no ground"
     heights.fill(-Infinity)
 
     // Process rows in chunks, yielding to the event loop every CHUNK_SIZE rows
-    // so the title-screen animation stays smooth during baking.
-    const CHUNK_SIZE = 4
+    // to avoid freezing the main thread during baking.
+    const CHUNK_SIZE = 8
     for (let r = 0; r < rows; r++) {
       const z = minZ + (r / (rows - 1)) * spanZ
       for (let c = 0; c < cols; c++) {
         const x = minX + (c / (cols - 1)) * spanX
-
-        // Early-reject: skip rays that fall outside every mesh's XZ footprint
-        let anyCandidate = false
-        for (let m = 0; m < meshBounds.length; m++) {
-          const b = meshBounds[m]
-          if (x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z) {
-            anyCandidate = true
-            break
-          }
-        }
-        if (!anyCandidate) continue
 
         rayOrigin.set(x, rayStartY, z)
         raycaster.set(rayOrigin, rayDir)
@@ -151,11 +130,9 @@ export class HeightmapCollider {
           for (const hit of hits) {
             if (hit.face) {
               const normal = hit.face.normal.clone()
-              // Transform face normal to world space using cached quaternion
-              const meshObj = hit.object as THREE.Mesh
-              const idx = meshes.indexOf(meshObj)
-              if (idx >= 0) {
-                normal.applyQuaternion(meshQuats[idx])
+              if (hit.object instanceof THREE.Mesh) {
+                hit.object.getWorldQuaternion(new THREE.Quaternion()).multiply(new THREE.Quaternion()) // identity
+                normal.applyQuaternion(hit.object.getWorldQuaternion(new THREE.Quaternion()))
               }
               if (normal.y > 0.3 && hit.point.y > bestY) {
                 bestY = hit.point.y
@@ -173,7 +150,6 @@ export class HeightmapCollider {
       // Yield to the event loop every CHUNK_SIZE rows so the browser
       // can paint frames and handle input between batches.
       if ((r + 1) % CHUNK_SIZE === 0) {
-        if (onProgress) onProgress(Math.round(((r + 1) / rows) * 100))
         await new Promise<void>(resolve => setTimeout(resolve, 0))
       }
     }
@@ -188,9 +164,8 @@ export class HeightmapCollider {
     for (let i = 0; i < heights.length; i++) {
       if (heights[i] > -Infinity) validCells++
     }
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1)
     console.log(
-      `🗺️ HeightmapCollider "${id}" baked in ${elapsed}s: ${cols}×${rows} grid (${validCells}/${cols * rows} valid), ` +
+      `🗺️ HeightmapCollider "${id}" baked: ${cols}×${rows} grid (${validCells}/${cols * rows} valid), ` +
       `world bounds X[${minX.toFixed(1)}..${maxX.toFixed(1)}] Z[${minZ.toFixed(1)}..${maxZ.toFixed(1)}]`
     )
     return hm

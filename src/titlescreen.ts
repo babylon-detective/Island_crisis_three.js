@@ -21,7 +21,12 @@ const titleScreen = new TitleScreen({
   onContinue: async () => {
     isNewGame = false
     await startGame()
-  }
+  },
+  onRevealGameplay: () => {
+    import('./main').then(({ setGameplayInputEnabled }) => {
+      setGameplayInputEnabled(true)
+    })
+  },
 })
 
 /**
@@ -35,7 +40,8 @@ async function startGame(): Promise<void> {
   try {
     // Phase 1 — dynamic-import the main module (parses code, sets up singletons)
     titleScreen.updateLoadingText('Loading game assets...')
-    const { initializeGame } = await import('./main')
+    const { initializeGame, setGameplayInputEnabled } = await import('./main')
+    setGameplayInputEnabled(false)
     
     // Phase 2 — initialise all systems & load world content.
     // Pass a progress callback so the title screen shows real status.

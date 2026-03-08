@@ -17,6 +17,19 @@
   text-shadow: 0 0 20px rgba(0, 100, 200, 0.8);
 }
 
+#titlescreen-loading-curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: all;
+  touch-action: none;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+#titlescreen-loading-curtain.hidden {
+  display: none;
+}
+
 .title-main {
   font-size: 72px;
   font-weight: bold;
@@ -127,7 +140,7 @@
 
 .loading-text {
   position: absolute;
-  bottom: 80px;
+  bottom: 120px;
   font-size: 18px;
   letter-spacing: 2px;
   color: rgba(255, 255, 255, 0.6);
@@ -160,7 +173,7 @@
   
   .loading-text {
     font-size: 16px;
-    bottom: 60px;
+    bottom: 100px;
   }
 }
 
@@ -179,6 +192,6 @@
   
   .loading-text {
     font-size: 14px;
-    bottom: 40px;
+    bottom: 80px;
   }
 }

@@ -159,7 +159,7 @@ export class ObjectLoader {
   }
 
   // Load default scene objects
-  public static async loadDefaultScene(onProgress?: (text: string) => void): Promise<void> {
+  public static async loadDefaultScene(): Promise<void> {
     console.log('🔄 Loading default scene objects...')
     
     await Promise.all([
@@ -169,7 +169,7 @@ export class ObjectLoader {
     ])
     
     // Load models (awaited so heightmap baking completes before scene reports ready)
-    await this.loadModelObjects(onProgress)
+    await this.loadModelObjects()
     
     console.log('✅ Default scene objects loaded')
   }
@@ -797,13 +797,6 @@ export class ObjectLoader {
         uSpecStrength:    { value: 0.15 },
         uSpecPower:       { value: 32.0 },
 
-        // ---- day/night sun-cycle response ----
-        uSunResponse:     { value: 0.35 },
-        uLandscapeLightingBlend: { value: 0.0 },
-
-        // ---- centralized spotlight response ----
-        uSpotlightResponse: { value: 0.0 },
-
         // ---- outline ----
         uOutlineWidth:    { value: 0.38 },
         uOutlineColor:    { value: new THREE.Color(0.08, 0.06, 0.12) }
@@ -814,35 +807,10 @@ export class ObjectLoader {
     })
   }
 
-  private static tuneEnvironmentModelShader(model: THREE.Object3D): void {
-    model.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return
-      const material = child.material
-      if (!(material instanceof THREE.ShaderMaterial) || !material.uniforms) return
-
-      // Environment meshes use centralized day/night + spotlight lighting.
-      if (material.uniforms.uLandscapeLightingBlend) material.uniforms.uLandscapeLightingBlend.value = 1.0
-      if (material.uniforms.uSpotlightResponse) material.uniforms.uSpotlightResponse.value = 1.15
-
-      // Remove per-model static light influence.
-      if (material.uniforms.uLightIntensity) material.uniforms.uLightIntensity.value = 0.0
-      if (material.uniforms.uLight2Intensity) material.uniforms.uLight2Intensity.value = 0.0
-
-      // Keep subtle stylization without persistent glow.
-      if (material.uniforms.uAmbient) material.uniforms.uAmbient.value = 0.14
-      if (material.uniforms.uBrightBoost) material.uniforms.uBrightBoost.value = 0.01
-
-      // Boost sun contribution so daytime terrain-adjacent meshes read brighter.
-      if (material.uniforms.uSunResponse) material.uniforms.uSunResponse.value = 1.45
-    })
-  }
-
   // Load model objects
-  private static async loadModelObjects(onProgress?: (text: string) => void): Promise<void> {
-    const progress = (msg: string) => { if (onProgress) onProgress(msg) }
+  private static async loadModelObjects(): Promise<void> {
     try {
       // Load grid_01.glb model with custom shader using landUniforms
-      progress('Loading grid model...')
       const useShader = this.landUniforms !== null
       const gridModel = await this.loadGLTFModel(
         '/models/environments/grid_01.glb',
@@ -861,15 +829,12 @@ export class ObjectLoader {
       
       // Position the grid: X based on width, Y=0 (ground), Z based on depth
       gridModel.position.set(size.x, 0, size.z)
-      this.tuneEnvironmentModelShader(gridModel)
       console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
       console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
 
       // Bake heightmap collision for the grid (async — yields to event loop between row batches)
       if (this.collisionSystem) {
-        const gridHeightmap = await HeightmapCollider.fromObject(gridModel, 32, 'grid-01', 0.5, (pct) => {
-          progress(`Baking grid collision... ${pct}%`)
-        })
+        const gridHeightmap = await HeightmapCollider.fromObject(gridModel, 64, 'grid-01')
         this.collisionSystem.registerHeightmap(gridHeightmap)
       }
     } catch (error) {
@@ -878,7 +843,6 @@ export class ObjectLoader {
 
     // Load landscape_island.glb next to the main terrain plane
     try {
-      progress('Loading island model...')
       const useShader = this.landUniforms !== null
       const islandModel = await this.loadGLTFModel(
         '/models/environments/landscape_island.glb',
@@ -897,14 +861,11 @@ export class ObjectLoader {
       // Place at the positive-X edge of the plane, same Y=0 as the terrain
       const xPos = 50 + size.x / 2
       islandModel.position.set(xPos, 0, 0)
-      this.tuneEnvironmentModelShader(islandModel)
       console.log(`🏝️ Landscape island positioned at (${xPos.toFixed(2)}, 0, 0) — size (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
 
       // Bake heightmap collision for the island (async — yields to event loop between row batches)
       if (this.collisionSystem) {
-        const islandHeightmap = await HeightmapCollider.fromObject(islandModel, 32, 'landscape-island', 0.5, (pct) => {
-          progress(`Baking island collision... ${pct}%`)
-        })
+        const islandHeightmap = await HeightmapCollider.fromObject(islandModel, 64, 'landscape-island')
         this.collisionSystem.registerHeightmap(islandHeightmap)
       }
     } catch (error) {

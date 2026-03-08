@@ -39,12 +39,28 @@ interface LandMeshInfo {
 export class CollisionSystem {
   private collidableObjects: Map<string, CollidableObject> = new Map()
   private landMeshes: LandMeshInfo[] = []
+  private landMeshObjects: THREE.Mesh[] = []
   private heightmaps: HeightmapCollider[] = [] // Baked heightmap colliders for GLB models
   private raycaster: THREE.Raycaster = new THREE.Raycaster()
   private tempVector: THREE.Vector3 = new THREE.Vector3()
   private tempVector2: THREE.Vector3 = new THREE.Vector3()
   private tempQuaternion: THREE.Quaternion = new THREE.Quaternion()
+  private tempNormal: THREE.Vector3 = new THREE.Vector3()
   private tempBox: THREE.Box3 = new THREE.Box3()
+
+  // Cached vectors for capsule collision (avoids per-frame allocations)
+  private readonly _capsulePoints: THREE.Vector3[] = Array.from({ length: 7 }, () => new THREE.Vector3())
+  private readonly _capsuleNormal: THREE.Vector3 = new THREE.Vector3()
+  private readonly _capsuleCorrected: THREE.Vector3 = new THREE.Vector3()
+  // Cached ray directions for point collision (static, never change)
+  private static readonly RAY_DIRECTIONS: ReadonlyArray<THREE.Vector3> = [
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0),
+    new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1),
+    new THREE.Vector3(0, 1, 0),
+  ]
+  private readonly _ptColNormal: THREE.Vector3 = new THREE.Vector3()
+  private readonly _ptColCorrected: THREE.Vector3 = new THREE.Vector3()
+  private readonly _noColNormal: THREE.Vector3 = new THREE.Vector3(0, 1, 0)
 
   // Performance optimizations
   private groundHeightCache: Map<string, GroundHeightCache> = new Map()
@@ -162,6 +178,8 @@ export class CollisionSystem {
         priority
       }
     }).sort((a, b) => b.priority - a.priority) // Sort by priority (highest first)
+
+    this.landMeshObjects = this.landMeshes.map(info => info.mesh)
     
     logger.info(LogModule.COLLISION, `Registered ${this.landMeshes.length} land meshes for collision detection`)
     
@@ -290,52 +308,46 @@ export class CollisionSystem {
     const height = volume.dimensions.y
     const halfHeight = height * 0.5
 
-    // Check multiple points along the capsule for better collision detection
-    const checkPoints = [
-      // Top of capsule
-      new THREE.Vector3(position.x, position.y + halfHeight - radius, position.z),
-      // Center of capsule
-      new THREE.Vector3(position.x, position.y, position.z),
-      // Bottom of capsule
-      new THREE.Vector3(position.x, position.y - halfHeight + radius, position.z),
-      // Sides of capsule (for wall collisions)
-      new THREE.Vector3(position.x + radius, position.y, position.z),
-      new THREE.Vector3(position.x - radius, position.y, position.z),
-      new THREE.Vector3(position.x, position.y, position.z + radius),
-      new THREE.Vector3(position.x, position.y, position.z - radius)
-    ]
+    // Reuse cached check-point vectors instead of allocating new ones
+    const cp = this._capsulePoints
+    cp[0].set(position.x, position.y + halfHeight - radius, position.z) // top
+    cp[1].set(position.x, position.y, position.z)                      // center
+    cp[2].set(position.x, position.y - halfHeight + radius, position.z) // bottom
+    cp[3].set(position.x + radius, position.y, position.z)             // +X
+    cp[4].set(position.x - radius, position.y, position.z)             // -X
+    cp[5].set(position.x, position.y, position.z + radius)             // +Z
+    cp[6].set(position.x, position.y, position.z - radius)             // -Z
 
     let maxPenetration = 0
-    let collisionNormal = new THREE.Vector3(0, 1, 0)
+    this._capsuleNormal.set(0, 1, 0)
     let hasAnyCollision = false
 
-    // Check each point for collision with land meshes
-    for (const checkPoint of checkPoints) {
-      const collision = this.checkPointCollision(checkPoint, radius)
+    for (let i = 0; i < 7; i++) {
+      const collision = this.checkPointCollision(cp[i], radius)
       if (collision.hasCollision && collision.penetrationDepth > maxPenetration) {
         maxPenetration = collision.penetrationDepth
-        collisionNormal = collision.normal
+        this._capsuleNormal.copy(collision.normal)
         hasAnyCollision = true
       }
     }
 
     if (hasAnyCollision) {
-      const correctedPosition = position.clone()
-      correctedPosition.add(collisionNormal.clone().multiplyScalar(maxPenetration))
+      this._capsuleCorrected.copy(position)
+      this._capsuleCorrected.addScaledVector(this._capsuleNormal, maxPenetration)
 
       return {
         hasCollision: true,
         penetrationDepth: maxPenetration,
-        normal: collisionNormal,
-        correctedPosition
+        normal: this._capsuleNormal,
+        correctedPosition: this._capsuleCorrected
       }
     }
 
     return {
       hasCollision: false,
       penetrationDepth: 0,
-      normal: new THREE.Vector3(0, 1, 0),
-      correctedPosition: position.clone()
+      normal: this._noColNormal,
+      correctedPosition: position
     }
   }
 
@@ -347,8 +359,8 @@ export class CollisionSystem {
       return {
         hasCollision: false,
         penetrationDepth: 0,
-        normal: new THREE.Vector3(0, 1, 0),
-        correctedPosition: point.clone()
+        normal: this._noColNormal,
+        correctedPosition: point
       }
     }
 
@@ -358,41 +370,25 @@ export class CollisionSystem {
     // CRITICAL FIX: Check if point is below ground + radius (proper sphere collision)
     if (point.y < groundHeight + radius) {
       const penetration = (groundHeight + radius) - point.y
-      const correctedPosition = point.clone()
-      correctedPosition.y = groundHeight + radius // Set absolute position at ground level
-      
-      // Debug: Log collision correction (disabled)
-      // if (Math.random() < 0.001) { // 0.1% chance
-      //   console.log(`🔧 COLLISION FIX: Point at Y=${point.y.toFixed(2)} below ground+radius=${(groundHeight + radius).toFixed(2)}, correcting to Y=${correctedPosition.y.toFixed(2)}`)
-      // }
+      this._ptColCorrected.copy(point)
+      this._ptColCorrected.y = groundHeight + radius
       
       return {
         hasCollision: true,
         penetrationDepth: penetration,
-        normal: new THREE.Vector3(0, 1, 0),
-        correctedPosition
+        normal: this._noColNormal,
+        correctedPosition: this._ptColCorrected
       }
     }
 
-    // Also try raycasting in multiple directions for wall collisions
-    const rayDirections = [
-      new THREE.Vector3(1, 0, 0),   // Right
-      new THREE.Vector3(-1, 0, 0),  // Left
-      new THREE.Vector3(0, 0, 1),   // Forward
-      new THREE.Vector3(0, 0, -1),  // Back
-      new THREE.Vector3(0, 1, 0)    // Up
-    ]
-
-    let closestCollision = {
-      hasCollision: false,
-      penetrationDepth: 0,
-      normal: new THREE.Vector3(0, 1, 0),
-      correctedPosition: point.clone()
-    }
+    // Raycast in cardinal directions for wall collisions
+    const dirs = CollisionSystem.RAY_DIRECTIONS
+    let bestPenetration = 0
+    let hasWallCollision = false
 
     const allMeshes = this.landMeshes.map(info => info.mesh)
 
-    for (const direction of rayDirections) {
+    for (const direction of dirs) {
       this.raycaster.set(point, direction)
       const intersects = this.raycaster.intersectObjects(allMeshes, true)
 
@@ -400,19 +396,37 @@ export class CollisionSystem {
         const distance = intersect.distance
         if (distance <= radius) {
           const penetration = radius - distance
-          if (penetration > closestCollision.penetrationDepth) {
-            closestCollision = {
-              hasCollision: true,
-              penetrationDepth: penetration,
-              normal: intersect.face ? intersect.face.normal.clone().applyQuaternion(intersect.object.getWorldQuaternion(new THREE.Quaternion())) : direction.clone(),
-              correctedPosition: point.clone().add(direction.clone().multiplyScalar(penetration))
+          if (penetration > bestPenetration) {
+            bestPenetration = penetration
+            hasWallCollision = true
+            if (intersect.face) {
+              this._ptColNormal.copy(intersect.face.normal)
+              intersect.object.getWorldQuaternion(this.tempQuaternion)
+              this._ptColNormal.applyQuaternion(this.tempQuaternion)
+            } else {
+              this._ptColNormal.copy(direction)
             }
+            this._ptColCorrected.copy(point).addScaledVector(direction, penetration)
           }
         }
       }
     }
 
-    return closestCollision
+    if (hasWallCollision) {
+      return {
+        hasCollision: true,
+        penetrationDepth: bestPenetration,
+        normal: this._ptColNormal,
+        correctedPosition: this._ptColCorrected
+      }
+    }
+
+    return {
+      hasCollision: false,
+      penetrationDepth: 0,
+      normal: this._noColNormal,
+      correctedPosition: point
+    }
   }
 
   /**
@@ -514,7 +528,7 @@ export class CollisionSystem {
     // ── 2. Check raycasted land meshes ──
     
     // Use raycasting to get exact surface height at this point
-    const allMeshes = this.landMeshes.map(info => info.mesh)
+    const allMeshes = this.landMeshObjects
     
     // Find the highest bounding box to start raycast from
     let highestY = -2.0
@@ -557,8 +571,7 @@ export class CollisionSystem {
           let isTopSurface = true
           if (intersect.face) {
             // Get world-space normal
-            const worldNormal = new THREE.Vector3()
-            worldNormal.copy(intersect.face.normal)
+            const worldNormal = this.tempNormal.copy(intersect.face.normal)
             if (intersect.object instanceof THREE.Mesh) {
               intersect.object.getWorldQuaternion(this.tempQuaternion)
               worldNormal.applyQuaternion(this.tempQuaternion)
@@ -911,7 +924,7 @@ export class CollisionSystem {
     console.log(`  Final Ground Height: ${groundHeight.toFixed(2)}`)
     
     // Test raycast directly
-    const allMeshes = this.landMeshes.map(info => info.mesh)
+    const allMeshes = this.landMeshObjects
     this.tempVector.set(x, 500, z)
     this.tempVector2.set(0, -1, 0)
     this.raycaster.set(this.tempVector, this.tempVector2)

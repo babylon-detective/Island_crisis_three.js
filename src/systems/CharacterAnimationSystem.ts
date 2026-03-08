@@ -589,6 +589,49 @@ export class CharacterAnimationSystem {
   // ============================================================================
 
   /**
+   * Load only specific named clips for a registered character.
+   * For packed GLBs this is much more efficient than calling loadClipOnDemand
+   * per clip, since it loads the file once and only registers the requested clips.
+   */
+  async loadSpecificClips(characterId: string, clipNames: string[]): Promise<void> {
+    const state = this.characters.get(characterId)
+    if (!state) return
+
+    const set = this.registry.getSet(state.animationSetId)
+    if (!set) return
+
+    // Filter to only the requested clip descriptors
+    const descs = set.clips.filter(c => clipNames.includes(c.name))
+    if (descs.length === 0) return
+
+    // Check if all clips share one file path (packed)
+    const uniquePaths = new Set(descs.map(c => c.path))
+
+    if (uniquePaths.size === 1) {
+      const packedPath = descs[0].path
+      const allClips = await this.loadClipFromFile(packedPath)
+      const clipByName = new Map<string, THREE.AnimationClip>()
+      for (const clip of allClips) {
+        clipByName.set(clip.name, clip)
+      }
+      for (const desc of descs) {
+        if (state.actions.has(desc.name)) continue
+        const sourceName = desc.sourceClipName ?? desc.name
+        const sourceClip = clipByName.get(sourceName)
+        if (!sourceClip) continue
+        const clip = sourceClip.clone()
+        clip.name = desc.name
+        this.registerClipOnCharacter(state, desc, clip)
+      }
+    } else {
+      for (const desc of descs) {
+        if (state.actions.has(desc.name)) continue
+        await this.loadAndRegisterClip(characterId, desc)
+      }
+    }
+  }
+
+  /**
    * Load all animation clips for a registered character.
    * For packed GLBs, loads the file once and extracts individual clips by name.
    * For split GLBs, loads each file individually.

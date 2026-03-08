@@ -50,6 +50,9 @@ export interface HUDData {
   mode: string
   fps: number
   terrainHeight: number
+  groundHeight?: number
+  centerDelta?: number
+  snapApplied?: boolean
   
   // Performance
   triangles: number
@@ -109,7 +112,10 @@ export class HUDSystem {
       { id: 'position', label: 'Position', value: '0, 0, 0' },
       { id: 'velocity', label: 'Velocity', value: '0, 0, 0' },
       { id: 'on-ground', label: 'On Ground', value: 'false' },
-      { id: 'terrain-height', label: 'Terrain Height', value: '0.0' }
+      { id: 'terrain-height', label: 'Terrain Height', value: '0.0' },
+      { id: 'ground-height', label: 'Ground Height', value: '0.0' },
+      { id: 'center-delta', label: 'Center Delta', value: '0.000' },
+      { id: 'snap-applied', label: 'Snap Applied', value: 'false' }
     ])
 
     // Input display panel
@@ -379,6 +385,19 @@ export class HUDSystem {
     
     if (this.data.terrainHeight !== undefined) {
       this.updateElement('terrain-height', this.data.terrainHeight.toFixed(2))
+    }
+
+    if (this.data.groundHeight !== undefined) {
+      this.updateElement('ground-height', this.data.groundHeight.toFixed(2))
+    }
+
+    if (this.data.centerDelta !== undefined) {
+      const deltaClass = Math.abs(this.data.centerDelta) > 0.05 ? 'warning' : 'good'
+      this.updateElement('center-delta', this.data.centerDelta.toFixed(3), deltaClass)
+    }
+
+    if (this.data.snapApplied !== undefined) {
+      this.updateElement('snap-applied', this.data.snapApplied ? 'true' : 'false', this.data.snapApplied ? 'active' : '')
     }
 
     // Update input display

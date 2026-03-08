@@ -26,6 +26,9 @@ import { PauseOverlay } from './systems/PauseOverlay'
 import { CharacterAnimationSystem, AnimationClipRegistry, buildQuaterniusToRigifyRemap } from './systems/CharacterAnimationSystem'
 import { AnimationBrowser } from './systems/AnimationBrowser'
 import { AnimationStateMachine, createPlayerStateMachineConfig, AnimStateParams } from './systems/AnimationStateMachine'
+import { NPCSystem } from './systems/NPCSystem'
+import { NPCAISystem } from './systems/NPCAISystem'
+import { DialogueManager } from './systems/DialogueSystem'
 import { SHADERS, ShaderPath } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
@@ -865,11 +868,17 @@ class IntegratedThreeJSApp {
   private playerAnimStateMachine: AnimationStateMachine | null = null
   private animationBrowser: AnimationBrowser | null = null
 
+  // NPC systems
+  private npcSystem: NPCSystem | null = null
+  private npcAISystem: NPCAISystem | null = null
+  private dialogueManager: DialogueManager | null = null
+
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
   private pauseOverlay: PauseOverlay = new PauseOverlay()
   private lastPauseToggleTime: number = 0
   private pauseToggleCooldownMs: number = 250
+  private gameplayInputEnabled: boolean = false
   
   // Lighting references for dynamic control
   private ambientLight!: THREE.AmbientLight
@@ -985,12 +994,8 @@ class IntegratedThreeJSApp {
     
     // Initialize gamepad handler and connect to player controller
     this.gamepadHandler = this.inputSystem.createGamepadHandler((input) => {
+      if (!this.gameplayInputEnabled) return
       this.playerController.handleGamepadInput(input)
-      
-      // Handle camera mode toggle (right stick button / R3 or select button)
-      if (input.cameraMode || input.select) {
-        this.cycleCameraMode()
-      }
       
       // Handle menu/pause button (start button)
       if (input.menu) {
@@ -1045,6 +1050,9 @@ class IntegratedThreeJSApp {
 
     // Character animation system — bones renamed in Blender to match UAL naming
     this.initCharacterAnimations()
+
+    // NPC crowd system — spawn 33 NPCs after animations are registered
+    this.initNPCSystem()
     
     // Mark as initialized
     this.isInitialized = true
@@ -1138,11 +1146,76 @@ class IntegratedThreeJSApp {
   }
 
   /**
+   * Initialize NPC crowd, AI, and dialogue systems.
+   */
+  private async initNPCSystem(): Promise<void> {
+    try {
+      this.npcSystem = new NPCSystem(this.scene, this.collisionSystem, this.characterAnimationSystem)
+      await this.npcSystem.initialize()
+      await this.npcSystem.spawnCrowd(10, 40)
+
+      this.npcAISystem = new NPCAISystem(
+        this.npcSystem,
+        this.collisionSystem,
+        this.characterAnimationSystem,
+      )
+      this.npcAISystem.initAll()
+
+      // Dialogue manager
+      this.dialogueManager = new DialogueManager(
+        this.npcSystem,
+        this.npcAISystem,
+        this.characterAnimationSystem,
+      )
+      this.dialogueManager.enable()
+
+      // Register sample dialogue trees for a handful of NPCs
+      this.registerSampleDialogues()
+
+      console.log('✅ NPC systems initialized (10 NPCs, AI, dialogue)')
+    } catch (error) {
+      console.warn('⚠️ NPC system init failed:', error)
+    }
+  }
+
+  /**
+   * Register example dialogue trees so the player can test interaction.
+   */
+  private registerSampleDialogues(): void {
+    if (!this.dialogueManager) return
+
+    // Give every 3rd NPC a simple dialogue tree
+    const npcs = this.npcSystem!.getAllNPCs()
+    for (let i = 0; i < npcs.length; i += 3) {
+      const npc = npcs[i]
+      const tree = DialogueManager.createTree(`tree-${npc.id}`, 'greet', [
+        DialogueManager.node('greet', `Hello traveller! I'm a ${npc.npcClass} villager.`, [
+          DialogueManager.choice('Tell me about this island.', 'about'),
+          DialogueManager.choice('What do you do here?', 'job'),
+          DialogueManager.choice('Goodbye.', 'bye'),
+        ]),
+        DialogueManager.node('about', 'This island holds many secrets. Explore the shores and you may find something interesting.', [
+          DialogueManager.choice('Thanks!', 'bye'),
+          DialogueManager.choice('Tell me more.', 'more'),
+        ]),
+        DialogueManager.node('job', 'I wander and keep watch. It can be lonely out here.', [
+          DialogueManager.choice('I understand. Goodbye.', 'bye'),
+        ]),
+        DialogueManager.node('more', 'The crystals on the hilltops glow at night. Nobody knows why.', [
+          DialogueManager.choice('Interesting. Goodbye.', 'bye'),
+        ]),
+        DialogueManager.node('bye', 'Safe travels, friend!', [], { isTerminal: true }),
+      ])
+      this.dialogueManager.registerTree(tree, npc.id)
+    }
+  }
+
+  /**
    * Collect current player state into AnimStateParams for the state machine.
    */
   private getPlayerAnimParams(): AnimStateParams {
     const velocity = this.playerController.getVelocity()
-    const speed = new THREE.Vector2(velocity.x, velocity.z).length()
+    const speed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z)
     const isGrounded = this.playerController.isOnGround()
     const isMoving = this.playerController.isMoving()
     const isRunning = this.playerController.isRunning()
@@ -1893,7 +1966,7 @@ class IntegratedThreeJSApp {
     
     // Load all objects using the unified ObjectLoader system
     progress('Loading scene objects...')
-    await ObjectLoader.loadDefaultScene(progress)
+    await ObjectLoader.loadDefaultScene()
     
     // CRITICAL FIX: Load saved positions AFTER objects are created
     // This ensures saved positions override default positions from JSON config
@@ -1980,21 +2053,13 @@ class IntegratedThreeJSApp {
    * Set up camera switching functionality
    */
   private setupCameraSwitching(): void {
-    // Create camera mode indicator
-    this.createCameraModeIndicator()
+    // Force and keep gameplay in third-person mode only.
+    this.cameraManager.switchCamera('thirdperson', true)
+    this.playerController.setDebugVisible(false)
     
-    // Add keyboard listener for camera switching
+    // Keep only menu/pause keyboard binding.
     document.addEventListener('keydown', (event) => {
-      // C key - Cycle between SHOULDER and THIRD PERSON gameplay cameras
-      if (event.code === 'KeyC') {
-        this.cycleCameraMode()
-      }
-
-      // F key - Toggle FREE VIEW debug camera (keyboard-only, not part of gameplay cycle)
-      if (event.code === 'KeyF') {
-        this.toggleFreeViewCamera()
-      }
-      
+      if (!this.gameplayInputEnabled) return
       // Enter/Return key - Menu/Pause (only when overlay is NOT already shown,
       // to avoid double-toggling; PauseOverlay handles its own Enter key)
       if ((event.code === 'Enter' || event.code === 'NumpadEnter') && !this.pauseOverlay.isVisible()) {
@@ -2018,6 +2083,8 @@ class IntegratedThreeJSApp {
    * Create mobile touch action buttons:
    * - Camera (upper-left): cycle gameplay camera modes
    * - A (lower-right): jump while held/pressed
+    * - Ranged (right-mid): toggle ranged tap attacks
+    * - Flee/Grab (left-mid): flee from target (ranged) or grab target (melee)
    * - Start (bottom-center): toggle pause menu
    */
   private createMobileActionButtons(): void {
@@ -2092,19 +2159,6 @@ class IntegratedThreeJSApp {
       }
     }
 
-    // Camera button (upper-left)
-    const cameraBtn = createButton(
-      'mobile-camera-btn',
-      '📷',
-      `top: calc(env(safe-area-inset-top, 0px) + ${scaleSize(12)}px); left: calc(env(safe-area-inset-left, 0px) + ${scaleSize(12)}px);`
-    )
-    bindPress(cameraBtn, () => {
-      cameraBtn.style.background = 'rgba(255,255,255,0.25)'
-      this.toggleMobileGameplayCamera()
-    }, () => {
-      cameraBtn.style.background = 'rgba(0,0,0,0.45)'
-    })
-
     // Jump button A (lower-right)
     const jumpBtn = createButton(
       'mobile-jump-btn',
@@ -2121,6 +2175,40 @@ class IntegratedThreeJSApp {
       setJumpPressed(false)
     })
 
+    // Ranged toggle button (right-middle)
+    const rangedBtn = createButton(
+      'mobile-ranged-btn',
+      '🏹',
+      `right: ${scaleSize(20)}px; bottom: ${scaleSize(92)}px;`
+    )
+    const refreshRangedButton = (): void => {
+      const enabled = this.playerController.isRangedModeEnabled()
+      rangedBtn.style.background = enabled ? 'rgba(79,195,247,0.55)' : 'rgba(0,0,0,0.45)'
+      rangedBtn.style.borderColor = enabled ? 'rgba(79,195,247,0.95)' : 'rgba(255,255,255,0.5)'
+    }
+    bindPress(rangedBtn, () => {
+      this.playerController.setRangedModeEnabled(!this.playerController.isRangedModeEnabled())
+      refreshRangedButton()
+    })
+    refreshRangedButton()
+
+    // Flee/Grab action button (left-middle)
+    const actionBtn = createButton(
+      'mobile-action-btn',
+      '↯',
+      `left: ${scaleSize(20)}px; bottom: ${scaleSize(92)}px;`
+    )
+    bindPress(actionBtn, () => {
+      actionBtn.style.background = 'rgba(255,255,255,0.25)'
+      if (this.playerController.isRangedModeEnabled()) {
+        this.playerController.triggerFleeFromCurrentTarget()
+      } else {
+        this.playerController.triggerGrabCurrentTarget()
+      }
+    }, () => {
+      actionBtn.style.background = 'rgba(0,0,0,0.45)'
+    })
+
     // Start button (center-bottom) for pause toggle
     const startBtn = createButton(
       'mobile-start-btn',
@@ -2133,130 +2221,6 @@ class IntegratedThreeJSApp {
     }, () => {
       startBtn.style.background = 'rgba(0,0,0,0.45)'
     })
-  }
-
-  /**
-   * Create a persistent camera mode indicator
-   */
-  private createCameraModeIndicator(): void {
-    const indicator = document.createElement('div')
-    indicator.id = 'camera-mode-indicator'
-    indicator.style.cssText = `
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      background: rgba(0, 0, 0, 0.7);
-      color: white;
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-family: Arial, sans-serif;
-      font-size: 12px;
-      z-index: 1000;
-      pointer-events: none;
-      transition: all 0.3s ease;
-    `
-    document.body.appendChild(indicator)
-    // Initialize with current camera mode
-    this.updateCameraModeIndicator(this.cameraManager.getCurrentMode())
-  }
-
-  /**
-   * Cycle gameplay camera modes: thirdperson → shoulder → thirdperson …
-   * Free view is NOT part of this cycle — use F key or debug options.
-   */
-  private cycleCameraMode(): void {
-    const currentMode = this.cameraManager.getCurrentMode()
-
-    // If currently in freeview (debug), snap back to thirdperson
-    if (currentMode === 'freeview') {
-      this.cameraManager.switchCamera('thirdperson', true)
-      this.updateCameraModeIndicator('thirdperson')
-      this.playerController.setDebugVisible(false)
-      this.showTemporaryMessage('THIRD PERSON Camera - Press C / Select to cycle', 2000)
-      return
-    }
-
-    const gameplayCycle: Array<'shoulder' | 'thirdperson'> = ['thirdperson', 'shoulder']
-    const idx = gameplayCycle.indexOf(currentMode as 'shoulder' | 'thirdperson')
-    const newMode = gameplayCycle[(idx + 1) % gameplayCycle.length]
-
-    this.cameraManager.switchCamera(newMode, true)
-    this.updateCameraModeIndicator(newMode)
-
-    // Toggle player debug wireframe based on debug mode and camera mode
-    if (newMode === 'shoulder' && this.debugState.active) {
-      this.playerController.setDebugVisible(true)
-    } else {
-      this.playerController.setDebugVisible(false)
-    }
-
-    const modeLabels: Record<string, string> = {
-      shoulder: 'SHOULDER',
-      thirdperson: 'THIRD PERSON'
-    }
-    this.showTemporaryMessage(`${modeLabels[newMode]} Camera - Press C / Select to cycle`, 2000)
-  }
-
-  /**
-   * Mobile camera button behavior: swap strictly between SHOULDER and THIRD PERSON.
-   */
-  private toggleMobileGameplayCamera(): void {
-    const currentMode = this.cameraManager.getCurrentMode()
-    const targetMode: 'shoulder' | 'thirdperson' = currentMode === 'shoulder' ? 'thirdperson' : 'shoulder'
-
-    this.cameraManager.switchCamera(targetMode, true)
-    this.updateCameraModeIndicator(targetMode)
-
-    if (targetMode === 'shoulder' && this.debugState.active) {
-      this.playerController.setDebugVisible(true)
-    } else {
-      this.playerController.setDebugVisible(false)
-    }
-
-    const modeLabels: Record<'shoulder' | 'thirdperson', string> = {
-      shoulder: 'SHOULDER',
-      thirdperson: 'THIRD PERSON'
-    }
-    this.showTemporaryMessage(`${modeLabels[targetMode]} Camera`, 1200)
-  }
-
-  /**
-   * Toggle FREE VIEW debug camera (keyboard F key only).
-   * Not available on gamepad or mobile — debug-only.
-   */
-  private toggleFreeViewCamera(): void {
-    const currentMode = this.cameraManager.getCurrentMode()
-    if (currentMode === 'freeview') {
-      // Return to thirdperson
-      this.cameraManager.switchCamera('thirdperson', true)
-      this.updateCameraModeIndicator('thirdperson')
-      this.playerController.setDebugVisible(false)
-      this.showTemporaryMessage('Exiting FREE VIEW → THIRD PERSON', 2000)
-    } else {
-      // Enter freeview
-      this.cameraManager.switchCamera('freeview', true)
-      this.updateCameraModeIndicator('freeview')
-      this.playerController.setDebugVisible(this.debugState.active)
-      this.showTemporaryMessage('FREE VIEW Camera (debug) — Press F to exit', 2000)
-    }
-  }
-
-  /**
-   * Update the camera mode indicator
-   */
-  private updateCameraModeIndicator(mode: 'freeview' | 'shoulder' | 'thirdperson'): void {
-    const indicator = document.getElementById('camera-mode-indicator')
-    if (indicator) {
-      const labels: Record<string, { text: string; bg: string }> = {
-        freeview: { text: 'Camera: FREE VIEW', bg: 'rgba(30, 144, 255, 0.8)' },
-        shoulder: { text: 'Camera: SHOULDER', bg: 'rgba(0, 128, 0, 0.8)' },
-        thirdperson: { text: 'Camera: THIRD PERSON', bg: 'rgba(180, 80, 220, 0.8)' }
-      }
-      const cfg = labels[mode] || labels.freeview
-      indicator.textContent = cfg.text
-      indicator.style.background = cfg.bg
-      indicator.style.color = 'white'
-    }
   }
 
   /**
@@ -2308,6 +2272,10 @@ class IntegratedThreeJSApp {
    * Toggle the game pause state
    */
   private togglePause(): void {
+    if (!this.gameplayInputEnabled) {
+      return
+    }
+
     const now = performance.now()
     if (now - this.lastPauseToggleTime < this.pauseToggleCooldownMs) {
       return
@@ -2322,6 +2290,18 @@ class IntegratedThreeJSApp {
       // Show pause overlay and pause the game
       this.pauseOverlay.show()
       this.pauseManager.setPaused(true)
+    }
+  }
+
+  public setGameplayInputEnabled(enabled: boolean): void {
+    this.gameplayInputEnabled = enabled
+
+    if (!enabled) {
+      // Ensure loading transitions cannot leave the game paused.
+      if (this.pauseOverlay.isVisible()) {
+        this.pauseOverlay.hide()
+      }
+      this.pauseManager.setPaused(false)
     }
   }
 
@@ -3003,6 +2983,22 @@ class IntegratedThreeJSApp {
         this.playerAnimStateMachine.setParams(this.getPlayerAnimParams())
         this.playerAnimStateMachine.update(deltaTime)
       }
+
+      // Update NPC systems
+      try {
+        if (this.npcSystem) this.npcSystem.update(deltaTime)
+        if (this.npcAISystem) {
+          this.npcAISystem.setPlayerPosition(this.playerController.getPosition())
+          this.npcAISystem.update(deltaTime)
+        }
+        if (this.dialogueManager) {
+          this.dialogueManager.update(this.playerController.getPosition())
+        }
+      } catch (e) {
+        // Prevent NPC errors from freezing the game loop
+        console.warn('NPC update error:', e)
+      }
+
       this.characterAnimationSystem.update(deltaTime)
       
       // Update shader material uniforms for all ObjectManager objects
@@ -3090,9 +3086,7 @@ class IntegratedThreeJSApp {
         }
       }
       
-      if (this.frameCount % 120 === 0) { // Log every 2 seconds
-        console.log(`🎥 Camera: ${currentCamera.name} at`, currentCamera.position)
-      }
+      // (Periodic camera log removed — use debug GUI for camera info)
       
       // Render with retro post-processing
       if (this.retroPostProcessing) {
@@ -3207,6 +3201,9 @@ class IntegratedThreeJSApp {
       },
       onGround: (playerStatus as any).onGround,
       terrainHeight: terrainHeight,
+      groundHeight: (playerStatus as any).groundHeight,
+      centerDelta: (playerStatus as any).centerDelta,
+      snapApplied: (playerStatus as any).snapApplied,
       
       // Input states
       keys: {
@@ -3419,6 +3416,9 @@ export {
 // Export initialization function for titlescreen
 export async function initializeGame(isNewGame: boolean = true, onProgress?: (text: string) => void): Promise<void> {
   console.log(`🎮 Initializing game (${isNewGame ? 'New Game' : 'Continue'})...`)
+
+  // Keep gameplay inputs locked while systems are being created.
+  app.setGameplayInputEnabled(false)
   
   // The app is already initialized as a singleton, just call init
   await app.init(onProgress)
@@ -3428,6 +3428,10 @@ export async function initializeGame(isNewGame: boolean = true, onProgress?: (te
     console.log('📂 Loading saved game state...')
     // You can add load game logic here if needed
   }
+}
+
+export function setGameplayInputEnabled(enabled: boolean): void {
+  app.setGameplayInputEnabled(enabled)
 }
 
 // Configure logging for development

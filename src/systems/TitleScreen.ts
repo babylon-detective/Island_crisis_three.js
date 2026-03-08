@@ -8,6 +8,7 @@ const HUB_URL = 'https://www.dreamdealer.dev'
 export interface TitleScreenConfig {
   onStart: () => Promise<void>
   onContinue: () => Promise<void>
+  onRevealGameplay?: () => void
 }
 
 export class TitleScreen {
@@ -54,6 +55,7 @@ export class TitleScreen {
         <div class="menu-item hub" id="menu-hub">GAME HUB</div>
       </div>
       <div class="loading-text">Loading...</div>
+      <div class="controls-hint">D-pad / Arrows to navigate • A / Enter to select • B / Esc for Hub</div>
     `
     
     document.body.appendChild(this.container)
@@ -281,6 +283,7 @@ export class TitleScreen {
     
     // Content is ready — fade out and reveal the running game
     this.fadeOut(() => {
+      this.config.onRevealGameplay?.()
       this.dispose()
     })
   }
@@ -302,6 +305,7 @@ export class TitleScreen {
     
     // Content is ready — fade out and reveal the running game
     this.fadeOut(() => {
+      this.config.onRevealGameplay?.()
       this.dispose()
     })
   }

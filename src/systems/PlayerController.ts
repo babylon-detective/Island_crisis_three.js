@@ -84,6 +84,7 @@ export class PlayerController {
   
   // Collision
   private collisionVolume!: CollisionVolume
+  private _tempNewPosition: THREE.Vector3 = new THREE.Vector3()
   
   // Ground detection hysteresis to prevent flickering
   private groundStateBuffer: boolean = false
@@ -98,13 +99,12 @@ export class PlayerController {
   // Touch input handling
   private touchState: {
     activeTouches: Map<number, { x: number, y: number, startX: number, startY: number, prevX: number, prevY: number }>
-    movementTouch: number | null // ID of touch used for movement (one finger when only one touch)
-    lookTouches: number[] // IDs of touches used for looking (two fingers)
-    runTouch: number | null // ID of movement touch that activated double-tap-hold run
+    movementTouch: number | null // Unused in tap-to-navigate mode (kept for compatibility)
+    lookTouches: number[] // IDs of touches used for camera look
+    runTouch: number | null // Double-tap + hold in navigate curtain
     lastTapTime: number
     lastTapX: number
     lastTapY: number
-    virtualJumpPressed: boolean
     lastMovementDelta: THREE.Vector2
     lastLookDelta: THREE.Vector2
     movementDirection: THREE.Vector2 // Continuous movement direction from touch position
@@ -116,16 +116,24 @@ export class PlayerController {
     lastTapTime: 0,
     lastTapX: 0,
     lastTapY: 0,
-    virtualJumpPressed: false,
     lastMovementDelta: new THREE.Vector2(),
     lastLookDelta: new THREE.Vector2(),
     movementDirection: new THREE.Vector2() // For continuous movement based on touch position
   }
-  private touchCameraActive: boolean = false
   private boundTouchStart: (event: TouchEvent) => void
   private boundTouchMove: (event: TouchEvent) => void
   private boundTouchEnd: (event: TouchEvent) => void
   private boundTouchCancel: (event: TouchEvent) => void
+  private touchRaycaster: THREE.Raycaster = new THREE.Raycaster()
+  private navigationTarget: THREE.Vector3 | null = null
+  private touchTapCandidates: Map<number, {
+    startX: number
+    startY: number
+    startTime: number
+    moved: boolean
+  }> = new Map()
+  private touchZoneById: Map<number, 'navigate' | 'look'> = new Map()
+  private navigationMarker: THREE.Mesh | null = null
   
   // Gamepad input
   private gamepadInput: {
@@ -175,11 +183,13 @@ export class PlayerController {
       ...config
     }
     
-    // Initialize state
+    // Initialize state – place capsule center so feet touch the ground plane at Y=0.
+    // height/2 puts the capsule bottom at Y=0 (ground).  Start grounded to
+    // avoid the initial "fall" animation.
     this.state = {
-      position: new THREE.Vector3(0, 3, 0), // CRITICAL FIX: Start above ground level (was 2, now 3)
+      position: new THREE.Vector3(0, this.config.height / 2, 0),
       velocity: new THREE.Vector3(),
-      onGround: false,
+      onGround: true,
       canJump: true,
       isMoving: false,
       isRunning: false
@@ -429,17 +439,13 @@ export class PlayerController {
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyC') || false
     
-    // Debug log when keys are pressed
-    if (keyForward || keyBackward || keyLeft || keyRight) {
-      console.log(`🎮 WASD Input:`, { keyForward, keyBackward, keyLeft, keyRight })
-    }
+    // (WASD debug logging removed to avoid per-frame console.log overhead)
     
-    // Touch input for movement (one finger) - use continuous direction
-    const touchMovement = this.touchState.movementDirection
-    const touchForward = touchMovement.y > 0.1 // Forward movement
-    const touchBackward = touchMovement.y < -0.1 // Backward movement
-    const touchLeft = touchMovement.x < -0.1 // Left movement
-    const touchRight = touchMovement.x > 0.1 // Right movement
+    // Touch movement is tap-to-navigate (handled separately), not virtual joystick.
+    const touchForward = false
+    const touchBackward = false
+    const touchLeft = false
+    const touchRight = false
     
     // Gamepad input (analog movement converted to digital)
     const gamepadForward = this.gamepadInput.movement.y > 0.1
@@ -453,34 +459,27 @@ export class PlayerController {
     this.input.left = keyLeft || touchLeft || gamepadLeft
     this.input.right = keyRight || touchRight || gamepadRight
     const touchRun = this.touchState.runTouch !== null && this.touchState.activeTouches.has(this.touchState.runTouch)
-    this.input.jump = keyJump || this.gamepadInput.jump || this.touchState.virtualJumpPressed
+    this.input.jump = keyJump || this.gamepadInput.jump
     this.input.run = keyRun || this.gamepadInput.run || touchRun
     this.input.camera = keyCamera || this.gamepadInput.cameraMode
     
-    // Store analog values for smooth movement (prioritize gamepad, then touch)
+    // Store analog values for smooth movement (gamepad only).
     if (this.gamepadInput.movement.length() > 0.1) {
       this.input.analogMovement = this.gamepadInput.movement.clone()
-    } else if (this.touchState.movementDirection.length() > 0.1) {
-      // Use continuous touch direction for smooth analog movement
-      this.input.analogMovement = this.touchState.movementDirection.clone()
     } else {
       this.input.analogMovement = new THREE.Vector2()
     }
     
-    // Touch camera input (two fingers for looking)
-    // Only use touch camera input when we have two or more touches (camera look mode)
-    if (this.touchState.lookTouches.length >= 2) {
+    // Touch camera input (single-finger drag for looking)
+    if (this.touchState.lookTouches.length >= 1) {
       // Convert touch delta to camera rotation
       // Use higher sensitivity for touch since deltas are pixel-based
-      // Increased for faster two-finger hold/drag camera rotation.
-      const lookSensitivity = 0.02
+      const lookSensitivity = 0.0065
       // Use the look delta even if small - let the camera manager handle deadzone
       this.input.analogCamera = this.touchState.lastLookDelta.clone().multiplyScalar(lookSensitivity)
-      this.touchCameraActive = true
     } else {
-      // No two-finger touch, use gamepad or clear
+      // No touch look, use gamepad or clear
       this.input.analogCamera = this.gamepadInput.camera.clone()
-      this.touchCameraActive = false
     }
     
     // Reset touch deltas after processing (they'll be updated on next touch move)
@@ -507,21 +506,32 @@ export class PlayerController {
       
       this.touchState.activeTouches.set(touch.identifier, touchInfo)
 
-      // Double-tap + hold detection for running (applies to single-finger movement touch)
-      const now = performance.now()
-      const dt = now - this.touchState.lastTapTime
-      const dx = touch.clientX - this.touchState.lastTapX
-      const dy = touch.clientY - this.touchState.lastTapY
-      const distSq = dx * dx + dy * dy
-      const isDoubleTap = dt < 320 && distSq < (64 * 64)
+      const zone: 'navigate' | 'look' = touch.clientX < (window.innerWidth * 0.5) ? 'navigate' : 'look'
+      this.touchZoneById.set(touch.identifier, zone)
 
-      if (isDoubleTap) {
-        this.touchState.runTouch = touch.identifier
+      // Old-feel gesture: double-tap + hold on the navigate curtain to run.
+      if (zone === 'navigate') {
+        const now = performance.now()
+        const dt = now - this.touchState.lastTapTime
+        const dx = touch.clientX - this.touchState.lastTapX
+        const dy = touch.clientY - this.touchState.lastTapY
+        const distSq = dx * dx + dy * dy
+        const isDoubleTap = dt < 320 && distSq < (64 * 64)
+        if (isDoubleTap) {
+          this.touchState.runTouch = touch.identifier
+        }
+        this.touchState.lastTapTime = now
+        this.touchState.lastTapX = touch.clientX
+        this.touchState.lastTapY = touch.clientY
       }
 
-      this.touchState.lastTapTime = now
-      this.touchState.lastTapX = touch.clientX
-      this.touchState.lastTapY = touch.clientY
+      // Tap-to-move should work from either side; drag can still control camera.
+      this.touchTapCandidates.set(touch.identifier, {
+        startX: touch.clientX,
+        startY: touch.clientY,
+        startTime: performance.now(),
+        moved: false,
+      })
     }
     
     // Reassign touch roles based on total number of touches
@@ -529,7 +539,7 @@ export class PlayerController {
   }
   
   /**
-   * Reassign touch roles: one finger = movement, two fingers = camera look
+   * Reassign touch roles: one finger drag = camera look, tap = navigation.
    */
   private reassignTouchRoles(): void {
     const touchCount = this.touchState.activeTouches.size
@@ -541,31 +551,19 @@ export class PlayerController {
       this.touchState.runTouch = null
       this.touchState.movementDirection.set(0, 0)
       this.touchState.lastLookDelta.set(0, 0)
-    } else if (touchCount === 1) {
-      // One finger = movement only
-      const touchId = Array.from(this.touchState.activeTouches.keys())[0]
-      this.touchState.movementTouch = touchId
-      this.touchState.lookTouches = []
-      if (this.touchState.runTouch !== touchId) {
-        this.touchState.runTouch = null
-      }
-      // Reset movement direction when starting new touch
-      this.touchState.movementDirection.set(0, 0)
     } else {
-      // Two or more fingers = camera look only (use first two touches)
+      // Right curtain touches drive camera look.
       this.touchState.movementTouch = null
-      this.touchState.runTouch = null
       this.touchState.movementDirection.set(0, 0)
       const touchIds = Array.from(this.touchState.activeTouches.keys())
-      this.touchState.lookTouches = touchIds.slice(0, 2) // Use first two touches for camera
+      this.touchState.lookTouches = touchIds
+        .filter(id => this.touchZoneById.get(id) === 'look')
+        .slice(0, 1)
     }
   }
   
   private handleTouchMove(event: TouchEvent): void {
     event.preventDefault()
-    
-    // Store deltas for look touches before updating positions
-    const lookTouchDeltas: Array<{ deltaX: number, deltaY: number }> = []
     
     // Update touch positions and calculate deltas
     for (let i = 0; i < event.changedTouches.length; i++) {
@@ -579,9 +577,14 @@ export class PlayerController {
       const deltaX = touch.clientX - touchInfo.x
       const deltaY = touch.clientY - touchInfo.y
       
-      // Store delta if this is a look touch
-      if (this.touchState.lookTouches.includes(touchId)) {
-        lookTouchDeltas.push({ deltaX, deltaY })
+      const tapCandidate = this.touchTapCandidates.get(touchId)
+      if (tapCandidate) {
+        const movedDist = Math.hypot(
+          touch.clientX - tapCandidate.startX,
+          touch.clientY - tapCandidate.startY,
+        )
+        // Slightly larger threshold improves reliability on small/mobile screens.
+        if (movedDist > 16) tapCandidate.moved = true
       }
       
       // Update previous position for next frame
@@ -603,38 +606,8 @@ export class PlayerController {
       this.reassignTouchRoles()
     }
     
-    // Process movement touch (one finger)
-    if (this.touchState.movementTouch !== null) {
-      const touchInfo = this.touchState.activeTouches.get(this.touchState.movementTouch)
-      if (touchInfo) {
-        // Calculate movement direction based on touch position relative to start
-        const totalDeltaX = touchInfo.x - touchInfo.startX
-        const totalDeltaY = touchInfo.y - touchInfo.startY
-        
-        // Normalize and scale movement direction for smooth analog-like input
-        const maxDistance = 100 // Maximum distance for full movement
-        const distance = Math.sqrt(totalDeltaX * totalDeltaX + totalDeltaY * totalDeltaY)
-        const normalizedDistance = Math.min(distance / maxDistance, 1.0)
-        
-        if (distance > 10) { // Deadzone to prevent accidental movement
-          // Calculate direction vector
-          const dirX = totalDeltaX / distance
-          const dirY = -totalDeltaY / distance // Invert Y for forward/back
-          
-          // Store normalized movement direction (magnitude 0-1)
-          this.touchState.movementDirection.set(dirX * normalizedDistance, dirY * normalizedDistance)
-          this.touchState.lastMovementDelta.set(totalDeltaX, -totalDeltaY)
-        } else {
-          // Within deadzone, no movement
-          this.touchState.movementDirection.set(0, 0)
-          this.touchState.lastMovementDelta.set(0, 0)
-        }
-      }
-    }
-    
-    // Process look touches (two fingers) - average the movement of both touches
-    if (this.touchState.lookTouches.length >= 2) {
-      // Calculate deltas for all look touches (not just changed ones)
+    // Process look touches (single finger)
+    if (this.touchState.lookTouches.length >= 1) {
       let totalDeltaX = 0
       let totalDeltaY = 0
       let validTouches = 0
@@ -654,7 +627,7 @@ export class PlayerController {
       }
       
       if (validTouches > 0) {
-        // Average the deltas from both touches for smooth camera rotation
+        // Average deltas for smooth camera rotation.
         const avgDeltaX = totalDeltaX / validTouches
         const avgDeltaY = totalDeltaY / validTouches
         this.touchState.lastLookDelta.set(avgDeltaX, avgDeltaY)
@@ -675,11 +648,22 @@ export class PlayerController {
       const touch = event.changedTouches[i]
       const touchId = touch.identifier
 
+      // Tap-to-navigate: quick touch with minimal movement (from either side).
+      const tapCandidate = this.touchTapCandidates.get(touchId)
+      if (tapCandidate) {
+        const tapDuration = performance.now() - tapCandidate.startTime
+        if (!tapCandidate.moved && tapDuration < 360) {
+          this.setNavigationTargetFromScreenTap(touch.clientX, touch.clientY)
+        }
+      }
+
       if (this.touchState.runTouch === touchId) {
         this.touchState.runTouch = null
       }
       
       this.touchState.activeTouches.delete(touchId)
+      this.touchZoneById.delete(touchId)
+      this.touchTapCandidates.delete(touchId)
     }
     
     // Reassign touch roles based on remaining touches
@@ -687,10 +671,83 @@ export class PlayerController {
     
     // Clear all deltas when no touches remain
     if (this.touchState.activeTouches.size === 0) {
-      this.touchState.lastMovementDelta.set(0, 0)
       this.touchState.lastLookDelta.set(0, 0)
       this.touchState.movementDirection.set(0, 0)
       this.updateInputState()
+    }
+  }
+
+  private setNavigationTargetFromScreenTap(screenX: number, screenY: number): void {
+    const camera = this.cameraManager.getCamera()
+    const ndc = new THREE.Vector2(
+      (screenX / window.innerWidth) * 2 - 1,
+      -(screenY / window.innerHeight) * 2 + 1,
+    )
+
+    this.touchRaycaster.setFromCamera(ndc, camera)
+
+    const landMeshes: THREE.Object3D[] = []
+    this.scene.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh)) return
+      const ud = obj.userData ?? {}
+      if (ud.type === 'land' || ud.landType === 'plane' || ud.landType === 'box' || ud.landType === 'sphere' || ud.landType === 'cylinder') {
+        landMeshes.push(obj)
+      }
+    })
+
+    if (landMeshes.length > 0) {
+      const hits = this.touchRaycaster.intersectObjects(landMeshes, true)
+      if (hits.length > 0) {
+        this.navigationTarget = hits[0].point.clone()
+        this.showNavigationMarker(this.navigationTarget)
+        return
+      }
+    }
+
+    // Fallback: project to a horizontal plane at local ground height.
+    const baseGround = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -baseGround)
+    const hit = new THREE.Vector3()
+    if (this.touchRaycaster.ray.intersectPlane(plane, hit)) {
+      hit.y = this.collisionSystem.getGroundHeight(hit.x, hit.z)
+      this.navigationTarget = hit
+      this.showNavigationMarker(this.navigationTarget)
+    }
+  }
+
+  private showNavigationMarker(position: THREE.Vector3): void {
+    if (!this.navigationMarker) {
+      const ring = new THREE.RingGeometry(0.24, 0.34, 40)
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x2ea8ff,
+        transparent: true,
+        opacity: 0.92,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+      this.navigationMarker = new THREE.Mesh(ring, mat)
+      this.navigationMarker.rotation.x = -Math.PI / 2
+      this.navigationMarker.renderOrder = 999
+      this.navigationMarker.visible = false
+      this.scene.add(this.navigationMarker)
+    }
+
+    this.navigationMarker.position.set(position.x, position.y + 0.03, position.z)
+    this.navigationMarker.visible = true
+    this.navigationMarker.scale.setScalar(1)
+  }
+
+  private updateNavigationMarker(): void {
+    if (!this.navigationMarker || !this.navigationMarker.visible) return
+
+    const t = performance.now() * 0.004
+    const pulse = 1 + Math.sin(t) * 0.08
+    this.navigationMarker.scale.setScalar(pulse)
+
+    const mat = this.navigationMarker.material as THREE.MeshBasicMaterial
+    mat.opacity = this.navigationTarget ? 0.92 : 0.0
+    if (!this.navigationTarget) {
+      this.navigationMarker.visible = false
     }
   }
   
@@ -726,11 +783,6 @@ export class PlayerController {
     
     // CRITICAL FIX: Update input state immediately when gamepad input changes
     // This ensures gamepad input is processed even without keyboard events
-    this.updateInputState()
-  }
-
-  public setVirtualJumpPressed(pressed: boolean): void {
-    this.touchState.virtualJumpPressed = pressed
     this.updateInputState()
   }
 
@@ -770,7 +822,16 @@ export class PlayerController {
     
     // Check if we have analog gamepad input
     const hasAnalogInput = this.input.analogMovement && this.input.analogMovement.length() > 0.1
+    const hasDigitalInput = this.input.forward || this.input.backward || this.input.left || this.input.right
+    const hasManualMovementInput = hasAnalogInput || hasDigitalInput
+
+    // Manual input cancels tap-to-navigate.
+    if (hasManualMovementInput) {
+      this.navigationTarget = null
+    }
     
+    let navigationDistance = Number.POSITIVE_INFINITY
+
     if (hasAnalogInput) {
       // Use analog gamepad input for smooth movement
       const analogX = this.input.analogMovement!.x
@@ -801,6 +862,22 @@ export class PlayerController {
       if (this.input.right) {
         moveDirection.add(cameraDirection.clone().setY(0).cross(new THREE.Vector3(0, 1, 0)).normalize())
       }
+
+      // Tap-to-navigate movement when there is no manual directional input.
+      if (!hasDigitalInput && this.navigationTarget) {
+        const toTarget = this.navigationTarget.clone().sub(this.state.position)
+        toTarget.y = 0
+        const dist = toTarget.length()
+        navigationDistance = dist
+
+        if (dist < 0.30) {
+          this.navigationTarget = null
+          if (this.navigationMarker) this.navigationMarker.visible = false
+        } else {
+          toTarget.normalize()
+          moveDirection.add(toTarget)
+        }
+      }
     }
     
     // Apply movement
@@ -812,7 +889,18 @@ export class PlayerController {
       moveDirection.normalize()
       
       // Determine speed
-      const baseSpeed = this.input.run ? this.config.runSpeed : this.config.walkSpeed
+      const navigating = !hasManualMovementInput && this.navigationTarget !== null
+      let baseSpeed = this.input.run ? this.config.runSpeed : this.config.walkSpeed
+      if (navigating) {
+        // Old-feel behavior: move fast toward the marker, then ease down to walk.
+        const slowDownStartDistance = 3.0
+        if (navigationDistance >= slowDownStartDistance) {
+          baseSpeed = this.config.runSpeed
+        } else {
+          const t = Math.max(0, navigationDistance / slowDownStartDistance)
+          baseSpeed = this.config.walkSpeed + (this.config.runSpeed - this.config.walkSpeed) * t
+        }
+      }
       const speed = baseSpeed * inputMagnitude // Scale by analog input magnitude
       const movement = moveDirection.multiplyScalar(speed) // Don't multiply by deltaTime yet
       
@@ -820,19 +908,9 @@ export class PlayerController {
       this.state.velocity.x = movement.x
       this.state.velocity.z = movement.z
       this.state.isMoving = true
-      this.state.isRunning = this.input.run
+      this.state.isRunning = navigating ? navigationDistance > 1.1 : this.input.run
       
-      // Debug: Log speed and movement values
-      if (Math.random() < 0.02) { // 2% chance per frame
-        console.log(`🏃 Speed Debug:`, {
-          mode: this.input.run ? 'RUN' : 'WALK',
-          baseSpeed: baseSpeed.toFixed(1),
-          speed: speed.toFixed(1),
-          deltaTime: deltaTime.toFixed(4),
-          movement: `(${movement.x.toFixed(2)}, ${movement.z.toFixed(2)})`,
-          velocity: `(${this.state.velocity.x.toFixed(2)}, ${this.state.velocity.z.toFixed(2)})`
-        })
-      }
+      // (Speed debug logging removed to avoid per-frame console.log overhead)
       
       // logger.debug(LogModule.PLAYER, `Movement: speed=${speed}, direction=(${moveDirection.x.toFixed(2)}, ${moveDirection.z.toFixed(2)}), input=(${this.input.forward},${this.input.backward},${this.input.left},${this.input.right})`)
     } else {
@@ -875,14 +953,11 @@ export class PlayerController {
       this.state.velocity.z *= this.config.airResistance
     }
     
-    // Calculate new position
-    // velocity is in units/second, so multiply by deltaTime to get distance per frame
-    const newPosition = this.state.position.clone().add(
-      this.state.velocity.clone().multiplyScalar(deltaTime)
-    )
+    // Calculate new position (reuse temp vector to avoid per-frame allocation)
+    this._tempNewPosition.copy(this.state.position).addScaledVector(this.state.velocity, deltaTime)
     
     // Check collision
-    const collision = this.collisionSystem.checkCollision('player', newPosition)
+    const collision = this.collisionSystem.checkCollision('player', this._tempNewPosition)
     
     // Debug: Log collision results occasionally (disabled)
     // if (Math.random() < 0.01 && collision.hasCollision) { // 1% chance and only when collision happens
@@ -892,28 +967,17 @@ export class PlayerController {
     if (collision.hasCollision) {
       // Handle collision
       this.state.position.copy(collision.correctedPosition)
-      
-      // If collision is with ground (normal points mostly upward)
-      // Use hysteresis to prevent rapid toggling
-      const shouldBeOnGround = collision.normal.y > 0.5
-      
-      if (shouldBeOnGround !== this.groundStateBuffer) {
-        this.groundStateBuffer = shouldBeOnGround
-        this.groundStateFrames = 0
+
+      // Ground contact from collision normal (lenient threshold for uneven terrain)
+      const isGroundCollision = collision.normal.y > 0.2
+      if (isGroundCollision) {
+        this.state.onGround = true
+        if (this.state.velocity.y < 0) this.state.velocity.y = 0
       } else {
-        this.groundStateFrames++
-        if (this.groundStateFrames >= this.groundStateThreshold) {
-          if (shouldBeOnGround) {
-            this.state.onGround = true
-            // Reset vertical velocity if moving downwards into ground
-            if (this.state.velocity.y < 0) {
-              this.state.velocity.y = 0
-            }
-          } else {
-            // Collision with wall or ceiling, not ground
-            this.state.onGround = false
-          }
-        }
+        // If this was likely a wall collision, keep grounded if we're still near terrain.
+        const groundHeight = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
+        const capsuleBottomY = this.state.position.y - (this.config.height * 0.5)
+        this.state.onGround = capsuleBottomY <= (groundHeight + this.config.groundCheckDistance)
       }
       
       // Debug: Log collision handling (disabled)
@@ -922,44 +986,20 @@ export class PlayerController {
       // }
     } else {
       // No collision, update position
-      this.state.position.copy(newPosition)
-      
-      // Check if we're on ground by checking ground height at current position
+      this.state.position.copy(this._tempNewPosition)
+
+      // Probe terrain directly and derive grounded state.
       const groundHeight = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
-      const playerBottomY = this.state.position.y - (this.config.height / 2 - this.config.radius)
-      
-      // More stable ground detection: use a larger tolerance and check velocity
-      const groundTolerance = this.config.groundCheckDistance * 2 // Double the tolerance
-      const isNearGround = playerBottomY <= groundHeight + groundTolerance
-      const isNotMovingUp = this.state.velocity.y <= 0.5 // More lenient velocity check
-      
-      // Only change onGround state if there's a significant difference
-      const shouldBeOnGround = isNearGround && isNotMovingUp
-      
-      // HYSTERESIS FIX: Use buffered ground state to prevent rapid toggling/flickering
-      if (shouldBeOnGround !== this.groundStateBuffer) {
-        // State changed, reset counter
-        this.groundStateBuffer = shouldBeOnGround
-        this.groundStateFrames = 0
-      } else {
-        // State is consistent, increment counter
-        this.groundStateFrames++
-        
-        // Only update actual onGround state after threshold frames of consistency
-        if (this.groundStateFrames >= this.groundStateThreshold) {
-          // CRITICAL FIX: When player walks off edge, immediately set onGround = false
-          // This allows gravity to apply and player to fall naturally
-          if (!shouldBeOnGround && this.state.onGround) {
-            // Player is no longer near ground - set onGround to false
-            this.state.onGround = false
-          } else if (shouldBeOnGround && !this.state.onGround) {
-            // Only switch to onGround if we're clearly on ground AND not moving up
-            // Add velocity check to prevent setting onGround while jumping
-            if (isNotMovingUp) {
-              this.state.onGround = true
-            }
-          }
-        }
+      const capsuleBottomY = this.state.position.y - (this.config.height * 0.5)
+      const distanceToGround = capsuleBottomY - groundHeight
+      const isNotMovingUp = this.state.velocity.y <= 0.5
+      const groundedByProbe = distanceToGround <= this.config.groundCheckDistance && isNotMovingUp
+
+      this.state.onGround = groundedByProbe
+      if (groundedByProbe) {
+        // Snap capsule bottom to terrain and clear negative vertical velocity.
+        this.state.position.y = groundHeight + (this.config.height * 0.5)
+        if (this.state.velocity.y < 0) this.state.velocity.y = 0
       }
     }
     
@@ -974,42 +1014,13 @@ export class PlayerController {
     // state.position = capsule center. Place mesh origin at capsuleBottom.
     // UAL animations are authored with feet at y=0 relative to skeleton root,
     // so capsuleBottom = ground level = correct mesh origin placement.
-    const meshPosition = this.state.position.clone()
-    meshPosition.y -= this.config.height / 2
-    meshPosition.y -= this.meshGroundOffset // Runtime-adjustable fine-tuning
-    this.mesh.position.copy(meshPosition)
-    
-    // DEBUG: Log position diagnostics every ~120 frames (~2 sec)
-    this._debugFrameCount++
-    if (this._debugFrameCount % 120 === 1) {
-      const groundHeight = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
-      // Check root bone world position if skeleton exists
-      let rootBoneWorldY = 'N/A'
-      let pelvisBoneWorldY = 'N/A'
-      this.mesh.traverse((child: any) => {
-        if (child.isBone && child.name === 'root') {
-          const worldPos = new THREE.Vector3()
-          child.getWorldPosition(worldPos)
-          rootBoneWorldY = worldPos.y.toFixed(3)
-        }
-        if (child.isBone && child.name === 'pelvis') {
-          const worldPos = new THREE.Vector3()
-          child.getWorldPosition(worldPos)
-          pelvisBoneWorldY = worldPos.y.toFixed(3)
-        }
-      })
-      console.log(`📐 Position Debug:`, {
-        capsuleCenter: this.state.position.y.toFixed(3),
-        meshOriginY: meshPosition.y.toFixed(3),
-        groundHeight: groundHeight.toFixed(3),
-        meshGroundOffset: this.meshGroundOffset.toFixed(3),
-        capsuleBottom: (this.state.position.y - this.config.height / 2).toFixed(3),
-        rootBoneWorldY,
-        pelvisBoneWorldY,
-        onGround: this.state.onGround,
-        velocityY: this.state.velocity.y.toFixed(3)
-      })
-    }
+    this.mesh.position.set(
+      this.state.position.x,
+      this.state.position.y - this.config.height / 2 - this.meshGroundOffset,
+      this.state.position.z,
+    )
+
+    this.updateNavigationMarker()
     
     // Rotate player mesh to face movement direction (smooth turn)
     const vx = this.state.velocity.x
@@ -1054,16 +1065,13 @@ export class PlayerController {
       const cameraY = this.input.analogCamera.y
       
       // Apply per-component deadzone for precise control
-      const deadzone = this.touchCameraActive ? 0.01 : 0.05
+      const deadzone = 0.05
       const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
       const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
       
       // Only update camera if at least one axis has input (works for all camera modes including orbital)
       if (adjustedX !== 0 || adjustedY !== 0) {
-        // Touch camera deltas are pixel-derived and need extra gain compared to
-        // normalized gamepad stick input.
-        const touchBoost = this.touchCameraActive ? 1.8 : 1.0
-        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX * touchBoost, adjustedY * touchBoost, deltaTime)
+        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
       }
     }
   }
@@ -1372,6 +1380,26 @@ export class PlayerController {
   public getCurrentPoseName(): string {
     if (this.currentPoseIndex < 0) return 'Rest Pose'
     return PlayerController.POSE_DEFINITIONS[this.currentPoseIndex].name
+  }
+
+  public setVirtualJumpPressed(_pressed: boolean): void {
+    // Mobile virtual jump input — currently a stub
+  }
+
+  public isRangedModeEnabled(): boolean {
+    return false
+  }
+
+  public setRangedModeEnabled(_enabled: boolean): void {
+    // Ranged mode toggle — currently a stub
+  }
+
+  public triggerFleeFromCurrentTarget(): void {
+    // Flee action — currently a stub
+  }
+
+  public triggerGrabCurrentTarget(): void {
+    // Grab action — currently a stub
   }
 
   public dispose(): void {
