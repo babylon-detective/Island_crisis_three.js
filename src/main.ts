@@ -29,6 +29,7 @@ import { AnimationStateMachine, createPlayerStateMachineConfig, AnimStateParams 
 import { NPCSystem } from './systems/NPCSystem'
 import { NPCAISystem } from './systems/NPCAISystem'
 import { DialogueManager } from './systems/DialogueSystem'
+import { BattleSystem } from './systems/BattleSystem'
 import { SHADERS, ShaderPath } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
@@ -872,6 +873,7 @@ class IntegratedThreeJSApp {
   private npcSystem: NPCSystem | null = null
   private npcAISystem: NPCAISystem | null = null
   private dialogueManager: DialogueManager | null = null
+  private battleSystem: BattleSystem | null = null
 
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
@@ -1167,7 +1169,22 @@ class IntegratedThreeJSApp {
         this.npcAISystem,
         this.characterAnimationSystem,
       )
+      this.dialogueManager.setCameraManager(this.cameraManager)
       this.dialogueManager.enable()
+
+      this.battleSystem = new BattleSystem(
+        this.npcSystem,
+        this.npcAISystem,
+        this.characterAnimationSystem,
+      )
+      this.battleSystem.setCameraManager(this.cameraManager)
+      this.battleSystem.setDialogueManager(this.dialogueManager)
+      this.battleSystem.setPlayerController(this.playerController)
+      this.battleSystem.enable()
+
+      // Link dialogue system to player controller for contextual action button
+      this.playerController.setDialogueManager(this.dialogueManager)
+      this.playerController.setBattleManager(this.battleSystem)
 
       // Register sample dialogue trees for a handful of NPCs
       this.registerSampleDialogues()
@@ -1184,9 +1201,9 @@ class IntegratedThreeJSApp {
   private registerSampleDialogues(): void {
     if (!this.dialogueManager) return
 
-    // Give every 3rd NPC a simple dialogue tree
+    // Give every NPC a dialogue tree
     const npcs = this.npcSystem!.getAllNPCs()
-    for (let i = 0; i < npcs.length; i += 3) {
+    for (let i = 0; i < npcs.length; i++) {
       const npc = npcs[i]
       const tree = DialogueManager.createTree(`tree-${npc.id}`, 'greet', [
         DialogueManager.node('greet', `Hello traveller! I'm a ${npc.npcClass} villager.`, [
@@ -2082,8 +2099,8 @@ class IntegratedThreeJSApp {
   /**
    * Create mobile touch action buttons:
    * - Camera (upper-left): cycle gameplay camera modes
-   * - A (lower-right): jump while held/pressed
-    * - Ranged (right-mid): toggle ranged tap attacks
+  * - A (lower-right): confirm / contextual action
+   * - Crossbow (right-mid): trigger battle when near an NPC
     * - Flee/Grab (left-mid): flee from target (ranged) or grab target (melee)
    * - Start (bottom-center): toggle pause menu
    */
@@ -2175,22 +2192,22 @@ class IntegratedThreeJSApp {
       setJumpPressed(false)
     })
 
-    // Ranged toggle button (right-middle)
+    // Crossbow battle button (right-middle)
     const rangedBtn = createButton(
       'mobile-ranged-btn',
       '🏹',
       `right: ${scaleSize(20)}px; bottom: ${scaleSize(92)}px;`
     )
-    const refreshRangedButton = (): void => {
-      const enabled = this.playerController.isRangedModeEnabled()
-      rangedBtn.style.background = enabled ? 'rgba(79,195,247,0.55)' : 'rgba(0,0,0,0.45)'
-      rangedBtn.style.borderColor = enabled ? 'rgba(79,195,247,0.95)' : 'rgba(255,255,255,0.5)'
+    const setAttackPressed = (pressed: boolean): void => {
+      this.playerController.setVirtualAttackPressed(pressed)
+      rangedBtn.style.background = pressed ? 'rgba(255,143,107,0.45)' : 'rgba(0,0,0,0.45)'
+      rangedBtn.style.borderColor = pressed ? 'rgba(255,143,107,0.95)' : 'rgba(255,255,255,0.5)'
     }
     bindPress(rangedBtn, () => {
-      this.playerController.setRangedModeEnabled(!this.playerController.isRangedModeEnabled())
-      refreshRangedButton()
+      setAttackPressed(true)
+    }, () => {
+      setAttackPressed(false)
     })
-    refreshRangedButton()
 
     // Flee/Grab action button (left-middle)
     const actionBtn = createButton(
@@ -2200,7 +2217,9 @@ class IntegratedThreeJSApp {
     )
     bindPress(actionBtn, () => {
       actionBtn.style.background = 'rgba(255,255,255,0.25)'
-      if (this.playerController.isRangedModeEnabled()) {
+      if (this.battleSystem?.isBattleActive()) {
+        this.battleSystem.handleEscapeInput()
+      } else if (this.playerController.isRangedModeEnabled()) {
         this.playerController.triggerFleeFromCurrentTarget()
       } else {
         this.playerController.triggerGrabCurrentTarget()
@@ -2217,7 +2236,11 @@ class IntegratedThreeJSApp {
     )
     bindPress(startBtn, () => {
       startBtn.style.background = 'rgba(255,255,255,0.25)'
-      this.togglePause()
+      if (this.battleSystem?.isBattleActive()) {
+        this.battleSystem.handleEscapeInput()
+      } else {
+        this.togglePause()
+      }
     }, () => {
       startBtn.style.background = 'rgba(0,0,0,0.45)'
     })
@@ -2986,13 +3009,19 @@ class IntegratedThreeJSApp {
 
       // Update NPC systems
       try {
+        const inDialogue = this.dialogueManager?.isDialogueActive() ?? false
+        const inBattle = this.battleSystem?.isBattleActive() ?? false
+        // Keep NPC animation mixers running (for talking anim) but freeze AI movement
         if (this.npcSystem) this.npcSystem.update(deltaTime)
-        if (this.npcAISystem) {
+        if (this.npcAISystem && !inDialogue && !inBattle) {
           this.npcAISystem.setPlayerPosition(this.playerController.getPosition())
           this.npcAISystem.update(deltaTime)
         }
-        if (this.dialogueManager) {
+        if (this.dialogueManager && !inBattle) {
           this.dialogueManager.update(this.playerController.getPosition())
+        }
+        if (this.battleSystem) {
+          this.battleSystem.update(this.playerController.getPosition())
         }
       } catch (e) {
         // Prevent NPC errors from freezing the game loop

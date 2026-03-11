@@ -106,6 +106,19 @@ export class NPCAISystem {
 
   private think(npc: NPCInstance, ai: AIState): void {
     ai.playerNearby = npc.position.distanceTo(this.playerPos) < this.cfg.playerAwarenessRange
+
+    if (npc.npcClass === 'red') {
+      if (ai.playerNearby) {
+        ai.behaviour = 'follow'
+        ai.waypoint = this.playerPos.clone()
+        return
+      }
+      if (ai.behaviour === 'follow') {
+        ai.behaviour = 'idle'
+        ai.waypoint = null
+      }
+    }
+
     if (ai.behaviour === 'socialize') return
 
     // try socialize
@@ -236,6 +249,12 @@ export class NPCAISystem {
 
   getInteractableNPCs(range = 4): NPCInstance[] {
     return this.npcSystem.getNPCsInRadius(this.playerPos, range)
+      .filter(n => { const ai = this.states.get(n.id); return ai && ai.behaviour !== 'flee' })
+  }
+
+  getHostileNPCs(range = 4): NPCInstance[] {
+    return this.npcSystem.getNPCsInRadius(this.playerPos, range)
+      .filter(n => n.npcClass === 'red')
       .filter(n => { const ai = this.states.get(n.id); return ai && ai.behaviour !== 'flee' })
   }
 }

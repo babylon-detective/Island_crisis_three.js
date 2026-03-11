@@ -3,6 +3,8 @@ import { CollisionSystem, CollisionVolume, CollidableObject } from './CollisionS
 import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
 import { ObjectLoader } from './ObjectLoader'
+import type { DialogueManager } from './DialogueSystem'
+import type { BattleSystem } from './BattleSystem'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -41,6 +43,7 @@ export interface PlayerInput {
   left: boolean
   right: boolean
   jump: boolean
+  attack: boolean
   run: boolean
   camera: boolean // 'C' key for camera mode switching
   // Analog input for gamepad (0-1 values)
@@ -90,6 +93,17 @@ export class PlayerController {
   private groundStateBuffer: boolean = false
   private groundStateFrames: number = 0
   private readonly groundStateThreshold: number = 3 // Require 3 frames of consistent state before changing
+
+  // Dialogue manager (optional — set after construction for contextual action)
+  private dialogueManager: DialogueManager | null = null
+  private battleManager: BattleSystem | null = null
+  // Guard to prevent repeated action triggers while button is held
+  private actionConsumedThisPress: boolean = false
+  private attackConsumedThisPress: boolean = false
+  // Mobile virtual action press state
+  private virtualJumpPressed: boolean = false
+  private virtualAttackPressed: boolean = false
+  private forcedFacingTarget: THREE.Vector3 | null = null
   
   // Input handling
   private keyStates: Map<string, boolean> = new Map()
@@ -202,6 +216,7 @@ export class PlayerController {
       left: false,
       right: false,
       jump: false,
+      attack: false,
       run: false,
       camera: false
     }
@@ -436,6 +451,7 @@ export class PlayerController {
     const keyLeft = this.keyStates.get('KeyA') || false
     const keyRight = this.keyStates.get('KeyD') || false
     const keyJump = this.keyStates.get('Space') || false
+    const keyAttack = this.keyStates.get('KeyJ') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyC') || false
     
@@ -459,7 +475,8 @@ export class PlayerController {
     this.input.left = keyLeft || touchLeft || gamepadLeft
     this.input.right = keyRight || touchRight || gamepadRight
     const touchRun = this.touchState.runTouch !== null && this.touchState.activeTouches.has(this.touchState.runTouch)
-    this.input.jump = keyJump || this.gamepadInput.jump
+    this.input.jump = keyJump || this.gamepadInput.jump || this.virtualJumpPressed
+    this.input.attack = keyAttack || this.gamepadInput.action || this.virtualAttackPressed
     this.input.run = keyRun || this.gamepadInput.run || touchRun
     this.input.camera = keyCamera || this.gamepadInput.cameraMode
     
@@ -812,6 +829,53 @@ export class PlayerController {
   }
 
   private updateMovement(deltaTime: number): void {
+    // ---- Contextual confirm button (battle / dialogue) ----
+    const confirmPressed = this.input.jump
+    if (confirmPressed && !this.actionConsumedThisPress) {
+      let consumed = false
+      if (this.battleManager) {
+        consumed = this.battleManager.handleConfirmActionButton()
+      }
+      if (!consumed && this.dialogueManager) {
+        consumed = this.dialogueManager.handleActionButton()
+      }
+      if (consumed) {
+        this.actionConsumedThisPress = true
+      }
+    }
+    if (!confirmPressed) {
+      this.actionConsumedThisPress = false
+    }
+
+    // ---- Attack button (battle initiation) ----
+    const attackPressed = this.input.attack
+    if (attackPressed && !this.attackConsumedThisPress) {
+      if (this.battleManager) {
+        const consumed = this.battleManager.handleAttackButton()
+        if (consumed) {
+          this.attackConsumedThisPress = true
+        }
+      }
+    }
+    if (!attackPressed) {
+      this.attackConsumedThisPress = false
+    }
+
+    // Gamepad menu button can always retreat from battle
+    if (this.battleManager?.isBattleActive() && this.gamepadInput.menu) {
+      this.battleManager.handleEscapeInput()
+    }
+
+    // Block movement while dialogue or battle is active
+    if ((this.dialogueManager && this.dialogueManager.isDialogueActive()) ||
+        (this.battleManager && this.battleManager.isBattleActive())) {
+      this.state.velocity.x *= 0.85
+      this.state.velocity.z *= 0.85
+      this.state.isMoving = false
+      this.state.isRunning = false
+      return
+    }
+
     // Get camera direction for movement
     const camera = this.cameraManager.getCamera()
     const cameraDirection = new THREE.Vector3()
@@ -926,15 +990,6 @@ export class PlayerController {
       // }
     }
     
-    // Handle jumping
-    if (this.input.jump && this.state.onGround && this.state.canJump) {
-      this.state.velocity.y = this.config.jumpForce
-      this.state.onGround = false
-      this.state.canJump = false
-      
-      // logger.debug(LogModule.PLAYER, 'Jump initiated')
-    }
-    
     // Reset jump flag when on ground
     if (this.state.onGround) {
       this.state.canJump = true
@@ -1027,7 +1082,13 @@ export class PlayerController {
     const vz = this.state.velocity.z
     const horizontalSpeed = Math.sqrt(vx * vx + vz * vz)
 
-    if (horizontalSpeed > 0.5) {
+    if (this.forcedFacingTarget) {
+      const toTarget = this.forcedFacingTarget.clone().sub(this.mesh.position)
+      toTarget.y = 0
+      if (toTarget.lengthSq() > 0.0001) {
+        this.mesh.rotation.y = Math.atan2(toTarget.x, toTarget.z)
+      }
+    } else if (horizontalSpeed > 0.5) {
       // Calculate target yaw from velocity direction
       const targetYaw = Math.atan2(vx, vz)
       // Smoothly interpolate current rotation toward target
@@ -1128,6 +1189,23 @@ export class PlayerController {
     return this.state.isRunning
   }
 
+  /** Late-bind the dialogue manager so the action button becomes contextual. */
+  public setDialogueManager(dm: DialogueManager): void {
+    this.dialogueManager = dm
+  }
+
+  public setBattleManager(battleManager: BattleSystem): void {
+    this.battleManager = battleManager
+  }
+
+  public setForcedFacingTarget(target: THREE.Vector3): void {
+    this.forcedFacingTarget = target.clone()
+  }
+
+  public clearForcedFacingTarget(): void {
+    this.forcedFacingTarget = null
+  }
+
   public getConfig(): PlayerConfig {
     return { ...this.config }
   }
@@ -1188,6 +1266,7 @@ export class PlayerController {
       left: this.input.left,
       right: this.input.right,
       jump: this.input.jump,
+      attack: this.input.attack,
       run: this.input.run,
       camera: this.input.camera,
       mouseX: 0, // Mouse input would need to be tracked separately
@@ -1382,8 +1461,14 @@ export class PlayerController {
     return PlayerController.POSE_DEFINITIONS[this.currentPoseIndex].name
   }
 
-  public setVirtualJumpPressed(_pressed: boolean): void {
-    // Mobile virtual jump input — currently a stub
+  public setVirtualJumpPressed(pressed: boolean): void {
+    this.virtualJumpPressed = pressed
+    this.updateInputState()
+  }
+
+  public setVirtualAttackPressed(pressed: boolean): void {
+    this.virtualAttackPressed = pressed
+    this.updateInputState()
   }
 
   public isRangedModeEnabled(): boolean {

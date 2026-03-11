@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-export type CameraMode = 'freeview' | 'shoulder' | 'thirdperson'
+export type CameraMode = 'freeview' | 'shoulder' | 'thirdperson' | 'dialogue' | 'battle'
 export type ThirdPersonView = 'shoulder' // Only shoulder view remains
 
 export interface CameraConfig {
@@ -169,10 +169,22 @@ export class CameraManager {
   
   // Player visual representation
   private playerMesh: THREE.Object3D | null = null
+  private playerMeshHiddenReasons: Set<string> = new Set()
 
   // Camera collision
   private cameraRaycaster: THREE.Raycaster = new THREE.Raycaster()
   private collisionMeshes: THREE.Object3D[] = []
+
+  // Dialogue camera state
+  private dialogueCamera!: THREE.PerspectiveCamera
+  private battleCamera!: THREE.PerspectiveCamera
+  private priorMode: CameraMode = 'thirdperson'
+  private dialogueTargetPos: THREE.Vector3 = new THREE.Vector3()
+  private dialogueTargetLookAt: THREE.Vector3 = new THREE.Vector3()
+  private battleTargetPos: THREE.Vector3 = new THREE.Vector3()
+  private battleTargetLookAt: THREE.Vector3 = new THREE.Vector3()
+  private dialogueFadeOverlay: HTMLDivElement | null = null
+  private dialogueFading: boolean = false
   
   // Controls
   private orbitControls!: OrbitControls
@@ -312,14 +324,24 @@ export class CameraManager {
     this.thirdPersonCamera.position.z -= this.config.thirdPerson.distance
     this.thirdPersonCamera.name = 'ThirdPersonCamera'
     
+    // Dialogue Camera (static frontal NPC shot)
+    this.dialogueCamera = new THREE.PerspectiveCamera(50, aspect, 0.1, 1000)
+    this.dialogueCamera.name = 'DialogueCamera'
+
+    // Battle Camera (static player-vs-NPC framing)
+    this.battleCamera = new THREE.PerspectiveCamera(42, aspect, 0.1, 1000)
+    this.battleCamera.name = 'BattleCamera'
+
     // Set initial camera based on default mode
     switch (this.currentMode) {
       case 'shoulder': this.currentCamera = this.shoulderCamera; break
       case 'thirdperson': this.currentCamera = this.thirdPersonCamera; break
+      case 'dialogue': this.currentCamera = this.dialogueCamera; break
+      case 'battle': this.currentCamera = this.battleCamera; break
       default: this.currentCamera = this.freeViewCamera; break
     }
     
-    console.log('📷 Cameras initialized: Free View + Shoulder + Third Person')
+    console.log('📷 Cameras initialized: Free View + Shoulder + Third Person + Dialogue')
     console.log(`📷 Current mode: ${this.currentMode}`)
     console.log(`📷 Current camera is: ${this.currentCamera.name}`)
   }
@@ -433,7 +455,9 @@ export class CameraManager {
     const toCameraMap: Record<CameraMode, THREE.PerspectiveCamera> = {
       freeview: this.freeViewCamera,
       shoulder: this.shoulderCamera,
-      thirdperson: this.thirdPersonCamera
+      thirdperson: this.thirdPersonCamera,
+      dialogue: this.dialogueCamera,
+      battle: this.battleCamera
     }
     const toCamera = toCameraMap[mode]
 
@@ -469,7 +493,9 @@ export class CameraManager {
     const cameraMap: Record<CameraMode, THREE.PerspectiveCamera> = {
       freeview: this.freeViewCamera,
       shoulder: this.shoulderCamera,
-      thirdperson: this.thirdPersonCamera
+      thirdperson: this.thirdPersonCamera,
+      dialogue: this.dialogueCamera,
+      battle: this.battleCamera
     }
     this.currentCamera = cameraMap[mode]
     
@@ -489,8 +515,28 @@ export class CameraManager {
         document.exitPointerLock()
       }
     }
+
+    this.applyPlayerMeshVisibility(mode)
     
     // console.log(`📷 Active camera: ${this.currentCamera.name}`)
+  }
+
+  private shouldPlayerMeshBeVisible(mode: CameraMode = this.currentMode): boolean {
+    return mode !== 'dialogue' && this.playerMeshHiddenReasons.size === 0
+  }
+
+  private applyPlayerMeshVisibility(mode: CameraMode = this.currentMode): void {
+    if (!this.playerMesh) return
+    this.playerMesh.visible = this.shouldPlayerMeshBeVisible(mode)
+  }
+
+  public setPlayerMeshRenderSuppressed(reason: string, suppressed: boolean): void {
+    if (suppressed) {
+      this.playerMeshHiddenReasons.add(reason)
+    } else {
+      this.playerMeshHiddenReasons.delete(reason)
+    }
+    this.applyPlayerMeshVisibility()
   }
 
   // ============================================================================
@@ -664,10 +710,7 @@ export class CameraManager {
       this.thirdPersonCamera.updateProjectionMatrix()
     }
 
-    // Always show player mesh in third-person
-    if (this.playerMesh) {
-      this.playerMesh.visible = true
-    }
+    this.applyPlayerMeshVisibility('thirdperson')
   }
 
   // ============================================================================
@@ -717,6 +760,11 @@ export class CameraManager {
       this.updateShoulderCamera(deltaTime)
     } else if (this.currentMode === 'thirdperson') {
       this.updateThirdPersonCamera(deltaTime)
+    } else if (this.currentMode === 'dialogue') {
+      // Static camera — position was set during enterDialogueMode, nothing to update.
+      // Player mesh stays hidden during dialogue.
+    } else if (this.currentMode === 'battle') {
+      // Static camera — position was set during enterBattleMode, nothing to update.
     }
   }
 
@@ -785,11 +833,7 @@ export class CameraManager {
       this.shoulderCamera.updateProjectionMatrix()
     }
     
-    // Show/hide player mesh based on view
-    if (this.playerMesh) {
-      // Always show player mesh in shoulder view
-      this.playerMesh.visible = true
-    }
+    this.applyPlayerMeshVisibility('shoulder')
   }
 
   /**
@@ -893,10 +937,7 @@ export class CameraManager {
    */
   public registerPlayerMesh(mesh: THREE.Object3D): void {
     this.playerMesh = mesh
-    // Always show mesh in shoulder view
-    if (this.playerMesh) {
-      this.playerMesh.visible = true
-    }
+    this.applyPlayerMeshVisibility()
   }
 
   /**
@@ -1042,6 +1083,12 @@ export class CameraManager {
 
     this.thirdPersonCamera.aspect = aspect
     this.thirdPersonCamera.updateProjectionMatrix()
+
+    this.dialogueCamera.aspect = aspect
+    this.dialogueCamera.updateProjectionMatrix()
+
+    this.battleCamera.aspect = aspect
+    this.battleCamera.updateProjectionMatrix()
   }
 
   /**
@@ -1097,6 +1144,133 @@ export class CameraManager {
   public setLandSystem(landSystem: any): void {
     this.landSystem = landSystem
     console.log('📷 Land system linked to CameraManager for spotlight updates')
+  }
+
+  // ============================================================================
+  // DIALOGUE CAMERA
+  // ============================================================================
+
+  /**
+   * Enter dialogue camera mode.
+   * Positions the camera for a frontal shot of the given NPC.
+   * @param npcPosition  World position of the NPC.
+   * @param npcRotation  Y-axis rotation of the NPC (radians).
+   */
+  public enterDialogueMode(npcPosition: THREE.Vector3, npcRotation: number): void {
+    this.priorMode = this.currentMode
+
+    // NPC forward direction (the way the NPC faces)
+    const npcForward = new THREE.Vector3(Math.sin(npcRotation), 0, Math.cos(npcRotation))
+
+    // Camera: directly in front of the NPC, centered for a full-body frontal shot
+    const bodyCenter = 0.9   // mid-height of ~1.8m character
+    const frontDist = 3.5    // far enough to see the full body
+
+    this.dialogueTargetPos.copy(npcPosition)
+      .addScaledVector(npcForward, frontDist)
+    this.dialogueTargetPos.y = npcPosition.y + bodyCenter
+
+    // Look-at target: NPC body center
+    this.dialogueTargetLookAt.copy(npcPosition)
+    this.dialogueTargetLookAt.y += bodyCenter
+
+    // Fade transition overlay — snap camera at mid-fade
+    this.fadeTransition(0.3, () => {
+      this.setPlayerMeshRenderSuppressed('dialogue', true)
+      this.dialogueCamera.position.copy(this.dialogueTargetPos)
+      this.dialogueCamera.lookAt(this.dialogueTargetLookAt)
+      this.switchCamera('dialogue', true)
+    })
+  }
+
+  /**
+   * Exit dialogue camera mode — return to whichever mode was active before.
+   */
+  public exitDialogueMode(): void {
+    if (this.currentMode !== 'dialogue') return
+    this.fadeTransition(0.3, () => {
+      this.setPlayerMeshRenderSuppressed('dialogue', false)
+      this.switchCamera(this.priorMode, true)
+    })
+  }
+
+  /**
+   * Enter battle camera mode — frame player and NPC together while keeping the player visible.
+   */
+  public enterBattleMode(playerPosition: THREE.Vector3, npcPosition: THREE.Vector3): void {
+    this.priorMode = this.currentMode
+
+    const playerToNpc = npcPosition.clone().sub(playerPosition)
+    playerToNpc.y = 0
+    if (playerToNpc.lengthSq() < 0.0001) {
+      playerToNpc.set(0, 0, 1)
+    }
+    playerToNpc.normalize()
+
+    const side = new THREE.Vector3(-playerToNpc.z, 0, playerToNpc.x)
+    const midpoint = playerPosition.clone().lerp(npcPosition, 0.5)
+    midpoint.y = Math.max(playerPosition.y, npcPosition.y) + 1.0
+
+    this.battleTargetLookAt.copy(midpoint).addScaledVector(playerToNpc, 0.45)
+    this.battleTargetPos.copy(midpoint)
+      .addScaledVector(side, 2.8)
+      .addScaledVector(playerToNpc, -0.5)
+    this.battleTargetPos.y += 1.2
+
+    this.fadeTransition(0.3, () => {
+      this.battleCamera.position.copy(this.battleTargetPos)
+      this.battleCamera.lookAt(this.battleTargetLookAt)
+      this.switchCamera('battle', true)
+    })
+  }
+
+  /**
+   * Exit battle camera mode.
+   */
+  public exitBattleMode(): void {
+    if (this.currentMode !== 'battle') return
+    this.fadeTransition(0.3, () => {
+      this.switchCamera(this.priorMode, true)
+    })
+  }
+
+  /**
+   * Quick full-screen fade to black and back, calling `onMidFade` at the peak.
+   */
+  private fadeTransition(halfDuration: number, onMidFade: () => void): void {
+    if (this.dialogueFading) return
+    this.dialogueFading = true
+
+    if (!this.dialogueFadeOverlay) {
+      this.dialogueFadeOverlay = document.createElement('div')
+      this.dialogueFadeOverlay.style.cssText =
+        'position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9998;transition-property:opacity;'
+      document.body.appendChild(this.dialogueFadeOverlay)
+    }
+    const el = this.dialogueFadeOverlay
+    el.style.transitionDuration = `${halfDuration}s`
+    el.style.opacity = '0'
+    // Force reflow then fade to black
+    void el.offsetWidth
+    el.style.opacity = '1'
+
+    setTimeout(() => {
+      onMidFade()
+      // Fade back
+      el.style.opacity = '0'
+      setTimeout(() => { this.dialogueFading = false }, halfDuration * 1000)
+    }, halfDuration * 1000)
+  }
+
+  /**
+   * Whether the camera is currently in dialogue mode.
+   */
+  public isInDialogueMode(): boolean {
+    return this.currentMode === 'dialogue'
+  }
+
+  public isInBattleMode(): boolean {
+    return this.currentMode === 'battle'
   }
 
   /**

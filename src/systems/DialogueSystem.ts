@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { NPCSystem, NPCInstance } from './NPCSystem'
 import { NPCAISystem } from './NPCAISystem'
 import { CharacterAnimationSystem } from './CharacterAnimationSystem'
+import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
 
 // ============================================================================
@@ -78,6 +79,7 @@ export class DialogueManager {
   private npcSystem: NPCSystem
   private aiSystem: NPCAISystem
   private charAnimSystem: CharacterAnimationSystem
+  private cameraManager: CameraManager | null = null
   private trees: Map<string, DialogueTree> = new Map()
   private npcDialogueMap: Map<string, string> = new Map() // npcId → treeId
   private uiCallbacks: DialogueUICallbacks | null = null
@@ -87,6 +89,7 @@ export class DialogueManager {
   private activeTree: DialogueTree | null = null
   private activeNodeId: string | null = null
   private isActive: boolean = false
+  private terminalTimeout: ReturnType<typeof setTimeout> | null = null
 
   // — interaction trigger —
   private interactionRange: number = 3.5
@@ -99,6 +102,15 @@ export class DialogueManager {
   // key listener
   private boundKeyDown: ((e: KeyboardEvent) => void) | null = null
 
+  // — built-in dialogue overlay DOM —
+  private overlayRoot: HTMLDivElement | null = null
+  private overlayPrompt: HTMLDivElement | null = null
+  private overlaySpeaker: HTMLDivElement | null = null
+  private overlayText: HTMLDivElement | null = null
+  private overlayChoices: HTMLDivElement | null = null
+  private currentVisibleChoices: { text: string; nextNodeId: string }[] = []
+  private highlightedChoiceIndex: number = 0
+
   constructor(
     npcSystem: NPCSystem,
     aiSystem: NPCAISystem,
@@ -107,11 +119,17 @@ export class DialogueManager {
     this.npcSystem = npcSystem
     this.aiSystem = aiSystem
     this.charAnimSystem = charAnimSystem
+    this.buildOverlayUI()
   }
 
   // --------------------------------------------------------------------------
   // SETUP
   // --------------------------------------------------------------------------
+
+  /** Link the camera manager so dialogue can drive camera transitions. */
+  setCameraManager(cam: CameraManager): void {
+    this.cameraManager = cam
+  }
 
   /** Provide UI callbacks so the dialogue system can show/hide prompts. */
   setUICallbacks(callbacks: DialogueUICallbacks): void {
@@ -182,12 +200,15 @@ export class DialogueManager {
     if (closest) {
       if (this.nearestInteractableNpc !== closest.id) {
         this.nearestInteractableNpc = closest.id
-        this.uiCallbacks?.showPrompt(`Press E to talk to ${closest.id}`)
+        const promptText = `Press Space to talk to ${closest.id}`
+        this.uiCallbacks?.showPrompt(promptText)
+        this.showPromptOverlay(promptText)
         this.promptVisible = true
       }
     } else {
       if (this.promptVisible) {
         this.uiCallbacks?.hidePrompt()
+        this.hidePromptOverlay()
         this.promptVisible = false
         this.nearestInteractableNpc = null
       }
@@ -199,18 +220,57 @@ export class DialogueManager {
   // --------------------------------------------------------------------------
 
   private handleKey(e: KeyboardEvent): void {
-    if (e.code === 'KeyE') {
-      if (this.isActive) return
-      if (this.nearestInteractableNpc) {
-        this.startDialogue(this.nearestInteractableNpc)
-      }
+    // E starts dialogue when near an NPC (keyboard fallback)
+    if (e.code === 'KeyE' && !this.isActive && this.nearestInteractableNpc) {
+      e.preventDefault()
+      this.startDialogue(this.nearestInteractableNpc)
+      return
     }
 
-    // During active dialogue, number keys 1-9 pick a choice
-    if (this.isActive && e.code.startsWith('Digit')) {
+    if (!this.isActive) return
+
+    // During active dialogue: arrow/WASD to cycle choices, number keys to pick directly
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      this.cycleChoice(-1)
+      return
+    }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      this.cycleChoice(1)
+      return
+    }
+
+    // Number keys 1-9 pick a choice directly
+    if (e.code.startsWith('Digit')) {
       const digit = parseInt(e.code.replace('Digit', ''), 10)
       if (digit >= 1 && digit <= 9) {
         this.selectChoice(digit - 1)
+      }
+    }
+  }
+
+  /** Move the highlighted choice indicator up or down. */
+  private cycleChoice(dir: number): void {
+    if (this.currentVisibleChoices.length === 0) return
+    this.highlightedChoiceIndex =
+      (this.highlightedChoiceIndex + dir + this.currentVisibleChoices.length) %
+      this.currentVisibleChoices.length
+    this.updateChoiceHighlight()
+  }
+
+  /** Refresh the DOM highlight to match highlightedChoiceIndex. */
+  private updateChoiceHighlight(): void {
+    if (!this.overlayChoices) return
+    const items = this.overlayChoices.children
+    for (let i = 0; i < items.length; i++) {
+      const el = items[i] as HTMLElement
+      if (i === this.highlightedChoiceIndex) {
+        el.style.color = '#ffd866'
+        el.textContent = el.textContent?.replace(/^\d+\./, `▶ ${i + 1}.`) ?? ''
+      } else {
+        el.style.color = '#aee'
+        el.textContent = el.textContent?.replace(/^▶ /, '') ?? ''
       }
     }
   }
@@ -230,10 +290,17 @@ export class DialogueManager {
     this.isActive = true
 
     this.uiCallbacks?.hidePrompt()
+    this.hidePromptOverlay()
     this.promptVisible = false
 
     // Face NPC toward player (handled by AI) and play talking anim
     this.aiSystem.playAnimation(npcId, 'talking', false)
+
+    // Transition camera to dialogue frontal shot
+    const npc = this.npcSystem.getNPC(npcId)
+    if (npc && this.cameraManager) {
+      this.cameraManager.enterDialogueMode(npc.position, npc.rotation)
+    }
 
     this.goToNode(tree.startNodeId)
     logger.info(LogModule.SYSTEM, `Dialogue started with NPC "${npcId}" tree="${treeId}"`)
@@ -264,14 +331,22 @@ export class DialogueManager {
     const speaker = node.speaker ?? this.activeNpcId ?? 'NPC'
 
     if (node.isTerminal || visibleChoices.length === 0) {
-      // Terminal node — show text then end
+      // Terminal node — show text, wait for action button to end
       this.uiCallbacks?.showDialogue(speaker, node.text, [])
-      // Auto-end after a short delay (or on next E press)
-      setTimeout(() => this.endDialogue(), 3000)
+      this.showDialogueOverlay(speaker, node.text, [])
+      this.currentVisibleChoices = []
+      this.highlightedChoiceIndex = 0
       return
     }
 
+    this.currentVisibleChoices = visibleChoices
+    this.highlightedChoiceIndex = 0
     this.uiCallbacks?.showDialogue(
+      speaker,
+      node.text,
+      visibleChoices.map((c, i) => ({ text: c.text, index: i })),
+    )
+    this.showDialogueOverlay(
       speaker,
       node.text,
       visibleChoices.map((c, i) => ({ text: c.text, index: i })),
@@ -291,6 +366,7 @@ export class DialogueManager {
   }
 
   endDialogue(): void {
+    if (this.terminalTimeout) { clearTimeout(this.terminalTimeout); this.terminalTimeout = null }
     if (this.activeNpcId) {
       // Return NPC to idle
       try { this.charAnimSystem.crossfadeTo(this.activeNpcId, 'idle', 0.4) } catch (_) {}
@@ -299,7 +375,14 @@ export class DialogueManager {
     this.activeTree = null
     this.activeNodeId = null
     this.activeNpcId = null
+    this.currentVisibleChoices = []
     this.uiCallbacks?.hideDialogue()
+    this.hideDialogueOverlay()
+
+    // Return camera to gameplay
+    if (this.cameraManager) {
+      this.cameraManager.exitDialogueMode()
+    }
   }
 
   /** Whether a dialogue is currently in progress. */
@@ -310,6 +393,52 @@ export class DialogueManager {
   /** The NPC currently being talked to. */
   getActiveNpcId(): string | null {
     return this.activeNpcId
+  }
+
+  /** Whether an interactable NPC is within range right now. */
+  hasNearbyInteractableNPC(): boolean {
+    return this.nearestInteractableNpc !== null
+  }
+
+  /** Hide the proximity prompt when another modal system takes over the screen. */
+  hideInteractionPrompt(): void {
+    this.uiCallbacks?.hidePrompt()
+    this.hidePromptOverlay()
+    this.promptVisible = false
+    this.nearestInteractableNpc = null
+  }
+
+  /**
+   * Called by PlayerController when the action button is pressed.
+   * Returns true if the dialogue system consumed the input.
+   */
+  handleActionButton(): boolean {
+    // Start dialogue if near an NPC
+    if (!this.isActive) {
+      if (this.nearestInteractableNpc) {
+        this.startDialogue(this.nearestInteractableNpc)
+        return true
+      }
+      return false
+    }
+
+    // Dialogue is active — determine what to do
+    const node = this.activeTree?.nodes.get(this.activeNodeId ?? '')
+    if (!node) { this.endDialogue(); return true }
+
+    // Terminal node or no choices → end dialogue
+    if (node.isTerminal || this.currentVisibleChoices.length === 0) {
+      this.endDialogue()
+      return true
+    }
+
+    // Has choices → select the currently highlighted choice
+    if (this.currentVisibleChoices.length > 0) {
+      this.selectChoice(this.highlightedChoiceIndex)
+      return true
+    }
+
+    return true
   }
 
   // --------------------------------------------------------------------------
@@ -335,5 +464,103 @@ export class DialogueManager {
 
   static choice(text: string, nextNodeId: string, condition?: () => boolean): DialogueChoice {
     return { text, nextNodeId, condition }
+  }
+
+  // --------------------------------------------------------------------------
+  // BUILT-IN DIALOGUE OVERLAY UI
+  // --------------------------------------------------------------------------
+
+  private buildOverlayUI(): void {
+    // Root container — full-screen overlay, hidden by default
+    this.overlayRoot = document.createElement('div')
+    this.overlayRoot.id = 'dialogue-overlay'
+    this.overlayRoot.style.cssText =
+      'position:fixed;inset:0;z-index:9999;pointer-events:none;display:none;' +
+      'font-family:"Courier New",monospace;'
+
+    // Prompt bubble ("Press Space to talk")
+    this.overlayPrompt = document.createElement('div')
+    this.overlayPrompt.style.cssText =
+      'position:absolute;bottom:120px;left:50%;transform:translateX(-50%);' +
+      'background:rgba(0,0,0,0.55);color:#fff;padding:8px 20px;border-radius:6px;' +
+      'font-size:14px;letter-spacing:1px;white-space:nowrap;display:none;pointer-events:none;'
+    this.overlayRoot.appendChild(this.overlayPrompt)
+
+    // Dialogue box wrapper (bottom of screen)
+    const dialogueBox = document.createElement('div')
+    dialogueBox.style.cssText =
+      'position:absolute;bottom:0;left:0;right:0;' +
+      'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+      'padding:24px 32px 32px;display:none;pointer-events:auto;'
+    dialogueBox.id = 'dialogue-box'
+    this.overlayRoot.appendChild(dialogueBox)
+
+    // Speaker name
+    this.overlaySpeaker = document.createElement('div')
+    this.overlaySpeaker.style.cssText =
+      'color:#ffd866;font-size:16px;font-weight:bold;margin-bottom:8px;text-transform:uppercase;letter-spacing:2px;'
+    dialogueBox.appendChild(this.overlaySpeaker)
+
+    // NPC text
+    this.overlayText = document.createElement('div')
+    this.overlayText.style.cssText =
+      'color:#eee;font-size:18px;line-height:1.5;margin-bottom:16px;max-width:700px;'
+    dialogueBox.appendChild(this.overlayText)
+
+    // Choices list
+    this.overlayChoices = document.createElement('div')
+    this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
+    dialogueBox.appendChild(this.overlayChoices)
+
+    document.body.appendChild(this.overlayRoot)
+  }
+
+  private showPromptOverlay(text: string): void {
+    if (!this.overlayRoot || !this.overlayPrompt) return
+    this.overlayRoot.style.display = 'block'
+    this.overlayPrompt.style.display = 'block'
+    this.overlayPrompt.textContent = text
+  }
+
+  private hidePromptOverlay(): void {
+    if (this.overlayPrompt) this.overlayPrompt.style.display = 'none'
+    // Don't hide root — dialogue box may still be visible
+  }
+
+  private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number }[]): void {
+    if (!this.overlayRoot) return
+    this.overlayRoot.style.display = 'block'
+    const dialogueBox = document.getElementById('dialogue-box') as HTMLDivElement | null
+    if (dialogueBox) dialogueBox.style.display = 'block'
+    if (this.overlaySpeaker) this.overlaySpeaker.textContent = speaker
+    if (this.overlayText) this.overlayText.textContent = text
+    if (this.overlayChoices) {
+      this.overlayChoices.innerHTML = ''
+      for (const c of choices) {
+        const isHighlighted = c.index === this.highlightedChoiceIndex
+        const btn = document.createElement('div')
+        btn.textContent = `${isHighlighted ? '▶ ' : ''}${c.index + 1}. ${c.text}`
+        btn.style.cssText =
+          `color:${isHighlighted ? '#ffd866' : '#aee'};cursor:pointer;padding:4px 0;font-size:15px;transition:color 0.15s;`
+        btn.addEventListener('mouseenter', () => { btn.style.color = '#ffd866' })
+        btn.addEventListener('mouseleave', () => {
+          btn.style.color = c.index === this.highlightedChoiceIndex ? '#ffd866' : '#aee'
+        })
+        btn.addEventListener('click', () => { this.selectChoice(c.index) })
+        this.overlayChoices!.appendChild(btn)
+      }
+      if (choices.length === 0) {
+        const hint = document.createElement('div')
+        hint.textContent = '[Press Space to continue]'
+        hint.style.cssText = 'color:#888;font-size:13px;margin-top:4px;'
+        this.overlayChoices.appendChild(hint)
+      }
+    }
+  }
+
+  private hideDialogueOverlay(): void {
+    const dialogueBox = document.getElementById('dialogue-box') as HTMLDivElement | null
+    if (dialogueBox) dialogueBox.style.display = 'none'
+    if (this.overlayRoot) this.overlayRoot.style.display = 'none'
   }
 }
