@@ -889,10 +889,15 @@ class IntegratedThreeJSApp {
   
   // Initialization flag
   private isInitialized: boolean = false
+  private deferredStartupTask: Promise<void> | null = null
   
   // Timing for delta time calculation
   private lastTime: number = 0
   private frameCount: number = 0
+  private lastValidViewport: { width: number; height: number } = {
+    width: Math.max(window.innerWidth, 1),
+    height: Math.max(window.innerHeight, 1)
+  }
   
   // All objects now managed via ObjectManager - no legacy references needed
   
@@ -966,6 +971,9 @@ class IntegratedThreeJSApp {
     // Initialize new modular systems
     this.collisionSystem = new CollisionSystem()
     this.cameraManager = new CameraManager(this.scene, this.renderer, this.container)
+    this.cameraManager.setModalRecoveryCallback((reason) => {
+      this.recoverGraphicsPipeline(reason)
+    })
     this.parameterManager = new ParameterManager()
     this.parameterGUI = new ParameterGUI(this.parameterManager, {
       container: this.container,
@@ -1199,12 +1207,42 @@ class IntegratedThreeJSApp {
    * Register example dialogue trees so the player can test interaction.
    */
   private registerSampleDialogues(): void {
-    if (!this.dialogueManager) return
+    if (!this.dialogueManager || !this.battleSystem || !this.npcSystem) return
 
     // Give every NPC a dialogue tree
     const npcs = this.npcSystem!.getAllNPCs()
     for (let i = 0; i < npcs.length; i++) {
       const npc = npcs[i]
+      if (npc.npcClass === 'red') {
+        const tree = DialogueManager.createTree(`tree-${npc.id}`, 'warning', [
+          DialogueManager.node('warning', 'You are close enough. State your business.', [
+            DialogueManager.choice('Easy. I am just passing through.', 'stand-down'),
+            DialogueManager.choice('Back off, or I will make you.', undefined, undefined, () => {
+              this.npcSystem!.setHostile(npc.id, true)
+              this.dialogueManager!.endDialogue()
+              this.battleSystem!.startScriptedBattle(npc.id)
+            }),
+            DialogueManager.choice('What do you want from me?', 'challenge'),
+          ]),
+          DialogueManager.node('challenge', 'I watch this part of the island. Give me one reason not to run you off.', [
+            DialogueManager.choice('No trouble. I am leaving.', 'stand-down'),
+            DialogueManager.choice('Try it.', undefined, undefined, () => {
+              this.npcSystem!.setHostile(npc.id, true)
+              this.dialogueManager!.endDialogue()
+              this.battleSystem!.startScriptedBattle(npc.id)
+            }),
+          ]),
+          DialogueManager.node('stand-down', 'Then move. I will give you a few seconds before I reconsider.', [], {
+            isTerminal: true,
+            onEnter: () => {
+              this.npcSystem!.setInteractionCooldown(npc.id, 3000)
+            },
+          }),
+        ])
+        this.dialogueManager.registerTree(tree, npc.id)
+        continue
+      }
+
       const tree = DialogueManager.createTree(`tree-${npc.id}`, 'greet', [
         DialogueManager.node('greet', `Hello traveller! I'm a ${npc.npcClass} villager.`, [
           DialogueManager.choice('Tell me about this island.', 'about'),
@@ -1261,16 +1299,22 @@ class IntegratedThreeJSApp {
   private getViewportSize(): { width: number; height: number } {
     const visualViewport = window.visualViewport
     if (visualViewport) {
-      return {
-        width: Math.round(visualViewport.width),
-        height: Math.round(visualViewport.height)
+      const width = Math.round(visualViewport.width)
+      const height = Math.round(visualViewport.height)
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        this.lastValidViewport = { width, height }
+        return this.lastValidViewport
       }
     }
 
-    return {
-      width: window.innerWidth,
-      height: window.innerHeight
+    const width = Math.round(window.innerWidth)
+    const height = Math.round(window.innerHeight)
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      this.lastValidViewport = { width, height }
+      return this.lastValidViewport
     }
+
+    return this.lastValidViewport
   }
 
   private detectInputMethods(): InputMethod[] {
@@ -1363,6 +1407,7 @@ class IntegratedThreeJSApp {
     
     this.renderer.domElement.addEventListener('webglcontextrestored', () => {
       console.log('✅ WebGL context restored')
+      this.recoverGraphicsPipeline('webglcontextrestored')
     }, false)
     
     // Initialize retro post-processing system
@@ -1940,6 +1985,15 @@ class IntegratedThreeJSApp {
     this.debugState.helpers = []
   }
 
+  private trackDeferredStartupTask(task: Promise<void>): void {
+    this.deferredStartupTask = task
+    void task.then(() => {
+      console.log('✅ Deferred world startup tasks completed')
+    }).catch((error) => {
+      console.warn('⚠️ Deferred world startup tasks failed:', error)
+    })
+  }
+
   private async createContent(onProgress?: (text: string) => void): Promise<void> {
     const progress = (msg: string) => { if (onProgress) onProgress(msg) }
 
@@ -1983,7 +2037,12 @@ class IntegratedThreeJSApp {
     
     // Load all objects using the unified ObjectLoader system
     progress('Loading scene objects...')
-    await ObjectLoader.loadDefaultScene()
+    await ObjectLoader.loadDefaultScene({
+      deferBackgroundModels: true,
+      onDeferredTask: (task) => {
+        this.trackDeferredStartupTask(task)
+      }
+    })
     
     // CRITICAL FIX: Load saved positions AFTER objects are created
     // This ensures saved positions override default positions from JSON config
@@ -2737,6 +2796,51 @@ class IntegratedThreeJSApp {
     }
   }
 
+  private recoverGraphicsPipeline(reason: string): void {
+    if (!this.renderer) return
+
+    const { width, height } = this.getViewportSize()
+    const safeWidth = Math.max(width, 1)
+    const safeHeight = Math.max(height, 1)
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.0)
+
+    this.lastValidViewport = { width: safeWidth, height: safeHeight }
+
+    const canvas = this.renderer.domElement
+    canvas.style.display = 'block'
+    canvas.style.visibility = 'visible'
+    canvas.style.opacity = '1'
+
+    this.renderer.setPixelRatio(pixelRatio)
+    this.renderer.setSize(safeWidth, safeHeight)
+    this.renderer.setViewport(0, 0, safeWidth, safeHeight)
+    this.renderer.setScissorTest(false)
+    this.renderer.setRenderTarget(null)
+    this.renderer.resetState()
+
+    this.camera.aspect = safeWidth / safeHeight
+    this.camera.updateProjectionMatrix()
+    if (this.cameraManager) {
+      this.cameraManager.refreshViewport(safeWidth, safeHeight)
+    }
+    if (this.retroPostProcessing) {
+      this.retroPostProcessing.forceReset(reason)
+    }
+
+    this.renderer.clear(true, true, true)
+
+    if (this.cameraManager) {
+      const currentCamera = this.cameraManager.getCamera()
+      if (this.retroPostProcessing) {
+        this.retroPostProcessing.render(currentCamera)
+      } else {
+        this.renderer.render(this.scene, currentCamera)
+      }
+    }
+
+    console.log(`🎥 Graphics pipeline recovered: reason=${reason}, viewport=${safeWidth}x${safeHeight}, mode=${this.cameraManager?.getCurrentMode?.() ?? 'unknown'}`)
+  }
+
   private onVisibilityChange(): void {
     if (document.hidden) {
       this.animationSystem.stop()
@@ -3011,12 +3115,13 @@ class IntegratedThreeJSApp {
       try {
         const inDialogue = this.dialogueManager?.isDialogueActive() ?? false
         const inBattle = this.battleSystem?.isBattleActive() ?? false
-        // Keep NPC animation mixers running (for talking anim) but freeze AI movement
-        if (this.npcSystem) this.npcSystem.update(deltaTime)
+        // Update AI first so animation state reads the current movement on the same frame.
         if (this.npcAISystem && !inDialogue && !inBattle) {
           this.npcAISystem.setPlayerPosition(this.playerController.getPosition())
           this.npcAISystem.update(deltaTime)
         }
+        // Keep NPC animation mixers running (for talking anim) but freeze AI movement
+        if (this.npcSystem) this.npcSystem.update(deltaTime)
         if (this.dialogueManager && !inBattle) {
           this.dialogueManager.update(this.playerController.getPosition())
         }

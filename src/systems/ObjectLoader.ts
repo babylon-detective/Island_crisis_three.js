@@ -122,6 +122,24 @@ export interface SceneConfig {
   }
 }
 
+export interface LoadDefaultSceneOptions {
+  deferBackgroundModels?: boolean
+  onDeferredTask?: (task: Promise<void>) => void
+}
+
+interface ModelLoadConfig {
+  id: string
+  modelPath: string
+  position?: [number, number, number]
+  rotation?: [number, number, number]
+  scale?: [number, number, number]
+  useCustomShader?: boolean
+  shaderUniforms?: { [key: string]: { value: any } }
+  collisionMode?: 'none' | 'heightmap'
+  collisionResolution?: number
+  onLoaded?: (model: THREE.Group) => void
+}
+
 // Main object loader class
 export class ObjectLoader {
   private static animationSystem: AnimationSystem
@@ -159,7 +177,7 @@ export class ObjectLoader {
   }
 
   // Load default scene objects
-  public static async loadDefaultScene(): Promise<void> {
+  public static async loadDefaultScene(options: LoadDefaultSceneOptions = {}): Promise<void> {
     console.log('🔄 Loading default scene objects...')
     
     await Promise.all([
@@ -167,10 +185,18 @@ export class ObjectLoader {
       this.loadShaderObjects(),
       this.loadHologramObject()
     ])
-    
-    // Load models (awaited so heightmap baking completes before scene reports ready)
-    await this.loadModelObjects()
-    
+
+    const backgroundModelsTask = this.loadModelObjects().catch((error) => {
+      console.warn('⚠️ Deferred model loading failed:', error)
+    })
+
+    if (options.deferBackgroundModels) {
+      options.onDeferredTask?.(backgroundModelsTask)
+      console.log('✅ Default scene core objects loaded; background model loading started')
+      return
+    }
+
+    await backgroundModelsTask
     console.log('✅ Default scene objects loaded')
   }
 
@@ -807,70 +833,84 @@ export class ObjectLoader {
     })
   }
 
+  private static async loadModelSceneObject(config: ModelLoadConfig): Promise<void> {
+    const model = await this.loadGLTFModel(
+      config.modelPath,
+      config.id,
+      config.position,
+      config.rotation,
+      config.scale,
+      config.useCustomShader ?? false,
+      config.shaderUniforms
+    )
+
+    config.onLoaded?.(model)
+
+    if (config.collisionMode === 'heightmap' && this.collisionSystem) {
+      const resolution = config.collisionResolution ?? 64
+      const heightmap = await HeightmapCollider.fromObject(model, resolution, config.id)
+      this.collisionSystem.registerHeightmap(heightmap)
+      return
+    }
+
+    if (config.collisionMode === 'none') {
+      console.log(`⏭️ Skipping auto collision bake for background model: ${config.id}`)
+    }
+  }
+
   // Load model objects
   private static async loadModelObjects(): Promise<void> {
-    try {
-      // Load grid_01.glb model with custom shader using landUniforms
-      const useShader = this.landUniforms !== null
-      const gridModel = await this.loadGLTFModel(
-        '/models/environments/grid_01.glb',
-        'grid-01',
-        [0, 0, 0],
-        [0, 0, 0],
-        [1, 1, 1],
-        useShader,
-        this.landUniforms || undefined
-      )
-      
-      // Calculate bounding box and position based on dimensions
-      const boundingBox = new THREE.Box3().setFromObject(gridModel)
-      const size = new THREE.Vector3()
-      boundingBox.getSize(size)
-      
-      // Position the grid: X based on width, Y=0 (ground), Z based on depth
-      gridModel.position.set(size.x, 0, size.z)
-      console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
-      console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
+    const useShader = this.landUniforms !== null
+    const sharedShaderUniforms = this.landUniforms || undefined
+    const modelConfigs: ModelLoadConfig[] = [
+      {
+        id: 'grid-01',
+        modelPath: '/models/environments/grid_01.glb',
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+        useCustomShader: useShader,
+        shaderUniforms: sharedShaderUniforms,
+        collisionMode: 'none',
+        onLoaded: (gridModel) => {
+          const boundingBox = new THREE.Box3().setFromObject(gridModel)
+          const size = new THREE.Vector3()
+          boundingBox.getSize(size)
 
-      // Bake heightmap collision for the grid (async — yields to event loop between row batches)
-      if (this.collisionSystem) {
-        const gridHeightmap = await HeightmapCollider.fromObject(gridModel, 64, 'grid-01')
-        this.collisionSystem.registerHeightmap(gridHeightmap)
+          gridModel.position.set(size.x, 0, size.z)
+          console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+          console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
+        }
+      },
+      {
+        id: 'landscape-island',
+        modelPath: '/models/environments/landscape_island.glb',
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+        useCustomShader: useShader,
+        shaderUniforms: sharedShaderUniforms,
+        collisionMode: 'none',
+        onLoaded: (islandModel) => {
+          const bbox = new THREE.Box3().setFromObject(islandModel)
+          const size = new THREE.Vector3()
+          bbox.getSize(size)
+          const xPos = 50 + size.x / 2
+          islandModel.position.set(xPos, 0, 0)
+          console.log(`🏝️ Landscape island positioned at (${xPos.toFixed(2)}, 0, 0) — size (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+        }
       }
-    } catch (error) {
-      console.warn('⚠️ Failed to load model objects:', error)
-    }
+    ]
 
-    // Load landscape_island.glb next to the main terrain plane
-    try {
-      const useShader = this.landUniforms !== null
-      const islandModel = await this.loadGLTFModel(
-        '/models/environments/landscape_island.glb',
-        'landscape-island',
-        [0, 0, 0],
-        [0, 0, 0],
-        [1, 1, 1],
-        useShader,
-        this.landUniforms || undefined
-      )
-
-      // Measure the island and place it next to the terrain plane (plane spans -50..+50 on X)
-      const bbox = new THREE.Box3().setFromObject(islandModel)
-      const size = new THREE.Vector3()
-      bbox.getSize(size)
-      // Place at the positive-X edge of the plane, same Y=0 as the terrain
-      const xPos = 50 + size.x / 2
-      islandModel.position.set(xPos, 0, 0)
-      console.log(`🏝️ Landscape island positioned at (${xPos.toFixed(2)}, 0, 0) — size (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
-
-      // Bake heightmap collision for the island (async — yields to event loop between row batches)
-      if (this.collisionSystem) {
-        const islandHeightmap = await HeightmapCollider.fromObject(islandModel, 64, 'landscape-island')
-        this.collisionSystem.registerHeightmap(islandHeightmap)
+    await Promise.all(modelConfigs.map(async (config) => {
+      try {
+        await this.loadModelSceneObject(config)
+      } catch (error) {
+        console.warn(`⚠️ Failed to load model object ${config.id}:`, error)
       }
-    } catch (error) {
-      console.warn('⚠️ Failed to load landscape island:', error)
-    }
+    }))
+
+    console.log('✅ Background model objects loaded')
   }
 
   // Get default scene configuration

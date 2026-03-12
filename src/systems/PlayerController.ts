@@ -1143,7 +1143,11 @@ export class PlayerController {
 
   public setPosition(position: THREE.Vector3): void {
     this.state.position.copy(position)
+    this.state.velocity.set(0, 0, 0)
+    this.state.isMoving = false
+    this.state.isRunning = false
     this.collisionVolume.position.copy(position)
+    this.collisionSystem.updatePlayerPosition(position)
     
     // Update mesh position
     const meshPosition = position.clone()

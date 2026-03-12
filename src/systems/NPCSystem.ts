@@ -51,6 +51,9 @@ export class NPCSystem {
 
   private npcs: Map<string, NPCInstance> = new Map()
   private cachedNPCList: NPCInstance[] | null = null
+  private hostileNPCs: Set<string> = new Set()
+  private interactionCooldowns: Map<string, number> = new Map()
+  private defeatedNPCs: Set<string> = new Set()
 
   private gltfLoader = new GLTFLoader()
   private sourceModel: THREE.Group | null = null
@@ -201,7 +204,7 @@ export class NPCSystem {
         { id: config.id, model, animationSetId: 'quaternius-universal', defaultCrossfadeDuration: 0.3 },
         false, // don't preload all 45 clips
       )
-      await this.charAnimSystem.loadSpecificClips(config.id, ['idle', 'walk', 'talking'])
+      await this.charAnimSystem.loadSpecificClips(config.id, ['idle', 'walk', 'talking', 'death'])
       this.charAnimSystem.play(config.id, 'idle')
 
       const fsm = new AnimationStateMachine(this.charAnimSystem)
@@ -221,6 +224,9 @@ export class NPCSystem {
     this.charAnimSystem.unregisterCharacter(id)
     this.npcs.delete(id)
     this.cachedNPCList = null
+    this.hostileNPCs.delete(id)
+    this.interactionCooldowns.delete(id)
+    this.defeatedNPCs.delete(id)
   }
 
   // --------------------------------------------------------------------------
@@ -256,6 +262,12 @@ export class NPCSystem {
         npc.stateMachine.update(deltaTime)
       }
 
+      if (this.defeatedNPCs.has(npc.id)) {
+        npc.model.position.copy(npc.position)
+        npc.model.rotation.y = npc.rotation
+        continue
+      }
+
       // Ground snap only while moving (same getGroundHeight as player)
       if (npc.animParams.speed > 0.1) {
         const gH = this.collisionSystem.getGroundHeight(npc.position.x, npc.position.z)
@@ -273,8 +285,69 @@ export class NPCSystem {
 
   getNPC(id: string): NPCInstance | undefined { return this.npcs.get(id) }
 
+  setHostile(id: string, hostile: boolean = true): void {
+    if (hostile) {
+      this.hostileNPCs.add(id)
+      return
+    }
+    this.hostileNPCs.delete(id)
+  }
+
+  isHostile(id: string): boolean {
+    return this.hostileNPCs.has(id)
+  }
+
+  defeatNPC(id: string): void {
+    const npc = this.npcs.get(id)
+    if (!npc || this.defeatedNPCs.has(id)) return
+
+    this.defeatedNPCs.add(id)
+    this.cachedNPCList = null
+    this.hostileNPCs.delete(id)
+    this.interactionCooldowns.delete(id)
+
+    npc.velocity.set(0, 0, 0)
+    npc.state = 'dead'
+    npc.animParams.speed = 0
+    npc.animParams.isRunning = false
+    npc.animParams.isAttacking = false
+    npc.animParams.isDead = true
+    npc.animParams.movementX = 0
+    npc.animParams.movementZ = 0
+    npc.model.position.copy(npc.position)
+    npc.model.rotation.y = npc.rotation
+    npc.stateMachine?.setEnabled(false)
+
+    try {
+      this.charAnimSystem.crossfadeTo(id, 'death', 0.2)
+      logger.info(LogModule.SYSTEM, `NPC "${id}" defeated: death animation triggered and position locked`)
+    } catch (error) {
+      logger.warn(LogModule.SYSTEM, `Death animation failed for ${id}: ${error}`)
+    }
+  }
+
+  isDefeated(id: string): boolean {
+    return this.defeatedNPCs.has(id)
+  }
+
+  setInteractionCooldown(id: string, durationMs: number): void {
+    this.interactionCooldowns.set(id, performance.now() + durationMs)
+  }
+
+  isInteractionOnCooldown(id: string): boolean {
+    const expiresAt = this.interactionCooldowns.get(id)
+    if (expiresAt === undefined) return false
+    if (expiresAt <= performance.now()) {
+      this.interactionCooldowns.delete(id)
+      return false
+    }
+    return true
+  }
+
   getAllNPCs(): NPCInstance[] {
-    if (!this.cachedNPCList) this.cachedNPCList = Array.from(this.npcs.values())
+    if (!this.cachedNPCList) {
+      this.cachedNPCList = Array.from(this.npcs.values()).filter(npc => !this.defeatedNPCs.has(npc.id))
+    }
     return this.cachedNPCList
   }
 

@@ -15,6 +15,7 @@ export interface AIConfig {
   walkSpeed: number
   arrivalThreshold: number
   wanderRadius: number
+  redPursuitLeashRadius: number
   socializeChance: number
   socialRange: number
   socializeDuration: number
@@ -26,6 +27,7 @@ const DEFAULT_AI: AIConfig = {
   walkSpeed: 1.2,
   arrivalThreshold: 0.6,
   wanderRadius: 15,
+  redPursuitLeashRadius: 12,
   socializeChance: 0.25,
   socialRange: 5,
   socializeDuration: 4,
@@ -108,7 +110,13 @@ export class NPCAISystem {
     ai.playerNearby = npc.position.distanceTo(this.playerPos) < this.cfg.playerAwarenessRange
 
     if (npc.npcClass === 'red') {
-      if (ai.playerNearby) {
+      if (this.npcSystem.isInteractionOnCooldown(npc.id)) {
+        this.disengageFromPlayer(npc.id)
+        return
+      }
+
+      const playerWithinLeash = ai.spawnPos.distanceTo(this.playerPos) <= this.cfg.redPursuitLeashRadius
+      if (ai.playerNearby && playerWithinLeash) {
         ai.behaviour = 'follow'
         ai.waypoint = this.playerPos.clone()
         return
@@ -236,6 +244,18 @@ export class NPCAISystem {
   sendTo(npcId: string, target: THREE.Vector3): void { const ai = this.states.get(npcId); if (ai) { ai.behaviour = 'goto'; ai.waypoint = target.clone() } }
   followPlayer(npcId: string): void { const ai = this.states.get(npcId); if (ai) ai.behaviour = 'follow' }
   fleeFromPlayer(npcId: string): void { const ai = this.states.get(npcId); if (ai) ai.behaviour = 'flee' }
+  disengageFromPlayer(npcId: string): void {
+    const ai = this.states.get(npcId)
+    const npc = this.npcSystem.getNPC(npcId)
+    if (!ai || !npc) return
+    if (this.npcSystem.isDefeated(npcId)) return
+    ai.behaviour = 'idle'
+    ai.waypoint = null
+    npc.velocity.set(0, 0, 0)
+    npc.animParams.speed = 0
+    npc.animParams.isRunning = false
+    npc.state = 'idle'
+  }
 
   resetToSpawn(npcId: string): void {
     const ai = this.states.get(npcId); const npc = this.npcSystem.getNPC(npcId)

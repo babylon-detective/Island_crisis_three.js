@@ -25,9 +25,11 @@ export interface DialogueChoice {
   /** Text shown to the player */
   text: string
   /** ID of the next DialogueNode to jump to */
-  nextNodeId: string
+  nextNodeId?: string
   /** Optional condition — choice is only shown when this returns true */
   condition?: () => boolean
+  /** Optional side effect fired when the player picks this choice */
+  onSelect?: () => void
 }
 
 export interface DialogueNode {
@@ -93,6 +95,7 @@ export class DialogueManager {
 
   // — interaction trigger —
   private interactionRange: number = 3.5
+  private autoTriggerRange: number = 2.2
   private promptVisible: boolean = false
   private nearestInteractableNpc: string | null = null
 
@@ -108,7 +111,7 @@ export class DialogueManager {
   private overlaySpeaker: HTMLDivElement | null = null
   private overlayText: HTMLDivElement | null = null
   private overlayChoices: HTMLDivElement | null = null
-  private currentVisibleChoices: { text: string; nextNodeId: string }[] = []
+  private currentVisibleChoices: DialogueChoice[] = []
   private highlightedChoiceIndex: number = 0
 
   constructor(
@@ -183,6 +186,8 @@ export class DialogueManager {
 
   update(playerPosition: THREE.Vector3): void {
     if (this.isActive) return // already in dialogue
+    // Don't start new dialogues while camera is fading between modes
+    if (this.cameraManager?.isFading()) return
 
     // Find closest interactable NPC
     const candidates = this.aiSystem.getInteractableNPCs(this.interactionRange)
@@ -190,11 +195,19 @@ export class DialogueManager {
     let closestDist = Infinity
     for (const npc of candidates) {
       if (!this.npcDialogueMap.has(npc.id)) continue // no dialogue tree assigned
+      if (this.npcSystem.isInteractionOnCooldown(npc.id)) continue
+      if (npc.npcClass === 'red' && this.npcSystem.isHostile(npc.id)) continue
       const d = npc.position.distanceTo(playerPosition)
       if (d < closestDist) {
         closestDist = d
         closest = npc
       }
+    }
+
+    if (closest && closest.npcClass === 'red' && closestDist <= this.autoTriggerRange) {
+      this.nearestInteractableNpc = closest.id
+      this.startDialogue(closest.id)
+      return
     }
 
     if (closest) {
@@ -299,6 +312,7 @@ export class DialogueManager {
     // Transition camera to dialogue frontal shot
     const npc = this.npcSystem.getNPC(npcId)
     if (npc && this.cameraManager) {
+      console.log(`💬 Dialogue start: npc=${npcId}, cameraModeBefore=${this.cameraManager.getCurrentMode()}`)
       this.cameraManager.enterDialogueMode(npc.position, npc.rotation)
     }
 
@@ -362,27 +376,42 @@ export class DialogueManager {
     if (index < 0 || index >= visibleChoices.length) return
 
     const choice = visibleChoices[index]
+    choice.onSelect?.()
+    if (!this.isActive) return
+    if (!choice.nextNodeId) {
+      this.endDialogue()
+      return
+    }
     this.goToNode(choice.nextNodeId)
   }
 
   endDialogue(): void {
     if (this.terminalTimeout) { clearTimeout(this.terminalTimeout); this.terminalTimeout = null }
-    if (this.activeNpcId) {
+
+    const npcId = this.activeNpcId
+    if (npcId) {
       // Return NPC to idle
-      try { this.charAnimSystem.crossfadeTo(this.activeNpcId, 'idle', 0.4) } catch (_) {}
+      try { this.charAnimSystem.crossfadeTo(npcId, 'idle', 0.4) } catch (_) {}
+      // Set interaction cooldown to prevent immediate re-trigger (critical on mobile)
+      this.npcSystem.setInteractionCooldown(npcId, 2000)
     }
-    this.isActive = false
-    this.activeTree = null
-    this.activeNodeId = null
-    this.activeNpcId = null
+
     this.currentVisibleChoices = []
     this.uiCallbacks?.hideDialogue()
     this.hideDialogueOverlay()
 
-    // Return camera to gameplay
+    // Return camera to gameplay BEFORE clearing active state,
+    // so exitDialogueMode sees currentMode === 'dialogue'
     if (this.cameraManager) {
+      console.log(`💬 Dialogue end: npc=${npcId ?? 'none'}, cameraModeBeforeExit=${this.cameraManager.getCurrentMode()}`)
       this.cameraManager.exitDialogueMode()
     }
+
+    // Clear active state AFTER camera exit is initiated
+    this.isActive = false
+    this.activeTree = null
+    this.activeNodeId = null
+    this.activeNpcId = null
   }
 
   /** Whether a dialogue is currently in progress. */
@@ -462,8 +491,8 @@ export class DialogueManager {
     return { id, text, choices, ...opts }
   }
 
-  static choice(text: string, nextNodeId: string, condition?: () => boolean): DialogueChoice {
-    return { text, nextNodeId, condition }
+  static choice(text: string, nextNodeId?: string, condition?: () => boolean, onSelect?: () => void): DialogueChoice {
+    return { text, nextNodeId, condition, onSelect }
   }
 
   // --------------------------------------------------------------------------

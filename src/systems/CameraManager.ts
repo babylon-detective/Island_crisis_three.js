@@ -185,6 +185,9 @@ export class CameraManager {
   private battleTargetLookAt: THREE.Vector3 = new THREE.Vector3()
   private dialogueFadeOverlay: HTMLDivElement | null = null
   private dialogueFading: boolean = false
+  private pendingFadeRequest: { halfDuration: number; onMidFade: () => void; label: string } | null = null
+  private gameplayMode: CameraMode = 'thirdperson'
+  private modalRecoveryCallback: ((reason: string) => void) | null = null
   
   // Controls
   private orbitControls!: OrbitControls
@@ -490,6 +493,9 @@ export class CameraManager {
    */
   private setActiveCamera(mode: CameraMode, requestPointerLock: boolean = false): void {
     this.currentMode = mode
+    if (mode !== 'dialogue' && mode !== 'battle') {
+      this.gameplayMode = mode
+    }
     const cameraMap: Record<CameraMode, THREE.PerspectiveCamera> = {
       freeview: this.freeViewCamera,
       shoulder: this.shoulderCamera,
@@ -517,8 +523,19 @@ export class CameraManager {
     }
 
     this.applyPlayerMeshVisibility(mode)
+    if (mode !== 'dialogue' && mode !== 'battle') {
+      this.forceClearFadeOverlay(`setActiveCamera:${mode}`)
+    }
+    console.log(`📷 Active camera set: mode=${mode}, camera=${this.currentCamera.name}, gameplayMode=${this.gameplayMode}, pointerLock=${requestPointerLock}`)
     
     // console.log(`📷 Active camera: ${this.currentCamera.name}`)
+  }
+
+  private getResumeMode(): CameraMode {
+    if (this.priorMode === 'dialogue' || this.priorMode === 'battle') {
+      return this.gameplayMode
+    }
+    return this.priorMode
   }
 
   private shouldPlayerMeshBeVisible(mode: CameraMode = this.currentMode): boolean {
@@ -925,11 +942,36 @@ export class CameraManager {
     return this.currentCamera
   }
 
+  public setModalRecoveryCallback(callback: ((reason: string) => void) | null): void {
+    this.modalRecoveryCallback = callback
+  }
+
   /**
    * Get current camera mode
    */
   public getCurrentMode(): CameraMode {
     return this.currentMode
+  }
+
+  public refreshViewport(width: number, height: number): void {
+    const safeWidth = Math.max(width, 1)
+    const safeHeight = Math.max(height, 1)
+    const aspect = safeWidth / safeHeight
+
+    this.freeViewCamera.aspect = aspect
+    this.freeViewCamera.updateProjectionMatrix()
+
+    this.shoulderCamera.aspect = aspect
+    this.shoulderCamera.updateProjectionMatrix()
+
+    this.thirdPersonCamera.aspect = aspect
+    this.thirdPersonCamera.updateProjectionMatrix()
+
+    this.dialogueCamera.aspect = aspect
+    this.dialogueCamera.updateProjectionMatrix()
+
+    this.battleCamera.aspect = aspect
+    this.battleCamera.updateProjectionMatrix()
   }
 
   /**
@@ -1073,7 +1115,9 @@ export class CameraManager {
    * Handle window resize
    */
   private handleResize = (): void => {
-    const aspect = window.innerWidth / window.innerHeight
+    const width = Math.max(window.innerWidth, 1)
+    const height = Math.max(window.innerHeight, 1)
+    const aspect = width / height
     
     this.freeViewCamera.aspect = aspect
     this.freeViewCamera.updateProjectionMatrix()
@@ -1157,7 +1201,10 @@ export class CameraManager {
    * @param npcRotation  Y-axis rotation of the NPC (radians).
    */
   public enterDialogueMode(npcPosition: THREE.Vector3, npcRotation: number): void {
-    this.priorMode = this.currentMode
+    this.priorMode = this.currentMode === 'dialogue' || this.currentMode === 'battle'
+      ? this.gameplayMode
+      : this.currentMode
+    console.log(`📷 Dialogue enter requested: current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
 
     // NPC forward direction (the way the NPC faces)
     const npcForward = new THREE.Vector3(Math.sin(npcRotation), 0, Math.cos(npcRotation))
@@ -1180,7 +1227,8 @@ export class CameraManager {
       this.dialogueCamera.position.copy(this.dialogueTargetPos)
       this.dialogueCamera.lookAt(this.dialogueTargetLookAt)
       this.switchCamera('dialogue', true)
-    })
+      console.log(`📷 Dialogue camera activated: prior=${this.priorMode}, current=${this.currentMode}`)
+    }, 'enter-dialogue')
   }
 
   /**
@@ -1188,40 +1236,77 @@ export class CameraManager {
    */
   public exitDialogueMode(): void {
     if (this.currentMode !== 'dialogue') return
+    const resumeMode = this.getResumeMode()
+    console.log(`📷 Dialogue exit requested: current=${this.currentMode}, prior=${this.priorMode}, resume=${resumeMode}`)
     this.fadeTransition(0.3, () => {
       this.setPlayerMeshRenderSuppressed('dialogue', false)
-      this.switchCamera(this.priorMode, true)
-    })
+      this.switchCamera(resumeMode, true)
+      this.requestModalRecovery('exit-dialogue')
+      console.log(`📷 Dialogue camera exited: resumed=${resumeMode}, current=${this.currentMode}`)
+    }, 'exit-dialogue')
   }
 
   /**
    * Enter battle camera mode — frame player and NPC together while keeping the player visible.
    */
   public enterBattleMode(playerPosition: THREE.Vector3, npcPosition: THREE.Vector3): void {
-    this.priorMode = this.currentMode
+    this.priorMode = this.currentMode === 'dialogue' || this.currentMode === 'battle'
+      ? this.gameplayMode
+      : this.currentMode
+    console.log(`📷 Battle enter requested: current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
 
     const playerToNpc = npcPosition.clone().sub(playerPosition)
     playerToNpc.y = 0
-    if (playerToNpc.lengthSq() < 0.0001) {
+
+    let npcDistance = playerToNpc.length()
+    if (npcDistance < 0.0001) {
       playerToNpc.set(0, 0, 1)
+      npcDistance = 1
+    } else {
+      playerToNpc.normalize()
     }
-    playerToNpc.normalize()
 
     const side = new THREE.Vector3(-playerToNpc.z, 0, playerToNpc.x)
-    const midpoint = playerPosition.clone().lerp(npcPosition, 0.5)
-    midpoint.y = Math.max(playerPosition.y, npcPosition.y) + 1.0
+    const sideSign = side.x >= 0 ? 1 : -1
 
-    this.battleTargetLookAt.copy(midpoint).addScaledVector(playerToNpc, 0.45)
-    this.battleTargetPos.copy(midpoint)
-      .addScaledVector(side, 2.8)
-      .addScaledVector(playerToNpc, -0.5)
-    this.battleTargetPos.y += 1.2
+    // Keep the world positions unchanged, but push the player into stronger foreground
+    // and the NPC deeper into frame so the shot reads with more depth.
+    const backOffset = THREE.MathUtils.clamp(npcDistance * 0.42, 3.6, 5.6)
+    const sideOffset = THREE.MathUtils.clamp(npcDistance * 0.4, 3.1, 5.0) * sideSign
+    const verticalOffset = THREE.MathUtils.clamp(1.45 + npcDistance * 0.05, 1.6, 2.3)
+    const targetPullback = THREE.MathUtils.clamp(npcDistance * 0.1, 0.15, 0.45)
+    const targetSideBias = THREE.MathUtils.clamp(npcDistance * 0.16, 0.45, 1.1) * -sideSign
+    const playerForegroundBias = THREE.MathUtils.clamp(npcDistance * 0.14, 0.4, 0.95)
+
+    this.battleTargetPos.copy(playerPosition)
+      .addScaledVector(playerToNpc, -backOffset)
+      .addScaledVector(side, sideOffset)
+    this.battleTargetPos.y = playerPosition.y + verticalOffset
+
+    this.battleTargetLookAt.copy(npcPosition)
+      .addScaledVector(playerToNpc, -targetPullback)
+      .addScaledVector(side, targetSideBias)
+    this.battleTargetLookAt.y = npcPosition.y + 1.35
+    this.battleTargetLookAt.addScaledVector(
+      playerPosition.clone().sub(npcPosition).normalize(),
+      -playerForegroundBias,
+    )
 
     this.fadeTransition(0.3, () => {
+      // A slightly wider lens exaggerates foreground/background separation.
+      if (this.battleCamera.fov !== 46) {
+        this.battleCamera.fov = 46
+        this.battleCamera.updateProjectionMatrix()
+      }
       this.battleCamera.position.copy(this.battleTargetPos)
       this.battleCamera.lookAt(this.battleTargetLookAt)
       this.switchCamera('battle', true)
-    })
+      console.log(
+        `📷 Battle camera activated: prior=${this.priorMode}, current=${this.currentMode}, ` +
+        `pos=(${this.battleTargetPos.x.toFixed(2)}, ${this.battleTargetPos.y.toFixed(2)}, ${this.battleTargetPos.z.toFixed(2)}), ` +
+        `lookAt=(${this.battleTargetLookAt.x.toFixed(2)}, ${this.battleTargetLookAt.y.toFixed(2)}, ${this.battleTargetLookAt.z.toFixed(2)})`
+      )
+    }, 'enter-battle')
   }
 
   /**
@@ -1229,17 +1314,26 @@ export class CameraManager {
    */
   public exitBattleMode(): void {
     if (this.currentMode !== 'battle') return
+    const resumeMode = this.getResumeMode()
+    console.log(`📷 Battle exit requested: current=${this.currentMode}, prior=${this.priorMode}, resume=${resumeMode}`)
     this.fadeTransition(0.3, () => {
-      this.switchCamera(this.priorMode, true)
-    })
+      this.switchCamera(resumeMode, true)
+      this.requestModalRecovery('exit-battle')
+      console.log(`📷 Battle camera exited: resumed=${resumeMode}, current=${this.currentMode}`)
+    }, 'exit-battle')
   }
 
   /**
    * Quick full-screen fade to black and back, calling `onMidFade` at the peak.
    */
-  private fadeTransition(halfDuration: number, onMidFade: () => void): void {
-    if (this.dialogueFading) return
+  private fadeTransition(halfDuration: number, onMidFade: () => void, label: string = 'modal-transition'): void {
+    if (this.dialogueFading) {
+      this.pendingFadeRequest = { halfDuration, onMidFade, label }
+      console.log(`📷 Fade queued: label=${label}, current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
+      return
+    }
     this.dialogueFading = true
+    console.log(`📷 Fade start: label=${label}, current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
 
     if (!this.dialogueFadeOverlay) {
       this.dialogueFadeOverlay = document.createElement('div')
@@ -1248,17 +1342,38 @@ export class CameraManager {
       document.body.appendChild(this.dialogueFadeOverlay)
     }
     const el = this.dialogueFadeOverlay
+    el.style.display = 'block'
+    el.style.visibility = 'visible'
     el.style.transitionDuration = `${halfDuration}s`
     el.style.opacity = '0'
     // Force reflow then fade to black
     void el.offsetWidth
     el.style.opacity = '1'
 
+    // Safety timeout: force-clear the overlay if something goes wrong (mobile timer throttling, etc.)
+    const safetyMs = (halfDuration * 2 + 0.5) * 1000
+    const safetyTimer = setTimeout(() => {
+      if (this.dialogueFading) {
+        this.forceClearFadeOverlay(`safety-timeout:${label}`)
+      }
+    }, safetyMs)
+
     setTimeout(() => {
       onMidFade()
       // Fade back
       el.style.opacity = '0'
-      setTimeout(() => { this.dialogueFading = false }, halfDuration * 1000)
+      setTimeout(() => {
+        clearTimeout(safetyTimer)
+        this.dialogueFading = false
+        el.style.display = 'none'
+        el.style.visibility = 'hidden'
+        console.log(`📷 Fade end: label=${label}, current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
+        const pending = this.pendingFadeRequest
+        this.pendingFadeRequest = null
+        if (pending) {
+          this.fadeTransition(pending.halfDuration, pending.onMidFade, pending.label)
+        }
+      }, halfDuration * 1000)
     }, halfDuration * 1000)
   }
 
@@ -1271,6 +1386,31 @@ export class CameraManager {
 
   public isInBattleMode(): boolean {
     return this.currentMode === 'battle'
+  }
+
+  public isFading(): boolean {
+    return this.dialogueFading || this.pendingFadeRequest !== null
+  }
+
+  private forceClearFadeOverlay(reason: string): void {
+    if (!this.dialogueFadeOverlay) return
+    this.dialogueFadeOverlay.style.transitionDuration = '0s'
+    this.dialogueFadeOverlay.style.opacity = '0'
+    this.dialogueFadeOverlay.style.display = 'none'
+    this.dialogueFadeOverlay.style.visibility = 'hidden'
+    this.dialogueFading = false
+    this.pendingFadeRequest = null
+    console.log(`📷 Fade overlay force-cleared: reason=${reason}, current=${this.currentMode}, gameplay=${this.gameplayMode}`)
+  }
+
+  private requestModalRecovery(reason: string): void {
+    if (!this.modalRecoveryCallback) return
+    requestAnimationFrame(() => {
+      this.modalRecoveryCallback?.(`${reason}:raf`)
+      setTimeout(() => {
+        this.modalRecoveryCallback?.(`${reason}:timeout`)
+      }, 150)
+    })
   }
 
   /**

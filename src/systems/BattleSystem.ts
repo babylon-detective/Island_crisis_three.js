@@ -37,8 +37,8 @@ export class BattleSystem {
 
   private readonly interactionRange = 4.5
   private readonly hostileAutoTriggerRange = 1.85
-  private readonly recentBattleCooldownMs = 4000
-  private recentBattleCooldowns: Map<string, number> = new Map()
+  private readonly recentBattleCooldownMs = 3000
+  private stagedPlayerStartPosition: THREE.Vector3 | null = null
 
   private boundKeyDown: ((e: KeyboardEvent) => void) | null = null
 
@@ -96,12 +96,12 @@ export class BattleSystem {
   }
 
   update(playerPosition: THREE.Vector3): void {
-    this.pruneRecentCooldowns()
-
     if (this.dialogueManager?.isDialogueActive()) {
       this.clearPromptState()
       return
     }
+    // Don't start new battles while camera is fading between modes
+    if (this.cameraManager?.isFading()) return
 
     if (this.isActive) {
       this.syncBattleFacing()
@@ -109,7 +109,7 @@ export class BattleSystem {
     }
 
     const nearbyNPCs = this.npcSystem.getNPCsInRadius(playerPosition, this.interactionRange)
-      .filter(npc => !this.isNPCOnCooldown(npc.id))
+      .filter(npc => !this.npcSystem.isInteractionOnCooldown(npc.id))
       .filter(npc => this.aiSystem.getBehaviour(npc.id) !== 'flee')
 
     let closest: NPCInstance | null = null
@@ -134,7 +134,8 @@ export class BattleSystem {
 
     const hostileRed = this.npcSystem.getNPCsInRadius(playerPosition, this.hostileAutoTriggerRange)
       .filter(npc => npc.npcClass === 'red')
-      .filter(npc => !this.isNPCOnCooldown(npc.id))
+      .filter(npc => this.npcSystem.isHostile(npc.id))
+      .filter(npc => !this.npcSystem.isInteractionOnCooldown(npc.id))
       .find(npc => this.aiSystem.getBehaviour(npc.id) !== 'flee')
 
     if (hostileRed) {
@@ -153,8 +154,24 @@ export class BattleSystem {
   handleAttackButton(): boolean {
     if (this.isActive) return false
     if (this.dialogueManager?.isDialogueActive()) return false
-    if (!this.nearestBattleNpc) return false
-    return this.startBattle(this.nearestBattleNpc, 'player')
+
+    const candidate = this.npcSystem.getNPCsInRadius(
+      this.playerController?.getPosition() ?? new THREE.Vector3(),
+      this.interactionRange,
+    )
+      .filter(npc => !this.npcSystem.isInteractionOnCooldown(npc.id))
+      .filter(npc => this.aiSystem.getBehaviour(npc.id) !== 'flee')
+      .sort((a, b) => {
+        const playerPos = this.playerController?.getPosition() ?? new THREE.Vector3()
+        return a.position.distanceToSquared(playerPos) - b.position.distanceToSquared(playerPos)
+      })[0]
+
+    if (!candidate) return false
+    return this.startBattle(candidate.id, 'player')
+  }
+
+  startScriptedBattle(npcId: string): boolean {
+    return this.startBattle(npcId, 'player')
   }
 
   handleConfirmActionButton(): boolean {
@@ -209,9 +226,11 @@ export class BattleSystem {
 
     this.dialogueManager?.hideInteractionPrompt()
     this.clearPromptState()
+    this.stageBattlePositions(npc)
     this.syncBattleFacing()
 
     if (this.cameraManager) {
+      console.log(`⚔️ Battle start: npc=${npcId}, trigger=${trigger}, cameraModeBefore=${this.cameraManager.getCurrentMode()}`)
       this.cameraManager.enterBattleMode(this.playerController.getPosition(), npc.position)
     }
 
@@ -232,6 +251,8 @@ export class BattleSystem {
     try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.18) } catch (_) {}
 
     if (this.enemyHP <= 0) {
+      this.npcSystem.defeatNPC(npc.id)
+      this.aiSystem.disengageFromPlayer(npc.id)
       this.phase = 'ended'
       this.statusText = `You hit ${npc.id} for ${damage}. ${npc.id} is defeated.`
       this.renderBattleOverlay()
@@ -281,7 +302,8 @@ export class BattleSystem {
 
     const resolvedNpcId = this.activeNpcId
     if (applyCooldown && resolvedNpcId) {
-      this.recentBattleCooldowns.set(resolvedNpcId, performance.now() + this.recentBattleCooldownMs)
+      this.npcSystem.setInteractionCooldown(resolvedNpcId, this.recentBattleCooldownMs)
+      this.aiSystem.disengageFromPlayer(resolvedNpcId)
     }
 
     this.isActive = false
@@ -290,8 +312,10 @@ export class BattleSystem {
     this.highlightedActionIndex = 0
     this.guardActive = false
 
+    this.restorePlayerPositionAfterBattle()
     this.playerController?.clearForcedFacingTarget()
     this.hideBattleOverlay()
+    console.log(`⚔️ Battle end: npc=${resolvedNpcId ?? 'none'}, applyCooldown=${applyCooldown}, cameraModeBeforeExit=${this.cameraManager?.getCurrentMode() ?? 'none'}`)
     this.cameraManager?.exitBattleMode()
   }
 
@@ -308,6 +332,43 @@ export class BattleSystem {
     if (toPlayer.lengthSq() > 0.0001) {
       npc.rotation = Math.atan2(toPlayer.x, toPlayer.z)
     }
+  }
+
+  private stageBattlePositions(npc: NPCInstance): void {
+    if (!this.playerController || this.stagedPlayerStartPosition) return
+
+    const currentPlayerPos = this.playerController.getPosition()
+    const pushDir = currentPlayerPos.clone().sub(npc.position)
+    pushDir.y = 0
+
+    if (pushDir.lengthSq() < 0.0001) {
+      pushDir.set(0, 0, 1)
+    } else {
+      pushDir.normalize()
+    }
+
+    const stagedPosition = currentPlayerPos.clone().addScaledVector(pushDir, 1.75)
+    stagedPosition.y = currentPlayerPos.y
+
+    this.stagedPlayerStartPosition = currentPlayerPos.clone()
+    this.playerController.setPosition(stagedPosition)
+
+    console.log(
+      `⚔️ Battle staging: player moved from (${currentPlayerPos.x.toFixed(2)}, ${currentPlayerPos.y.toFixed(2)}, ${currentPlayerPos.z.toFixed(2)}) ` +
+      `to (${stagedPosition.x.toFixed(2)}, ${stagedPosition.y.toFixed(2)}, ${stagedPosition.z.toFixed(2)}) while NPC stayed at ` +
+      `(${npc.position.x.toFixed(2)}, ${npc.position.y.toFixed(2)}, ${npc.position.z.toFixed(2)})`
+    )
+  }
+
+  private restorePlayerPositionAfterBattle(): void {
+    if (!this.playerController || !this.stagedPlayerStartPosition) return
+
+    const restorePosition = this.stagedPlayerStartPosition.clone()
+    this.stagedPlayerStartPosition = null
+    this.playerController.setPosition(restorePosition)
+    console.log(
+      `⚔️ Battle restore: player returned to (${restorePosition.x.toFixed(2)}, ${restorePosition.y.toFixed(2)}, ${restorePosition.z.toFixed(2)})`
+    )
   }
 
   private handleKey(e: KeyboardEvent): void {
@@ -469,17 +530,5 @@ export class BattleSystem {
   private clearPromptState(): void {
     this.nearestBattleNpc = null
     this.hidePromptOverlay()
-  }
-
-  private pruneRecentCooldowns(): void {
-    const now = performance.now()
-    for (const [npcId, expiresAt] of this.recentBattleCooldowns.entries()) {
-      if (expiresAt <= now) this.recentBattleCooldowns.delete(npcId)
-    }
-  }
-
-  private isNPCOnCooldown(npcId: string): boolean {
-    const expiresAt = this.recentBattleCooldowns.get(npcId)
-    return expiresAt !== undefined && expiresAt > performance.now()
   }
 }
