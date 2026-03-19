@@ -16,7 +16,7 @@ import { ParameterManager } from './systems/ParameterManager'
 import { ParameterGUI } from './systems/ParameterGUI'
 import { ParameterIntegration } from './systems/ParameterIntegration'
 import { logger, LogModule } from './systems/Logger'
-import { performanceMonitor } from './systems/PerformanceMonitor'
+import { performanceMonitor, adaptiveQuality, QualityTier, QualitySettings } from './systems/PerformanceMonitor'
 import { DebugGUIManager } from './systems/DebugGUIManager'
 import { HUDSystem, HUDData } from './systems/HUDSystem'
 import { InputSystem, GamepadInputHandler } from './systems/InputSystem'
@@ -757,6 +757,7 @@ enum DeviceType {
 }
 
 type InputMethod = 'touch' | 'mouse' | 'keyboard'
+type ActiveInputMode = InputMethod | 'gamepad'
 type QualityPreset = 'ultra' | 'high' | 'medium' | 'low' | 'potato'
 
 interface AnimationConfig {
@@ -846,6 +847,7 @@ class IntegratedThreeJSApp {
   private landSystem: LandSystem | null = null
   private deviceType: DeviceType
   private inputMethods: InputMethod[]
+  private activeInputMode: ActiveInputMode
   
   // Unified management systems
   private objectManager!: ObjectManager
@@ -881,6 +883,17 @@ class IntegratedThreeJSApp {
   private lastPauseToggleTime: number = 0
   private pauseToggleCooldownMs: number = 250
   private gameplayInputEnabled: boolean = false
+  private mobileButtons: {
+    confirm: HTMLButtonElement | null
+    attack: HTMLButtonElement | null
+    escape: HTMLButtonElement | null
+    start: HTMLButtonElement | null
+  } = {
+    confirm: null,
+    attack: null,
+    escape: null,
+    start: null,  // IC pause button (upper-left)
+  }
   
   // Lighting references for dynamic control
   private ambientLight!: THREE.AmbientLight
@@ -933,6 +946,7 @@ class IntegratedThreeJSApp {
   ) {
     this.deviceType = this.detectDeviceType()
     this.inputMethods = this.detectInputMethods()
+    this.activeInputMode = this.inputMethods.includes('touch') ? 'touch' : 'keyboard'
     this.animationSystem = new AnimationSystem()
     
     // Initialize management systems (scene will be initialized in init())
@@ -1005,6 +1019,9 @@ class IntegratedThreeJSApp {
     // Initialize gamepad handler and connect to player controller
     this.gamepadHandler = this.inputSystem.createGamepadHandler((input) => {
       if (!this.gameplayInputEnabled) return
+      if (this.isGamepadInputActive(input)) {
+        this.setActiveInputMode('gamepad')
+      }
       this.playerController.handleGamepadInput(input)
       
       // Handle menu/pause button (start button)
@@ -1064,6 +1081,9 @@ class IntegratedThreeJSApp {
     // NPC crowd system — spawn 33 NPCs after animations are registered
     this.initNPCSystem()
     
+    // Configure adaptive quality system
+    adaptiveQuality.setCallback((tier, settings) => this.applyQualitySettings(tier, settings))
+
     // Mark as initialized
     this.isInitialized = true
     console.log('✅ Game initialization complete')
@@ -1178,6 +1198,7 @@ class IntegratedThreeJSApp {
         this.characterAnimationSystem,
       )
       this.dialogueManager.setCameraManager(this.cameraManager)
+      this.dialogueManager.setInputMode(this.activeInputMode)
       this.dialogueManager.enable()
 
       this.battleSystem = new BattleSystem(
@@ -1188,7 +1209,17 @@ class IntegratedThreeJSApp {
       this.battleSystem.setCameraManager(this.cameraManager)
       this.battleSystem.setDialogueManager(this.dialogueManager)
       this.battleSystem.setPlayerController(this.playerController)
+      this.battleSystem.setInputMode(this.activeInputMode)
       this.battleSystem.enable()
+
+      window.addEventListener('dialogue-to-battle', (event: Event) => {
+        const customEvent = event as CustomEvent<{ npcId: string }>
+        const npcId = customEvent.detail?.npcId
+        if (!npcId) return
+        this.battleSystem?.consumePendingScriptedBattle(npcId)
+      })
+
+      this.refreshMobileControlState()
 
       // Link dialogue system to player controller for contextual action button
       this.playerController.setDialogueManager(this.dialogueManager)
@@ -1219,8 +1250,8 @@ class IntegratedThreeJSApp {
             DialogueManager.choice('Easy. I am just passing through.', 'stand-down'),
             DialogueManager.choice('Back off, or I will make you.', undefined, undefined, () => {
               this.npcSystem!.setHostile(npc.id, true)
+              this.dialogueManager!.queueBattleAfterDialogue(npc.id)
               this.dialogueManager!.endDialogue()
-              this.battleSystem!.startScriptedBattle(npc.id)
             }),
             DialogueManager.choice('What do you want from me?', 'challenge'),
           ]),
@@ -1228,8 +1259,8 @@ class IntegratedThreeJSApp {
             DialogueManager.choice('No trouble. I am leaving.', 'stand-down'),
             DialogueManager.choice('Try it.', undefined, undefined, () => {
               this.npcSystem!.setHostile(npc.id, true)
+              this.dialogueManager!.queueBattleAfterDialogue(npc.id)
               this.dialogueManager!.endDialogue()
-              this.battleSystem!.startScriptedBattle(npc.id)
             }),
           ]),
           DialogueManager.node('stand-down', 'Then move. I will give you a few seconds before I reconsider.', [], {
@@ -2133,17 +2164,6 @@ class IntegratedThreeJSApp {
     this.cameraManager.switchCamera('thirdperson', true)
     this.playerController.setDebugVisible(false)
     
-    // Keep only menu/pause keyboard binding.
-    document.addEventListener('keydown', (event) => {
-      if (!this.gameplayInputEnabled) return
-      // Enter/Return key - Menu/Pause (only when overlay is NOT already shown,
-      // to avoid double-toggling; PauseOverlay handles its own Enter key)
-      if ((event.code === 'Enter' || event.code === 'NumpadEnter') && !this.pauseOverlay.isVisible()) {
-        console.log('🎮 Menu/Pause button pressed')
-        this.togglePause()
-      }
-    })
-    
     // Set initial debug visibility for player
     if (this.debugState.active) {
       this.playerController.setDebugVisible(true)
@@ -2156,16 +2176,18 @@ class IntegratedThreeJSApp {
   }
 
   /**
-   * Create mobile touch action buttons:
-   * - Camera (upper-left): cycle gameplay camera modes
+  * Create mobile touch action buttons:
   * - A (lower-right): confirm / contextual action
-   * - Crossbow (right-mid): trigger battle when near an NPC
-    * - Flee/Grab (left-mid): flee from target (ranged) or grab target (melee)
-   * - Start (bottom-center): toggle pause menu
+  * - B (right-middle): engage / attack
+  * - Start (bottom-center): toggle pause menu
    */
   private createMobileActionButtons(): void {
     // Only show on touch devices
     if (!('ontouchstart' in window)) return
+
+    const staleEscapeBtn = document.getElementById('mobile-escape-btn')
+    if (staleEscapeBtn) staleEscapeBtn.remove()
+    this.mobileButtons.escape = null
 
     const touchControlScale = 0.85
     const scaleSize = (value: number): number => Math.max(1, Math.round(value * touchControlScale))
@@ -2235,7 +2257,7 @@ class IntegratedThreeJSApp {
       }
     }
 
-    // Jump button A (lower-right)
+    // Confirm button A (lower-right)
     const jumpBtn = createButton(
       'mobile-jump-btn',
       'A',
@@ -2250,11 +2272,12 @@ class IntegratedThreeJSApp {
     }, () => {
       setJumpPressed(false)
     })
+    this.mobileButtons.confirm = jumpBtn
 
-    // Crossbow battle button (right-middle)
+    // Engage / attack button B (right-middle)
     const rangedBtn = createButton(
       'mobile-ranged-btn',
-      '🏹',
+      'B',
       `right: ${scaleSize(20)}px; bottom: ${scaleSize(92)}px;`
     )
     const setAttackPressed = (pressed: boolean): void => {
@@ -2267,42 +2290,47 @@ class IntegratedThreeJSApp {
     }, () => {
       setAttackPressed(false)
     })
+    this.mobileButtons.attack = rangedBtn
 
-    // Flee/Grab action button (left-middle)
-    const actionBtn = createButton(
-      'mobile-action-btn',
-      '↯',
-      `left: ${scaleSize(20)}px; bottom: ${scaleSize(92)}px;`
-    )
-    bindPress(actionBtn, () => {
-      actionBtn.style.background = 'rgba(255,255,255,0.25)'
-      if (this.battleSystem?.isBattleActive()) {
-        this.battleSystem.handleEscapeInput()
-      } else if (this.playerController.isRangedModeEnabled()) {
-        this.playerController.triggerFleeFromCurrentTarget()
-      } else {
-        this.playerController.triggerGrabCurrentTarget()
-      }
-    }, () => {
-      actionBtn.style.background = 'rgba(0,0,0,0.45)'
-    })
-
-    // Start button (center-bottom) for pause toggle
-    const startBtn = createButton(
-      'mobile-start-btn',
-      'START',
-      `left: 50%; bottom: ${scaleSize(20)}px; transform: translateX(-50%); width: ${scaleSize(88)}px; border-radius: ${scaleSize(18)}px; font-size: ${scaleSize(12)}px;`
-    )
+    // IC logo button (upper-left) for pause toggle
+    const existingStart = document.getElementById('mobile-start-btn')
+    if (existingStart) existingStart.remove()
+    const startBtn = document.createElement('button')
+    startBtn.id = 'mobile-start-btn'
+    startBtn.textContent = 'IC'
+    startBtn.style.cssText = `
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: rgba(255,255,255,0.5);
+      font-family: 'Storm Gust', serif;
+      font-size: 36px;
+      letter-spacing: 2px;
+      z-index: 12000;
+      pointer-events: auto;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+      text-shadow:
+        1px 1px 2px rgba(0,0,0,0.9),
+        -1px -1px 2px rgba(255,255,255,0.85);
+    `
+    document.body.appendChild(startBtn)
     bindPress(startBtn, () => {
-      startBtn.style.background = 'rgba(255,255,255,0.25)'
-      if (this.battleSystem?.isBattleActive()) {
-        this.battleSystem.handleEscapeInput()
-      } else {
-        this.togglePause()
-      }
+      startBtn.style.opacity = '0.8'
+      this.togglePause()
     }, () => {
-      startBtn.style.background = 'rgba(0,0,0,0.45)'
+      startBtn.style.opacity = '1'
     })
+    this.mobileButtons.start = startBtn
+
+    this.refreshMobileControlState()
   }
 
   /**
@@ -2748,11 +2776,18 @@ class IntegratedThreeJSApp {
     
     // Click handler for objects
     this.renderer.domElement.addEventListener('click', this.onCanvasClick.bind(this))
+    this.renderer.domElement.addEventListener('pointerdown', (event) => {
+      this.setActiveInputMode(event.pointerType === 'touch' ? 'touch' : 'mouse')
+    })
+    this.renderer.domElement.addEventListener('touchstart', () => {
+      this.setActiveInputMode('touch')
+    }, { passive: true })
     // Double-click handler for freeview mesh selection & zoom
     this.renderer.domElement.addEventListener('dblclick', this.onCanvasDblClick.bind(this))
     
     // Keyboard shortcuts
     document.addEventListener('keydown', (event) => {
+      this.setActiveInputMode('keyboard')
       switch (event.key.toLowerCase()) {
         case 'd':
           if (event.ctrlKey || event.metaKey) {
@@ -2793,6 +2828,42 @@ class IntegratedThreeJSApp {
     if (newDeviceType !== this.deviceType) {
       this.deviceType = newDeviceType
       this.adjustCameraForDevice()
+    }
+  }
+
+  private applyQualitySettings(_tier: QualityTier, settings: QualitySettings): void {
+    // Pixel ratio
+    this.renderer.setPixelRatio(settings.pixelRatio)
+
+    // Shadow map size & type
+    if (this.keyLight?.shadow) {
+      this.keyLight.shadow.mapSize.width = settings.shadowMapSize
+      this.keyLight.shadow.mapSize.height = settings.shadowMapSize
+      // Force Three.js to regenerate the shadow map at the new size
+      if (this.keyLight.shadow.map) {
+        this.keyLight.shadow.map.dispose()
+        this.keyLight.shadow.map = null as any
+      }
+    }
+    this.renderer.shadowMap.type = settings.shadowMapType as THREE.ShadowMapType
+    this.renderer.shadowMap.needsUpdate = true
+
+    // Post-processing resolution
+    if (this.retroPostProcessing) {
+      this.retroPostProcessing.setResolutionScale(settings.resolutionScale)
+    }
+
+    // Fog distance
+    if (this.scene.fog instanceof THREE.Fog) {
+      this.scene.fog.far = settings.fogFar
+    }
+
+    // Shadow casting on environment meshes
+    if (this.oceanLODSystem) {
+      this.oceanLODSystem.setOceanShadowCasting(settings.shadowsCast)
+    }
+    if (this.landSystem) {
+      this.landSystem.setLandShadowCasting(settings.shadowsCast)
     }
   }
 
@@ -3128,6 +3199,7 @@ class IntegratedThreeJSApp {
         if (this.battleSystem) {
           this.battleSystem.update(this.playerController.getPosition())
         }
+        this.refreshMobileControlState()
       } catch (e) {
         // Prevent NPC errors from freezing the game loop
         console.warn('NPC update error:', e)
@@ -3233,9 +3305,62 @@ class IntegratedThreeJSApp {
       // End render timing and performance monitoring
       performanceMonitor.endRender()
       performanceMonitor.endFrame()
+
+      // Adaptive quality — feed current FPS
+      const instantFps = deltaTime > 0 ? 1 / deltaTime : 60
+      adaptiveQuality.update(instantFps)
     }
     
     animate(performance.now())
+  }
+
+  private isGamepadInputActive(input: {
+    movement: THREE.Vector2
+    camera: THREE.Vector2
+    jump: boolean
+    run: boolean
+    action: boolean
+    cancel: boolean
+    cameraMode: boolean
+    select: boolean
+    menu: boolean
+  }): boolean {
+    return (
+      input.movement.lengthSq() > 0.0001 ||
+      input.camera.lengthSq() > 0.0001 ||
+      input.jump ||
+      input.run ||
+      input.action ||
+      input.cancel ||
+      input.cameraMode ||
+      input.select ||
+      input.menu
+    )
+  }
+
+  private setActiveInputMode(mode: ActiveInputMode): void {
+    if (this.activeInputMode === mode) return
+    this.activeInputMode = mode
+    this.dialogueManager?.setInputMode(mode)
+    this.battleSystem?.setInputMode(mode)
+    this.refreshMobileControlState()
+  }
+
+  private refreshMobileControlState(): void {
+    if (!this.mobileButtons.start) return
+
+    const touchUiVisible = this.inputMethods.includes('touch')
+
+    // IC pause button — always visible on touch devices
+    if (this.mobileButtons.start) {
+      this.mobileButtons.start.style.display = touchUiVisible ? 'block' : 'none'
+      this.mobileButtons.start.title = 'Pause'
+    }
+
+    // Legacy A/B/ESC buttons are removed; ensure they stay hidden
+    if (this.mobileButtons.confirm) this.mobileButtons.confirm.style.display = 'none'
+    if (this.mobileButtons.attack) this.mobileButtons.attack.style.display = 'none'
+    if (this.mobileButtons.escape) this.mobileButtons.escape.style.display = 'none'
   }
 
   // Legacy methods moved to ConsoleCommands module for better organization
@@ -3389,7 +3514,16 @@ class IntegratedThreeJSApp {
       
       // Performance
       triangles: renderInfo.render.triangles,
-      drawCalls: renderInfo.render.calls
+      drawCalls: renderInfo.render.calls,
+
+      // Adaptive quality telemetry (debug-only)
+      ...(this.debugState.active ? (() => {
+        const qt = adaptiveQuality.getTelemetry()
+        return {
+          qualityTier: `${qt.currentTier.toUpperCase()}${qt.lockedTier ? ' (LOCKED)' : ''}`,
+          qualityFpsRange: `${qt.minFps}–${qt.maxFps}`,
+        }
+      })() : {}),
     }
     
     // Update HUD

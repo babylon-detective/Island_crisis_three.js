@@ -55,7 +55,6 @@ export class TitleScreen {
         <div class="menu-item hub" id="menu-hub">GAME HUB</div>
       </div>
       <div class="loading-text">Loading...</div>
-      <div class="controls-hint">D-pad / Arrows to navigate • A / Enter to select • B / Esc for Hub</div>
     `
     
     document.body.appendChild(this.container)

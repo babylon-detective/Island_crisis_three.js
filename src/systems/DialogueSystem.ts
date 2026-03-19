@@ -5,6 +5,8 @@ import { CharacterAnimationSystem } from './CharacterAnimationSystem'
 import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
 
+type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
+
 // ============================================================================
 // DIALOGUE TREE — data-driven conversation system
 //
@@ -107,12 +109,15 @@ export class DialogueManager {
 
   // — built-in dialogue overlay DOM —
   private overlayRoot: HTMLDivElement | null = null
+  private overlayBox: HTMLDivElement | null = null
   private overlayPrompt: HTMLDivElement | null = null
   private overlaySpeaker: HTMLDivElement | null = null
   private overlayText: HTMLDivElement | null = null
   private overlayChoices: HTMLDivElement | null = null
   private currentVisibleChoices: DialogueChoice[] = []
   private highlightedChoiceIndex: number = 0
+  private inputMode: ActiveInputMode = 'keyboard'
+  private pendingBattleNpcId: string | null = null
 
   constructor(
     npcSystem: NPCSystem,
@@ -137,6 +142,17 @@ export class DialogueManager {
   /** Provide UI callbacks so the dialogue system can show/hide prompts. */
   setUICallbacks(callbacks: DialogueUICallbacks): void {
     this.uiCallbacks = callbacks
+  }
+
+  setInputMode(mode: ActiveInputMode): void {
+    this.inputMode = mode
+    this.applyOverlayLayout()
+    if (this.promptVisible && this.nearestInteractableNpc) {
+      this.showPromptOverlay(this.getInteractionPromptText(this.nearestInteractableNpc))
+    }
+    if (this.isActive) {
+      this.refreshOverlayContent()
+    }
   }
 
   /** Start listening for interaction key (E). */
@@ -213,7 +229,7 @@ export class DialogueManager {
     if (closest) {
       if (this.nearestInteractableNpc !== closest.id) {
         this.nearestInteractableNpc = closest.id
-        const promptText = `Press Space to talk to ${closest.id}`
+        const promptText = this.getInteractionPromptText(closest.id)
         this.uiCallbacks?.showPrompt(promptText)
         this.showPromptOverlay(promptText)
         this.promptVisible = true
@@ -233,16 +249,9 @@ export class DialogueManager {
   // --------------------------------------------------------------------------
 
   private handleKey(e: KeyboardEvent): void {
-    // E starts dialogue when near an NPC (keyboard fallback)
-    if (e.code === 'KeyE' && !this.isActive && this.nearestInteractableNpc) {
-      e.preventDefault()
-      this.startDialogue(this.nearestInteractableNpc)
-      return
-    }
-
     if (!this.isActive) return
 
-    // During active dialogue: arrow/WASD to cycle choices, number keys to pick directly
+    // During active dialogue: WASD / arrows move the highlighted choice
     if (e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault()
       this.cycleChoice(-1)
@@ -286,6 +295,16 @@ export class DialogueManager {
         el.textContent = el.textContent?.replace(/^▶ /, '') ?? ''
       }
     }
+  }
+
+  public getChoiceCount(): number {
+    return this.currentVisibleChoices.length
+  }
+
+  public setHighlightedChoice(index: number): void {
+    if (this.currentVisibleChoices.length === 0) return
+    this.highlightedChoiceIndex = Math.max(0, Math.min(index, this.currentVisibleChoices.length - 1))
+    this.updateChoiceHighlight()
   }
 
   // --------------------------------------------------------------------------
@@ -412,6 +431,20 @@ export class DialogueManager {
     this.activeTree = null
     this.activeNodeId = null
     this.activeNpcId = null
+
+    const pendingBattleNpcId = this.pendingBattleNpcId
+    this.pendingBattleNpcId = null
+    if (pendingBattleNpcId) {
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('dialogue-to-battle', {
+          detail: { npcId: pendingBattleNpcId },
+        }))
+      }, 320)
+    }
+  }
+
+  queueBattleAfterDialogue(npcId: string): void {
+    this.pendingBattleNpcId = npcId
   }
 
   /** Whether a dialogue is currently in progress. */
@@ -504,7 +537,7 @@ export class DialogueManager {
     this.overlayRoot = document.createElement('div')
     this.overlayRoot.id = 'dialogue-overlay'
     this.overlayRoot.style.cssText =
-      'position:fixed;inset:0;z-index:9999;pointer-events:none;display:none;' +
+      'position:fixed;inset:0;z-index:12100;pointer-events:none;display:none;' +
       'font-family:"Courier New",monospace;'
 
     // Prompt bubble ("Press Space to talk")
@@ -522,6 +555,7 @@ export class DialogueManager {
       'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
       'padding:24px 32px 32px;display:none;pointer-events:auto;'
     dialogueBox.id = 'dialogue-box'
+    this.overlayBox = dialogueBox
     this.overlayRoot.appendChild(dialogueBox)
 
     // Speaker name
@@ -542,13 +576,118 @@ export class DialogueManager {
     dialogueBox.appendChild(this.overlayChoices)
 
     document.body.appendChild(this.overlayRoot)
+    this.applyOverlayLayout()
+  }
+
+  private isTouchInputMode(): boolean {
+    return this.inputMode === 'touch'
+  }
+
+  private getInteractionPromptText(npcId: string): string {
+    switch (this.inputMode) {
+      case 'touch':
+        return `TALK`
+      case 'gamepad':
+        return `A • Talk to ${npcId}`
+      default:
+        return `Press K to talk to ${npcId}`
+    }
+  }
+
+  private getContinueHintText(): string {
+    switch (this.inputMode) {
+      case 'touch':
+        return '[Tap to continue]'
+      case 'gamepad':
+        return '[Press A to continue]'
+      default:
+        return '[Press K / Return to continue]'
+    }
+  }
+
+  private applyOverlayLayout(): void {
+    if (!this.overlayRoot || !this.overlayPrompt || !this.overlayBox || !this.overlayText || !this.overlayChoices) return
+
+    if (this.isTouchInputMode()) {
+      this.overlayPrompt.style.cssText =
+        'position:absolute;left:50%;bottom:calc(100px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);' +
+        'color:rgba(255,255,255,0.85);font-size:22px;letter-spacing:3px;white-space:nowrap;display:none;pointer-events:auto;' +
+        'text-align:center;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;' +
+        'border:none;padding:10px 32px;cursor:pointer;touch-action:manipulation;'
+
+      this.overlayBox.style.cssText =
+        'position:absolute;left:16px;right:16px;bottom:calc(48px + env(safe-area-inset-bottom, 0px));' +
+        'display:none;pointer-events:auto;background:transparent;padding:0;'
+
+      this.overlayText.style.cssText =
+        'color:#eefcff;font-size:18px;line-height:1.5;margin-bottom:14px;max-width:none;text-shadow:0 0 16px rgba(0,0,0,0.92);'
+
+      this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
+    } else {
+      this.overlayPrompt.style.cssText =
+        'position:absolute;bottom:120px;left:50%;transform:translateX(-50%);' +
+        'background:rgba(0,0,0,0.55);color:#fff;padding:8px 20px;border-radius:6px;' +
+        'font-size:14px;letter-spacing:1px;white-space:nowrap;display:none;pointer-events:none;'
+
+      this.overlayBox.style.cssText =
+        'position:absolute;bottom:0;left:0;right:0;' +
+        'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+        'padding:24px 32px 32px;display:none;pointer-events:auto;'
+
+      this.overlayText.style.cssText =
+        'color:#eee;font-size:18px;line-height:1.5;margin-bottom:16px;max-width:700px;'
+
+      this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
+    }
+  }
+
+  private refreshOverlayContent(): void {
+    if (!this.activeTree || !this.activeNodeId) return
+    const node = this.activeTree.nodes.get(this.activeNodeId)
+    if (!node) return
+
+    const visibleChoices = node.choices
+      .map((choice, index) => ({ text: choice.text, index }))
+      .filter(choice => {
+        const original = node.choices[choice.index]
+        return !original.condition || original.condition()
+      })
+
+    const speaker = node.speaker ?? this.activeNpcId ?? 'NPC'
+    this.showDialogueOverlay(speaker, node.text, visibleChoices)
   }
 
   private showPromptOverlay(text: string): void {
     if (!this.overlayRoot || !this.overlayPrompt) return
+    this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
     this.overlayPrompt.style.display = 'block'
     this.overlayPrompt.textContent = text
+
+    // Touch mode: make prompt a clickable text bar that starts dialogue directly
+    if (this.isTouchInputMode()) {
+      this.overlayPrompt.style.pointerEvents = 'auto'
+      this.overlayPrompt.style.cursor = 'pointer'
+      this.overlayPrompt.style.touchAction = 'manipulation'
+      this.overlayPrompt.ontouchend = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (this.nearestInteractableNpc && !this.isActive) {
+          this.startDialogue(this.nearestInteractableNpc)
+        }
+      }
+      this.overlayPrompt.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (this.nearestInteractableNpc && !this.isActive) {
+          this.startDialogue(this.nearestInteractableNpc)
+        }
+      }
+    } else {
+      this.overlayPrompt.style.pointerEvents = 'none'
+      this.overlayPrompt.ontouchend = null
+      this.overlayPrompt.onclick = null
+    }
   }
 
   private hidePromptOverlay(): void {
@@ -558,9 +697,9 @@ export class DialogueManager {
 
   private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number }[]): void {
     if (!this.overlayRoot) return
+    this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
-    const dialogueBox = document.getElementById('dialogue-box') as HTMLDivElement | null
-    if (dialogueBox) dialogueBox.style.display = 'block'
+    if (this.overlayBox) this.overlayBox.style.display = 'block'
     if (this.overlaySpeaker) this.overlaySpeaker.textContent = speaker
     if (this.overlayText) this.overlayText.textContent = text
     if (this.overlayChoices) {
@@ -570,26 +709,59 @@ export class DialogueManager {
         const btn = document.createElement('div')
         btn.textContent = `${isHighlighted ? '▶ ' : ''}${c.index + 1}. ${c.text}`
         btn.style.cssText =
-          `color:${isHighlighted ? '#ffd866' : '#aee'};cursor:pointer;padding:4px 0;font-size:15px;transition:color 0.15s;`
-        btn.addEventListener('mouseenter', () => { btn.style.color = '#ffd866' })
+          `color:${isHighlighted ? '#ffd866' : '#aee'};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 4px' : '4px 0'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
+        btn.addEventListener('mouseenter', () => {
+          this.highlightedChoiceIndex = c.index
+          this.updateChoiceHighlight()
+        })
         btn.addEventListener('mouseleave', () => {
           btn.style.color = c.index === this.highlightedChoiceIndex ? '#ffd866' : '#aee'
         })
-        btn.addEventListener('click', () => { this.selectChoice(c.index) })
+        btn.addEventListener('pointerdown', (event) => {
+          if (this.inputMode === 'touch' || (event as PointerEvent).pointerType === 'touch') {
+            event.preventDefault()
+            this.highlightedChoiceIndex = c.index
+            this.updateChoiceHighlight()
+          }
+        })
+        btn.addEventListener('touchend', (event) => {
+          event.preventDefault()
+          // On touch: directly select the choice (tap-to-execute)
+          this.highlightedChoiceIndex = c.index
+          this.selectChoice(c.index)
+        }, { passive: false })
+        btn.addEventListener('click', (event) => {
+          if (this.isTouchInputMode()) {
+            event.preventDefault()
+            // Tap already handled by touchend
+            return
+          }
+          this.selectChoice(c.index)
+        })
         this.overlayChoices!.appendChild(btn)
       }
       if (choices.length === 0) {
         const hint = document.createElement('div')
-        hint.textContent = '[Press Space to continue]'
-        hint.style.cssText = 'color:#888;font-size:13px;margin-top:4px;'
+        hint.textContent = this.getContinueHintText()
+        hint.style.cssText = 'color:#b9d0d8;font-size:13px;margin-top:4px;text-shadow:0 0 12px rgba(0,0,0,0.85);'
+        if (this.isTouchInputMode()) {
+          hint.style.pointerEvents = 'auto'
+          hint.style.cursor = 'pointer'
+          hint.style.padding = '12px 24px'
+          hint.style.touchAction = 'manipulation'
+          hint.addEventListener('touchend', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            this.endDialogue()
+          })
+        }
         this.overlayChoices.appendChild(hint)
       }
     }
   }
 
   private hideDialogueOverlay(): void {
-    const dialogueBox = document.getElementById('dialogue-box') as HTMLDivElement | null
-    if (dialogueBox) dialogueBox.style.display = 'none'
+    if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
   }
 }

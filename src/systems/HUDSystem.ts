@@ -57,6 +57,10 @@ export interface HUDData {
   // Performance
   triangles: number
   drawCalls: number
+
+  // Adaptive quality (debug-only)
+  qualityTier?: string
+  qualityFpsRange?: string
 }
 
 export class HUDSystem {
@@ -134,6 +138,8 @@ export class HUDSystem {
     // System info panel
     this.elements.systemInfo = this.createPanel('system-info', 'System Info', [
       { id: 'fps', label: 'FPS', value: '60' },
+      { id: 'quality', label: 'Quality', value: '-' },
+      { id: 'quality-range', label: 'FPS Range', value: '-' },
       { id: 'mode', label: 'Mode', value: 'Normal' },
       { id: 'triangles', label: 'Triangles', value: '0' },
       { id: 'draw-calls', label: 'Draw Calls', value: '0' }
@@ -486,6 +492,19 @@ export class HUDSystem {
       if (this.data.fps < 30) fpsClass = 'critical'
       else if (this.data.fps < 50) fpsClass = 'warning'
       this.updateElement('fps', this.data.fps.toFixed(0), fpsClass)
+    }
+
+    // Adaptive quality telemetry (only populated in debug mode)
+    if (this.data.qualityTier) {
+      const tier = this.data.qualityTier
+      let tierClass = ''
+      if (tier.startsWith('LOW')) tierClass = 'critical'
+      else if (tier.startsWith('MEDIUM')) tierClass = 'warning'
+      else tierClass = 'good'
+      this.updateElement('quality', tier, tierClass)
+    }
+    if (this.data.qualityFpsRange) {
+      this.updateElement('quality-range', this.data.qualityFpsRange)
     }
     
     if (this.data.mode) {

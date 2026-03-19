@@ -1,3 +1,13 @@
+@font-face {
+  font-family: 'Storm Gust';
+  src:
+    url('/fonts/storm_gust/Storm%20Gust.otf') format('opentype'),
+    url('/fonts/storm_gust/Storm%20Gust.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 html, body {
   width: 100%;
   height: 100%;

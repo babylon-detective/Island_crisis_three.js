@@ -13,9 +13,9 @@ type InputEventType =
 // Xbox controller button mapping
 interface GamepadState {
   buttons: {
-    a: boolean          // 0 - Jump
-    b: boolean          // 1 - Run/Sprint
-    x: boolean          // 2 - Action
+    a: boolean          // 0 - Confirm / Jump
+    b: boolean          // 1 - Cancel / Back
+    x: boolean          // 2 - Action / Attack
     y: boolean          // 3 - Camera mode
     lb: boolean         // 4 - Left bumper
     rb: boolean         // 5 - Right bumper
@@ -289,6 +289,7 @@ class GamepadInputHandler extends BaseInputHandler {
       jump: boolean
       run: boolean
       action: boolean
+      cancel: boolean
       cameraMode: boolean
       select: boolean
       menu: boolean
@@ -328,6 +329,7 @@ class GamepadInputHandler extends BaseInputHandler {
     const jump = gamepad.buttons.a
     const run = gamepad.buttons.ls // Hold left stick (L3) to run (like SHIFT on keyboard)
     const action = gamepad.buttons.x
+    const cancel = this.wasButtonPressed('b', gamepad)
     const cameraMode = this.wasButtonPressed('rs', gamepad) // Right stick (R3) to toggle camera (like C key)
     const select = this.wasButtonPressed('select', gamepad) // Select/Back button for view cycle
     const menu = this.wasButtonPressed('start', gamepad) // Start button for menu/pause
@@ -340,6 +342,7 @@ class GamepadInputHandler extends BaseInputHandler {
         jump,
         run,
         action,
+        cancel,
         cameraMode,
         select,
         menu
@@ -742,6 +745,7 @@ export class InputSystem {
       jump: boolean
       run: boolean
       action: boolean
+      cancel: boolean
       cameraMode: boolean
       select: boolean
       menu: boolean

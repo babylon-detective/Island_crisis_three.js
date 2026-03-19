@@ -3,7 +3,7 @@ import { ObjectManager } from './ObjectManager'
 import { AnimationSystem } from './AnimationSystem'
 import { ConfigManager } from './ConfigManager'
 import { logger, LogModule, LogLevel } from './Logger'
-import { performanceMonitor } from './PerformanceMonitor'
+import { performanceMonitor, adaptiveQuality } from './PerformanceMonitor'
 
 
 // Interface for the main app reference
@@ -436,7 +436,7 @@ export class ConsoleCommands {
   // CAMERA MANAGER COMMANDS (New System)
   // ============================================================================
 
-  public switchCamera(mode: 'system' | 'player' = 'system'): void {
+  public switchCamera(mode: 'thirdperson' | 'dialogue' | 'battle' | 'freeview' = 'thirdperson'): void {
     if ((this.app as any).cameraManager) {
       const cameraManager = (this.app as any).cameraManager
       cameraManager.switchCamera(mode)
@@ -910,8 +910,8 @@ export class ConsoleCommands {
 - setCameraPosition(x, y, z, tx, ty, tz) - Move camera + set target
 - getCameraState()                 - Show current camera state
 
-📷 CAMERA MANAGER (New System):
-- switchCamera('system'/'player')  - Switch between camera modes
+📷 CAMERA MANAGER:
+- switchCamera('thirdperson'/'dialogue'/'battle'/'freeview')  - Switch camera mode
 - getCameraMode()                  - Get current camera mode
 - getCameraInfo()                  - Show detailed camera info
 
@@ -957,6 +957,9 @@ export class ConsoleCommands {
 - migrateToObjectManager()         - Migrate legacy objects
 - getPerformanceStats()            - Get performance data
 - printPerformanceStats()          - Print performance stats
+- setQuality(tier)                 - Lock quality tier (low/medium/high/ultra)
+- autoQuality()                    - Re-enable adaptive quality
+- getQuality()                     - Show current quality tier & FPS telemetry
 
 🌊 OCEAN SYSTEM:
 - resetOcean()                     - Reset ocean positions
@@ -990,14 +993,14 @@ export class ConsoleCommands {
 - lookAtObject('animated-0')        // Point camera at object
 - setCameraPosition(10, 5, 10)     // Move camera
 - setCameraPosition(10, 5, 10, 0, 0, 0) // Move camera, look at origin
-- switchCamera('player')            // Switch to player camera
+- switchCamera('thirdperson')        // Switch to third-person camera
 - setPlayerPosition(0, 10, 0)       // Move player
 - togglePlayerDebug()               // Show/hide player wireframe
 - setWaveAmplitude(0.8)
 - showSystemStatus()
 
 🎮 CONTROLS:
-- C = Switch between System/Player cameras
+- C = Switch between camera modes
 - WASD = Move player (in player camera mode)
 - Space = Jump (in player camera mode)
 - Shift = Run (in player camera mode)
@@ -1074,7 +1077,7 @@ export class ConsoleCommands {
     win.getCameraState = () => this.getCameraState()
     
     // Camera Manager Commands (New System)
-    win.switchCamera = (mode: 'system' | 'player') => this.switchCamera(mode)
+    win.switchCamera = (mode: 'thirdperson' | 'dialogue' | 'battle' | 'freeview') => this.switchCamera(mode)
     win.getCameraMode = () => this.getCameraMode()
     win.getCameraInfo = () => this.getCameraInfo()
     
@@ -1186,6 +1189,30 @@ export class ConsoleCommands {
     win.enablePerformanceMonitoring = () => performanceMonitor.enable()
     win.disablePerformanceMonitoring = () => performanceMonitor.disable()
     win.resetPerformanceMetrics = () => performanceMonitor.reset()
+
+    // Adaptive Quality Commands
+    win.setQuality = (tier: string) => {
+      const valid = ['low', 'medium', 'high', 'ultra']
+      if (!valid.includes(tier)) {
+        console.error(`Invalid quality tier "${tier}". Valid: ${valid.join(', ')}`)
+        return
+      }
+      adaptiveQuality.lockTier(tier as any)
+      console.log(`🎛️ Quality locked to: ${tier.toUpperCase()}`)
+    }
+    win.autoQuality = () => {
+      adaptiveQuality.lockTier(null)
+      adaptiveQuality.resetTelemetry()
+      console.log('🎛️ Adaptive quality re-enabled')
+    }
+    win.getQuality = () => {
+      const t = adaptiveQuality.getTelemetry()
+      console.group('🎛️ Adaptive Quality')
+      console.log(`Tier: ${t.currentTier.toUpperCase()}${t.lockedTier ? ' (LOCKED)' : ''}`)
+      console.log(`Avg FPS: ${t.avgFps}`)
+      console.log(`FPS Range: ${t.minFps} – ${t.maxFps}`)
+      console.groupEnd()
+    }
     win.getCollisionStats = () => {
       if (this.app.collisionSystem) {
         const stats = this.app.collisionSystem.getPerformanceStats()
@@ -1258,6 +1285,7 @@ export class ConsoleCommands {
     win.objectManager = this.app.objectManager
     win.animationSystem = this.app.animationSystem
     win.configManager = this.app.configManager
+    win.adaptiveQuality = adaptiveQuality
     
     console.log('🎮 Console commands registered! Type help() for available commands.')
   }

@@ -291,28 +291,6 @@ export class ParameterIntegration {
           }
           break
         case 'zoom':
-          // Orthographic camera no longer used - skip this parameter
-          // const orthoCamera = this.systems.cameraManager.getOrthographicCamera()
-          // if (orthoCamera) {
-          //   orthoCamera.zoom = value
-          //   orthoCamera.updateProjectionMatrix()
-          // }
-          break
-        
-        // Shoulder view parameters
-        case 'shoulderOffsetX':
-        case 'shoulderOffsetY':
-        case 'shoulderOffsetZ':
-        case 'shoulderFOV':
-          this.updateViewParameters('shoulder')
-          break
-        
-        // Overhead view parameters
-        case 'overheadOffsetX':
-        case 'overheadOffsetY':
-        case 'overheadOffsetZ':
-        case 'overheadFrustumSize':
-          this.updateViewParameters('overhead')
           break
         
         default:
@@ -321,36 +299,6 @@ export class ParameterIntegration {
     } catch (error) {
       logger.error(LogModule.SYSTEM, `Error updating camera parameter ${parameterId}:`, error)
     }
-  }
-
-  /**
-   * Update a specific camera view configuration
-   */
-  private updateViewParameters(view: 'shoulder' | 'overhead'): void {
-    if (!this.systems.cameraManager) return
-
-    const prefix = view
-    const offsetX = this.parameterManager.getParameter('camera', `${prefix}OffsetX`)
-    const offsetY = this.parameterManager.getParameter('camera', `${prefix}OffsetY`)
-    const offsetZ = this.parameterManager.getParameter('camera', `${prefix}OffsetZ`)
-    
-    const offset: any = {
-      position: new THREE.Vector3(offsetX, offsetY, offsetZ)
-    }
-
-    if (view === 'shoulder') {
-      const fov = this.parameterManager.getParameter('camera', `${prefix}FOV`)
-      offset.fov = fov
-    } else if (view === 'overhead') {
-      const frustumSize = this.parameterManager.getParameter('camera', 'overheadFrustumSize')
-      // Store frustum size for orthographic camera update
-      if (this.systems.cameraManager.updateOrthographicFrustum) {
-        this.systems.cameraManager.updateOrthographicFrustum(frustumSize)
-      }
-    }
-
-    // updateViewOffset method no longer exists - skip this call
-    // this.systems.cameraManager.updateViewOffset(view, offset)
   }
 
   private updatePlayerParameter(parameterId: string, value: any): void {

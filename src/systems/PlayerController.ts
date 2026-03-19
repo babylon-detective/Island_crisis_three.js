@@ -156,6 +156,7 @@ export class PlayerController {
     jump: boolean
     run: boolean
     action: boolean
+    cancel: boolean
     cameraMode: boolean
     select: boolean
     menu: boolean
@@ -165,6 +166,7 @@ export class PlayerController {
     jump: false,
     run: false,
     action: false,
+    cancel: false,
     cameraMode: false,
     select: false,
     menu: false
@@ -427,7 +429,7 @@ export class PlayerController {
 
   private handleKeyDown(event: KeyboardEvent): void {
     // Prevent default for game keys
-    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
+    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyI', 'KeyJ', 'KeyK', 'KeyL', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
       event.preventDefault()
     }
     
@@ -446,14 +448,19 @@ export class PlayerController {
 
   private updateInputState(): void {
     // Keyboard input
+    const modalInputActive =
+      (this.dialogueManager?.isDialogueActive() ?? false) ||
+      (this.battleManager?.isBattleActive() ?? false)
     const keyForward = this.keyStates.get('KeyW') || false
     const keyBackward = this.keyStates.get('KeyS') || false
     const keyLeft = this.keyStates.get('KeyA') || false
     const keyRight = this.keyStates.get('KeyD') || false
-    const keyJump = this.keyStates.get('Space') || false
+    const keyJump = modalInputActive
+      ? (this.keyStates.get('KeyK') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
+      : (this.keyStates.get('KeyK') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
     const keyAttack = this.keyStates.get('KeyJ') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
-    const keyCamera = this.keyStates.get('KeyC') || false
+    const keyCamera = this.keyStates.get('KeyI') || false
     
     // (WASD debug logging removed to avoid per-frame console.log overhead)
     
@@ -783,6 +790,7 @@ export class PlayerController {
     jump: boolean
     run: boolean
     action: boolean
+    cancel: boolean
     cameraMode: boolean
     select: boolean
     menu: boolean
@@ -793,6 +801,7 @@ export class PlayerController {
       jump: input.jump,
       run: input.run,
       action: input.action,
+      cancel: input.cancel,
       cameraMode: input.cameraMode,
       select: input.select,
       menu: input.menu
@@ -861,14 +870,17 @@ export class PlayerController {
       this.attackConsumedThisPress = false
     }
 
-    // Gamepad menu button can always retreat from battle
-    if (this.battleManager?.isBattleActive() && this.gamepadInput.menu) {
+    if (this.battleManager?.isBattleActive() && this.gamepadInput.cancel) {
       this.battleManager.handleEscapeInput()
     }
 
     // Block movement while dialogue or battle is active
     if ((this.dialogueManager && this.dialogueManager.isDialogueActive()) ||
         (this.battleManager && this.battleManager.isBattleActive())) {
+      this.navigationTarget = null
+      if (this.navigationMarker) {
+        this.navigationMarker.visible = false
+      }
       this.state.velocity.x *= 0.85
       this.state.velocity.z *= 0.85
       this.state.isMoving = false

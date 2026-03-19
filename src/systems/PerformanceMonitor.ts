@@ -213,4 +213,223 @@ export class PerformanceMonitor {
 }
 
 // Global performance monitor instance
-export const performanceMonitor = new PerformanceMonitor() 
+export const performanceMonitor = new PerformanceMonitor()
+
+// ============================================================================
+// ADAPTIVE QUALITY SYSTEM
+// ============================================================================
+
+export type QualityTier = 'low' | 'medium' | 'high' | 'ultra'
+
+export interface QualitySettings {
+  pixelRatio: number
+  shadowMapSize: number
+  shadowMapType: number // THREE.BasicShadowMap = 0, THREE.PCFSoftShadowMap = 2
+  resolutionScale: number
+  fogFar: number
+  shadowsCast: boolean
+}
+
+export interface QualityTelemetry {
+  currentTier: QualityTier
+  avgFps: number
+  minFps: number
+  maxFps: number
+  lockedTier: QualityTier | null
+}
+
+const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
+  low: {
+    pixelRatio: 0.5,
+    shadowMapSize: 512,
+    shadowMapType: 0, // BasicShadowMap
+    resolutionScale: 0.5,
+    fogFar: 100,
+    shadowsCast: false,
+  },
+  medium: {
+    pixelRatio: 0.75,
+    shadowMapSize: 1024,
+    shadowMapType: 0,
+    resolutionScale: 0.625,
+    fogFar: 150,
+    shadowsCast: true,
+  },
+  high: {
+    pixelRatio: 1.0,
+    shadowMapSize: 1024,
+    shadowMapType: 0,
+    resolutionScale: 0.75,
+    fogFar: 200,
+    shadowsCast: true,
+  },
+  ultra: {
+    pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+    shadowMapSize: 2048,
+    shadowMapType: 2, // PCFSoftShadowMap
+    resolutionScale: 1.0,
+    fogFar: 300,
+    shadowsCast: true,
+  },
+}
+
+const TIER_ORDER: QualityTier[] = ['low', 'medium', 'high', 'ultra']
+
+// Thresholds: avgFPS below this → should be at most this tier
+const DOWNGRADE_THRESHOLDS: { below: number; maxTier: QualityTier }[] = [
+  { below: 30, maxTier: 'low' },
+  { below: 45, maxTier: 'medium' },
+  { below: 60, maxTier: 'high' },
+]
+
+const UPGRADE_THRESHOLDS: { above: number; minTier: QualityTier }[] = [
+  { above: 60, minTier: 'ultra' },
+  { above: 45, minTier: 'high' },
+  { above: 30, minTier: 'medium' },
+]
+
+const DOWNGRADE_HOLD_MS = 2000
+const UPGRADE_HOLD_MS = 3000
+const FPS_SAMPLE_WINDOW = 90 // ~1.5s at 60fps
+
+export class AdaptiveQualitySystem {
+  private currentTier: QualityTier = 'high'
+  private lockedTier: QualityTier | null = null
+  private fpsSamples: number[] = []
+  private minFps = Infinity
+  private maxFps = 0
+  private pendingTier: QualityTier | null = null
+  private pendingTierSince = 0
+  private onQualityChange: ((tier: QualityTier, settings: QualitySettings) => void) | null = null
+
+  public setCallback(cb: (tier: QualityTier, settings: QualitySettings) => void): void {
+    this.onQualityChange = cb
+  }
+
+  public update(fps: number): void {
+    if (this.lockedTier) return
+
+    // Clamp to reasonable range to avoid outliers from tab-switch spikes
+    const clampedFps = Math.max(0, Math.min(fps, 300))
+
+    this.fpsSamples.push(clampedFps)
+    if (this.fpsSamples.length > FPS_SAMPLE_WINDOW) {
+      this.fpsSamples.shift()
+    }
+
+    // Track min/max
+    if (clampedFps > 0) {
+      if (clampedFps < this.minFps) this.minFps = clampedFps
+      if (clampedFps > this.maxFps) this.maxFps = clampedFps
+    }
+
+    // Need at least half a window of samples before making decisions
+    if (this.fpsSamples.length < FPS_SAMPLE_WINDOW / 2) return
+
+    const avgFps = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length
+    const desiredTier = this.computeDesiredTier(avgFps)
+
+    if (desiredTier === this.currentTier) {
+      // Reset pending transition
+      this.pendingTier = null
+      this.pendingTierSince = 0
+      return
+    }
+
+    const now = performance.now()
+    const isUpgrade = TIER_ORDER.indexOf(desiredTier) > TIER_ORDER.indexOf(this.currentTier)
+    const holdMs = isUpgrade ? UPGRADE_HOLD_MS : DOWNGRADE_HOLD_MS
+
+    if (this.pendingTier !== desiredTier) {
+      // Start new pending transition
+      this.pendingTier = desiredTier
+      this.pendingTierSince = now
+      return
+    }
+
+    // Same pending tier — check if held long enough
+    if (now - this.pendingTierSince >= holdMs) {
+      this.applyTier(desiredTier)
+      this.pendingTier = null
+      this.pendingTierSince = 0
+    }
+  }
+
+  private computeDesiredTier(avgFps: number): QualityTier {
+    const currentIdx = TIER_ORDER.indexOf(this.currentTier)
+
+    // Check if we need to downgrade
+    for (const { below, maxTier } of DOWNGRADE_THRESHOLDS) {
+      if (avgFps < below) {
+        const maxIdx = TIER_ORDER.indexOf(maxTier)
+        if (currentIdx > maxIdx) return maxTier
+      }
+    }
+
+    // Check if we can upgrade
+    for (const { above, minTier } of UPGRADE_THRESHOLDS) {
+      if (avgFps >= above) {
+        const minIdx = TIER_ORDER.indexOf(minTier)
+        if (currentIdx < minIdx) return minTier
+        break
+      }
+    }
+
+    return this.currentTier
+  }
+
+  private applyTier(tier: QualityTier): void {
+    const prev = this.currentTier
+    this.currentTier = tier
+    const settings = { ...QUALITY_PRESETS[tier] }
+    // For ultra, recalculate pixelRatio at apply-time
+    if (tier === 'ultra') {
+      settings.pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+    }
+    logger.info(LogModule.PERFORMANCE, `Quality tier changed: ${prev} → ${tier}`)
+    if (this.onQualityChange) {
+      this.onQualityChange(tier, settings)
+    }
+  }
+
+  public lockTier(tier: QualityTier | null): void {
+    this.lockedTier = tier
+    if (tier) {
+      this.applyTier(tier)
+      logger.info(LogModule.PERFORMANCE, `Quality tier locked to: ${tier}`)
+    } else {
+      logger.info(LogModule.PERFORMANCE, 'Quality tier unlocked — adaptive mode')
+    }
+  }
+
+  public getCurrentTier(): QualityTier {
+    return this.currentTier
+  }
+
+  public getSettings(tier?: QualityTier): QualitySettings {
+    return { ...QUALITY_PRESETS[tier ?? this.currentTier] }
+  }
+
+  public getTelemetry(): QualityTelemetry {
+    const avgFps = this.fpsSamples.length > 0
+      ? this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length
+      : 0
+    return {
+      currentTier: this.currentTier,
+      avgFps: Math.round(avgFps),
+      minFps: this.minFps === Infinity ? 0 : Math.round(this.minFps),
+      maxFps: Math.round(this.maxFps),
+      lockedTier: this.lockedTier,
+    }
+  }
+
+  public resetTelemetry(): void {
+    this.minFps = Infinity
+    this.maxFps = 0
+    this.fpsSamples = []
+    this.pendingTier = null
+    this.pendingTierSince = 0
+  }
+}
+
+export const adaptiveQuality = new AdaptiveQualitySystem()
