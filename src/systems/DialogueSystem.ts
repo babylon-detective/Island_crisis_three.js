@@ -439,6 +439,14 @@ export class DialogueManager {
 
     const pendingBattleNpcId = this.pendingBattleNpcId
     this.pendingBattleNpcId = null
+
+    window.dispatchEvent(new CustomEvent('dialogue-ended', {
+      detail: {
+        npcId,
+        scriptedBattleQueued: pendingBattleNpcId !== null,
+      },
+    }))
+
     if (pendingBattleNpcId) {
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent('dialogue-to-battle', {
@@ -589,13 +597,14 @@ export class DialogueManager {
   }
 
   private getInteractionPromptText(npcId: string): string {
+    const label = npcId.toUpperCase()
     switch (this.inputMode) {
       case 'touch':
-        return `TALK`
+        return `TALK ${label}`
       case 'gamepad':
-        return `A • Talk to ${npcId}`
+        return `A. TALK ${label}`
       default:
-        return `Press K to talk to ${npcId}`
+        return `J. TALK ${label}`
     }
   }
 
@@ -646,9 +655,9 @@ export class DialogueManager {
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
     } else {
       this.overlayPrompt.style.cssText =
-        'position:absolute;bottom:120px;left:50%;transform:translateX(-50%);' +
-        `background:rgba(18,56,24,0.45);color:${promptColor};padding:8px 20px;border-radius:6px;border:1px solid rgba(124,252,152,0.45);` +
-        'font-size:14px;letter-spacing:1px;white-space:nowrap;display:none;pointer-events:none;'
+        'position:absolute;right:20px;bottom:28px;transform:none;' +
+        `color:${promptColor};font-size:18px;letter-spacing:2px;white-space:nowrap;display:none;pointer-events:none;` +
+        'text-align:right;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;border:none;padding:0;'
 
       this.overlayBox.style.cssText =
         'position:absolute;bottom:0;left:0;right:0;' +

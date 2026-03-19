@@ -42,6 +42,8 @@ export class BattleSystem {
   private readonly interactionRange = 4.5
   private readonly hostileAutoTriggerRange = 1.85
   private readonly recentBattleCooldownMs = 3000
+  private readonly postDialogueAutoTriggerGraceMs = 3000
+  private hostileAutoTriggerSuppressedUntil = 0
 
   /** Standard distance between combatants in battle (world units). */
   private readonly battleStandingDistance = 8
@@ -97,6 +99,13 @@ export class BattleSystem {
 
   setDialogueManager(dialogueManager: DialogueManager): void {
     this.dialogueManager = dialogueManager
+  }
+
+  suppressHostileAutoTrigger(durationMs: number = this.postDialogueAutoTriggerGraceMs): void {
+    this.hostileAutoTriggerSuppressedUntil = Math.max(
+      this.hostileAutoTriggerSuppressedUntil,
+      performance.now() + durationMs,
+    )
   }
 
   setInputMode(mode: ActiveInputMode): void {
@@ -162,7 +171,10 @@ export class BattleSystem {
       this.clearPromptState()
     }
 
-    const hostileRed = this.npcSystem.getNPCsInRadius(playerPosition, this.hostileAutoTriggerRange)
+    const hostileAutoTriggerSuppressed = performance.now() < this.hostileAutoTriggerSuppressedUntil
+    const hostileRed = hostileAutoTriggerSuppressed
+      ? undefined
+      : this.npcSystem.getNPCsInRadius(playerPosition, this.hostileAutoTriggerRange)
       .filter(npc => npc.npcClass === 'red')
       .filter(npc => this.npcSystem.isHostile(npc.id))
       .filter(npc => !this.npcSystem.isInteractionOnCooldown(npc.id))
@@ -783,13 +795,14 @@ export class BattleSystem {
   }
 
   private getEngagePromptText(npcId: string): string {
+    const label = npcId.toUpperCase()
     switch (this.inputMode) {
       case 'touch':
-        return `FIGHT`
+        return `FIGHT ${label}`
       case 'gamepad':
-        return `X • Engage ${npcId}`
+        return `X. FIGHT ${label}`
       default:
-        return `Press J to engage ${npcId}`
+        return `K. FIGHT ${label}`
     }
   }
 
@@ -843,9 +856,9 @@ export class BattleSystem {
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
     } else {
       this.overlayPrompt.style.cssText =
-        'position:absolute;bottom:168px;left:50%;transform:translateX(-50%);' +
-        'background:rgba(64,12,12,0.55);border:1px solid rgba(255,107,107,0.5);' +
-        `color:${promptColor};padding:10px 18px;border-radius:8px;font-size:14px;letter-spacing:1px;display:none;`
+        'position:absolute;left:20px;bottom:28px;transform:none;' +
+        `color:${promptColor};font-size:18px;letter-spacing:2px;display:none;text-align:left;` +
+        'background:transparent;border:none;padding:0;text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:none;white-space:nowrap;'
 
       this.overlayPanel.style.cssText =
         'position:absolute;bottom:0;left:0;right:0;padding:28px 32px 34px;display:none;pointer-events:auto;' +

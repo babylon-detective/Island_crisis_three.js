@@ -457,8 +457,10 @@ export class PlayerController {
     const keyRight = this.keyStates.get('KeyD') || false
     const keyJump = modalInputActive
       ? (this.keyStates.get('KeyK') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
-      : (this.keyStates.get('KeyK') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
-    const keyAttack = this.keyStates.get('KeyJ') || false
+      : (this.keyStates.get('KeyJ') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
+    const keyAttack = modalInputActive
+      ? (this.keyStates.get('KeyJ') || false)
+      : (this.keyStates.get('KeyK') || false)
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyI') || false
     

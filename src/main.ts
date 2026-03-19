@@ -1241,6 +1241,12 @@ class IntegratedThreeJSApp {
         this.battleSystem?.consumePendingScriptedBattle(npcId)
       })
 
+      window.addEventListener('dialogue-ended', (event: Event) => {
+        const customEvent = event as CustomEvent<{ npcId: string | null; scriptedBattleQueued: boolean }>
+        if (customEvent.detail?.scriptedBattleQueued) return
+        this.battleSystem?.suppressHostileAutoTrigger()
+      })
+
       this.refreshMobileControlState()
 
       // Link dialogue system to player controller for contextual action button

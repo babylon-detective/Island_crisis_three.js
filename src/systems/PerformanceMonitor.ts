@@ -249,7 +249,7 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     fogFar: 80,
     shadowsCast: false,
     oceanSegments: 32,
-    postProcessingEnabled: false,
+    postProcessingEnabled: true,
   },
   medium: {
     pixelRatio: 0.75,
