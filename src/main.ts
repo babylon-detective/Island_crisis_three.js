@@ -361,6 +361,27 @@ class OceanLODSystem {
     }
     console.log(`🌊 Ocean shadow receiving: ${enabled ? 'enabled' : 'disabled'}`)
   }
+
+  /** Rebuild the close-range ocean LOD geometry with a different segment count */
+  public setCloseSegments(segments: number): void {
+    const level = this.lodLevels[0]
+    if (!level || level.segments === segments) return
+
+    const oldGeometry = level.geometry
+    const newGeometry = new THREE.PlaneGeometry(level.size, level.size, segments, segments)
+    newGeometry.rotateX(-Math.PI / 2)
+
+    // Recreate random attribute for wave variation
+    const posCount = newGeometry.getAttribute('position').count
+    const randomValues = new Float32Array(posCount)
+    for (let j = 0; j < posCount; j++) randomValues[j] = Math.random()
+    newGeometry.setAttribute('aRandom', new THREE.BufferAttribute(randomValues, 1))
+
+    level.mesh.geometry = newGeometry
+    level.geometry = newGeometry
+    level.segments = segments
+    oldGeometry.dispose()
+  }
 }
 
 class LandSystem {
@@ -1083,6 +1104,7 @@ class IntegratedThreeJSApp {
     
     // Configure adaptive quality system
     adaptiveQuality.setCallback((tier, settings) => this.applyQualitySettings(tier, settings))
+    adaptiveQuality.initBatteryMonitor()
 
     // Mark as initialized
     this.isInitialized = true
@@ -1247,21 +1269,21 @@ class IntegratedThreeJSApp {
       if (npc.npcClass === 'red') {
         const tree = DialogueManager.createTree(`tree-${npc.id}`, 'warning', [
           DialogueManager.node('warning', 'You are close enough. State your business.', [
-            DialogueManager.choice('Easy. I am just passing through.', 'stand-down'),
+            DialogueManager.choice('Easy. I am just passing through.', 'stand-down', undefined, undefined, 'neutral'),
             DialogueManager.choice('Back off, or I will make you.', undefined, undefined, () => {
               this.npcSystem!.setHostile(npc.id, true)
               this.dialogueManager!.queueBattleAfterDialogue(npc.id)
               this.dialogueManager!.endDialogue()
-            }),
-            DialogueManager.choice('What do you want from me?', 'challenge'),
+            }, 'aggressive'),
+            DialogueManager.choice('What do you want from me?', 'challenge', undefined, undefined, 'neutral'),
           ]),
           DialogueManager.node('challenge', 'I watch this part of the island. Give me one reason not to run you off.', [
-            DialogueManager.choice('No trouble. I am leaving.', 'stand-down'),
+            DialogueManager.choice('No trouble. I am leaving.', 'stand-down', undefined, undefined, 'escape'),
             DialogueManager.choice('Try it.', undefined, undefined, () => {
               this.npcSystem!.setHostile(npc.id, true)
               this.dialogueManager!.queueBattleAfterDialogue(npc.id)
               this.dialogueManager!.endDialogue()
-            }),
+            }, 'aggressive'),
           ]),
           DialogueManager.node('stand-down', 'Then move. I will give you a few seconds before I reconsider.', [], {
             isTerminal: true,
@@ -1276,19 +1298,19 @@ class IntegratedThreeJSApp {
 
       const tree = DialogueManager.createTree(`tree-${npc.id}`, 'greet', [
         DialogueManager.node('greet', `Hello traveller! I'm a ${npc.npcClass} villager.`, [
-          DialogueManager.choice('Tell me about this island.', 'about'),
-          DialogueManager.choice('What do you do here?', 'job'),
-          DialogueManager.choice('Goodbye.', 'bye'),
+          DialogueManager.choice('Tell me about this island.', 'about', undefined, undefined, 'neutral'),
+          DialogueManager.choice('What do you do here?', 'job', undefined, undefined, 'mercantile'),
+          DialogueManager.choice('Goodbye.', 'bye', undefined, undefined, 'escape'),
         ]),
         DialogueManager.node('about', 'This island holds many secrets. Explore the shores and you may find something interesting.', [
-          DialogueManager.choice('Thanks!', 'bye'),
-          DialogueManager.choice('Tell me more.', 'more'),
+          DialogueManager.choice('Thanks!', 'bye', undefined, undefined, 'escape'),
+          DialogueManager.choice('Tell me more.', 'more', undefined, undefined, 'neutral'),
         ]),
         DialogueManager.node('job', 'I wander and keep watch. It can be lonely out here.', [
-          DialogueManager.choice('I understand. Goodbye.', 'bye'),
+          DialogueManager.choice('I understand. Goodbye.', 'bye', undefined, undefined, 'escape'),
         ]),
         DialogueManager.node('more', 'The crystals on the hilltops glow at night. Nobody knows why.', [
-          DialogueManager.choice('Interesting. Goodbye.', 'bye'),
+          DialogueManager.choice('Interesting. Goodbye.', 'bye', undefined, undefined, 'escape'),
         ]),
         DialogueManager.node('bye', 'Safe travels, friend!', [], { isTerminal: true }),
       ])
@@ -2422,8 +2444,13 @@ class IntegratedThreeJSApp {
 
   /** Reusable scratch vectors to avoid per-frame allocations */
   private _lightScratchDir = new THREE.Vector3()
+  private _lightingFrameSkip = 0
 
   private updateCharacterLighting(): void {
+    // Only recompute dominant lights every 4 frames — lights don't change fast
+    if (++this._lightingFrameSkip < 4) return
+    this._lightingFrameSkip = 0
+
     const playerMesh = this.playerController.getMesh()
     if (!playerMesh) return
 
@@ -2848,9 +2875,14 @@ class IntegratedThreeJSApp {
     this.renderer.shadowMap.type = settings.shadowMapType as THREE.ShadowMapType
     this.renderer.shadowMap.needsUpdate = true
 
-    // Post-processing resolution
+    // Post-processing resolution scale (or bypass entirely on low)
     if (this.retroPostProcessing) {
-      this.retroPostProcessing.setResolutionScale(settings.resolutionScale)
+      if (settings.postProcessingEnabled) {
+        this.retroPostProcessing.setEnabled(true)
+        this.retroPostProcessing.setResolutionScale(settings.resolutionScale)
+      } else {
+        this.retroPostProcessing.setEnabled(false)
+      }
     }
 
     // Fog distance
@@ -2861,6 +2893,7 @@ class IntegratedThreeJSApp {
     // Shadow casting on environment meshes
     if (this.oceanLODSystem) {
       this.oceanLODSystem.setOceanShadowCasting(settings.shadowsCast)
+      this.oceanLODSystem.setCloseSegments(settings.oceanSegments)
     }
     if (this.landSystem) {
       this.landSystem.setLandShadowCasting(settings.shadowsCast)
@@ -2917,6 +2950,10 @@ class IntegratedThreeJSApp {
       this.animationSystem.stop()
     } else {
       this.animationSystem.start()
+      // Reset timing so the first frame back doesn't produce a huge delta spike
+      this.lastTime = performance.now()
+      // Reset adaptive quality samples — the browser may have throttled during background
+      adaptiveQuality.resetTelemetry()
     }
   }
 
@@ -3240,8 +3277,8 @@ class IntegratedThreeJSApp {
         this.landSystem.update(currentTime)
       }
 
-      // Update sky system for automatic day/night cycle
-      if (this.sky) {
+      // Update sky system for automatic day/night cycle (throttled — sun moves very slowly)
+      if (this.sky && this.frameCount % 10 === 0) {
         // Animate sun elevation for day/night cycle (slow rotation)
         const cycleSpeed = 0.0001 // Very slow for realistic effect
         this.skyConfig.elevation = Math.sin(currentTime * cycleSpeed) * 45 + 15 // -30 to 60 degrees

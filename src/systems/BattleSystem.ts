@@ -654,8 +654,9 @@ export class BattleSystem {
 
     this.menuActions.forEach((action, index) => {
       const item = document.createElement('div')
+      const itemColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
       item.textContent = this.getActionDisplayText(action, index)
-      item.style.cssText = `color:${index === this.highlightedActionIndex ? '#ff8f6b' : '#ffe7d8'};padding:${this.inputMode === 'touch' ? '10px 4px' : '4px 0'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
+      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '10px 4px' : '4px 0'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
       item.addEventListener('mouseenter', () => {
         this.highlightedActionIndex = index
         this.updateChoiceHighlight()
@@ -692,7 +693,7 @@ export class BattleSystem {
       const action = this.menuActions[index]
       if (!action) return
       el.textContent = this.getActionDisplayText(action, index)
-      el.style.color = index === this.highlightedActionIndex ? '#ff8f6b' : '#ffe7d8'
+      el.style.color = this.getActionColor(action.id, index === this.highlightedActionIndex)
     })
   }
 
@@ -803,13 +804,32 @@ export class BattleSystem {
     }
   }
 
+  private getPromptAccentColor(): string {
+    return '#ff6b6b'
+  }
+
+  private getActionColor(actionId: BattleActionId, highlighted: boolean): string {
+    switch (actionId) {
+      case 'attack':
+        return highlighted ? '#ff9d9d' : '#ff6b6b'
+      case 'guard':
+        return highlighted ? '#baffc9' : '#7CFC98'
+      case 'item':
+        return highlighted ? '#a9d8ff' : '#66b7ff'
+      case 'escape':
+        return highlighted ? '#fff1a8' : '#ffd866'
+    }
+  }
+
   private applyOverlayLayout(): void {
     if (!this.overlayPrompt || !this.overlayPanel || !this.overlayStatus || !this.overlayChoices) return
 
+    const promptColor = this.getPromptAccentColor()
+
     if (this.inputMode === 'touch') {
       this.overlayPrompt.style.cssText =
-        'position:absolute;left:50%;bottom:calc(60px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);' +
-        'color:rgba(255,200,170,0.85);font-size:22px;letter-spacing:3px;display:none;text-align:center;' +
+        'position:absolute;left:20px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
+        `color:${promptColor};font-size:22px;letter-spacing:3px;display:none;text-align:center;` +
         'background:transparent;border:none;padding:10px 32px;' +
         'text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:auto;cursor:pointer;white-space:nowrap;touch-action:manipulation;'
 
@@ -824,8 +844,8 @@ export class BattleSystem {
     } else {
       this.overlayPrompt.style.cssText =
         'position:absolute;bottom:168px;left:50%;transform:translateX(-50%);' +
-        'background:rgba(36,8,4,0.7);border:1px solid rgba(255,143,107,0.45);' +
-        'color:#fff2e8;padding:10px 18px;border-radius:8px;font-size:14px;letter-spacing:1px;display:none;'
+        'background:rgba(64,12,12,0.55);border:1px solid rgba(255,107,107,0.5);' +
+        `color:${promptColor};padding:10px 18px;border-radius:8px;font-size:14px;letter-spacing:1px;display:none;`
 
       this.overlayPanel.style.cssText =
         'position:absolute;bottom:0;left:0;right:0;padding:28px 32px 34px;display:none;pointer-events:auto;' +

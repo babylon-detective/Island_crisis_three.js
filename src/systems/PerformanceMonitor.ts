@@ -228,6 +228,8 @@ export interface QualitySettings {
   resolutionScale: number
   fogFar: number
   shadowsCast: boolean
+  oceanSegments: number      // vertex resolution for close-up ocean LOD
+  postProcessingEnabled: boolean
 }
 
 export interface QualityTelemetry {
@@ -244,16 +246,20 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 512,
     shadowMapType: 0, // BasicShadowMap
     resolutionScale: 0.5,
-    fogFar: 100,
+    fogFar: 80,
     shadowsCast: false,
+    oceanSegments: 32,
+    postProcessingEnabled: false,
   },
   medium: {
     pixelRatio: 0.75,
-    shadowMapSize: 1024,
+    shadowMapSize: 512,
     shadowMapType: 0,
     resolutionScale: 0.625,
     fogFar: 150,
     shadowsCast: true,
+    oceanSegments: 64,
+    postProcessingEnabled: true,
   },
   high: {
     pixelRatio: 1.0,
@@ -262,6 +268,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     resolutionScale: 0.75,
     fogFar: 200,
     shadowsCast: true,
+    oceanSegments: 128,
+    postProcessingEnabled: true,
   },
   ultra: {
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
@@ -270,6 +278,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     resolutionScale: 1.0,
     fogFar: 300,
     shadowsCast: true,
+    oceanSegments: 128,
+    postProcessingEnabled: true,
   },
 }
 
@@ -277,20 +287,21 @@ const TIER_ORDER: QualityTier[] = ['low', 'medium', 'high', 'ultra']
 
 // Thresholds: avgFPS below this → should be at most this tier
 const DOWNGRADE_THRESHOLDS: { below: number; maxTier: QualityTier }[] = [
-  { below: 30, maxTier: 'low' },
-  { below: 45, maxTier: 'medium' },
-  { below: 60, maxTier: 'high' },
+  { below: 20, maxTier: 'low' },
+  { below: 35, maxTier: 'medium' },
+  { below: 50, maxTier: 'high' },
 ]
 
 const UPGRADE_THRESHOLDS: { above: number; minTier: QualityTier }[] = [
-  { above: 60, minTier: 'ultra' },
-  { above: 45, minTier: 'high' },
-  { above: 30, minTier: 'medium' },
+  { above: 58, minTier: 'ultra' },
+  { above: 48, minTier: 'high' },
+  { above: 32, minTier: 'medium' },
 ]
 
-const DOWNGRADE_HOLD_MS = 2000
-const UPGRADE_HOLD_MS = 3000
-const FPS_SAMPLE_WINDOW = 90 // ~1.5s at 60fps
+const DOWNGRADE_HOLD_MS = 1200   // React faster to drops
+const UPGRADE_HOLD_MS = 4000     // Be patient about upgrades
+const EMERGENCY_DOWNGRADE_MS = 400 // Immediate drop when critically low
+const FPS_SAMPLE_WINDOW = 60 // ~1s at 60fps
 
 export class AdaptiveQualitySystem {
   private currentTier: QualityTier = 'high'
@@ -301,9 +312,40 @@ export class AdaptiveQualitySystem {
   private pendingTier: QualityTier | null = null
   private pendingTierSince = 0
   private onQualityChange: ((tier: QualityTier, settings: QualitySettings) => void) | null = null
+  private batterySaver = false
+  private maxTierOverride: QualityTier | null = null
 
   public setCallback(cb: (tier: QualityTier, settings: QualitySettings) => void): void {
     this.onQualityChange = cb
+  }
+
+  /** Call once after init to listen for battery changes on supported devices */
+  public initBatteryMonitor(): void {
+    if (!('getBattery' in navigator)) return
+    ;(navigator as any).getBattery().then((battery: any) => {
+      const check = () => {
+        const isLow = battery.level <= 0.15 && !battery.charging
+        if (isLow !== this.batterySaver) {
+          this.batterySaver = isLow
+          if (isLow) {
+            // Cap quality to medium when battery is critically low
+            this.maxTierOverride = 'medium'
+            const currentIdx = TIER_ORDER.indexOf(this.currentTier)
+            const capIdx = TIER_ORDER.indexOf('medium')
+            if (currentIdx > capIdx) {
+              this.applyTier('medium')
+            }
+            logger.info(LogModule.PERFORMANCE, 'Battery saver ON — quality capped to medium')
+          } else {
+            this.maxTierOverride = null
+            logger.info(LogModule.PERFORMANCE, 'Battery saver OFF — adaptive mode restored')
+          }
+        }
+      }
+      battery.addEventListener('levelchange', check)
+      battery.addEventListener('chargingchange', check)
+      check() // initial
+    }).catch(() => { /* Battery API not available */ })
   }
 
   public update(fps: number): void {
@@ -348,7 +390,9 @@ export class AdaptiveQualitySystem {
     }
 
     // Same pending tier — check if held long enough
-    if (now - this.pendingTierSince >= holdMs) {
+    // Emergency: if FPS is critically low (<15), use a much shorter hold time
+    const effectiveHold = (!isUpgrade && avgFps < 15) ? EMERGENCY_DOWNGRADE_MS : holdMs
+    if (now - this.pendingTierSince >= effectiveHold) {
       this.applyTier(desiredTier)
       this.pendingTier = null
       this.pendingTierSince = 0
@@ -357,25 +401,35 @@ export class AdaptiveQualitySystem {
 
   private computeDesiredTier(avgFps: number): QualityTier {
     const currentIdx = TIER_ORDER.indexOf(this.currentTier)
+    let desired = this.currentTier
 
     // Check if we need to downgrade
     for (const { below, maxTier } of DOWNGRADE_THRESHOLDS) {
       if (avgFps < below) {
         const maxIdx = TIER_ORDER.indexOf(maxTier)
-        if (currentIdx > maxIdx) return maxTier
+        if (currentIdx > maxIdx) { desired = maxTier; break }
       }
     }
 
-    // Check if we can upgrade
-    for (const { above, minTier } of UPGRADE_THRESHOLDS) {
-      if (avgFps >= above) {
-        const minIdx = TIER_ORDER.indexOf(minTier)
-        if (currentIdx < minIdx) return minTier
-        break
+    // Check if we can upgrade (only if not downgrading)
+    if (desired === this.currentTier) {
+      for (const { above, minTier } of UPGRADE_THRESHOLDS) {
+        if (avgFps >= above) {
+          const minIdx = TIER_ORDER.indexOf(minTier)
+          if (currentIdx < minIdx) desired = minTier
+          break
+        }
       }
     }
 
-    return this.currentTier
+    // Enforce battery / external cap
+    if (this.maxTierOverride) {
+      const capIdx = TIER_ORDER.indexOf(this.maxTierOverride)
+      const desiredIdx = TIER_ORDER.indexOf(desired)
+      if (desiredIdx > capIdx) desired = this.maxTierOverride
+    }
+
+    return desired
   }
 
   private applyTier(tier: QualityTier): void {

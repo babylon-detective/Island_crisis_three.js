@@ -23,6 +23,8 @@ type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 // TYPES
 // ============================================================================
 
+export type DialogueChoiceTag = 'aggressive' | 'mercantile' | 'neutral' | 'escape'
+
 export interface DialogueChoice {
   /** Text shown to the player */
   text: string
@@ -32,6 +34,8 @@ export interface DialogueChoice {
   condition?: () => boolean
   /** Optional side effect fired when the player picks this choice */
   onSelect?: () => void
+  /** Semantic tag for color-coding the choice */
+  tag?: DialogueChoiceTag
 }
 
 export interface DialogueNode {
@@ -287,11 +291,12 @@ export class DialogueManager {
     const items = this.overlayChoices.children
     for (let i = 0; i < items.length; i++) {
       const el = items[i] as HTMLElement
+      const tag = this.currentVisibleChoices[i]?.tag
       if (i === this.highlightedChoiceIndex) {
-        el.style.color = '#ffd866'
+        el.style.color = this.getChoiceColor(tag, true)
         el.textContent = el.textContent?.replace(/^\d+\./, `▶ ${i + 1}.`) ?? ''
       } else {
-        el.style.color = '#aee'
+        el.style.color = this.getChoiceColor(tag, false)
         el.textContent = el.textContent?.replace(/^▶ /, '') ?? ''
       }
     }
@@ -382,7 +387,7 @@ export class DialogueManager {
     this.showDialogueOverlay(
       speaker,
       node.text,
-      visibleChoices.map((c, i) => ({ text: c.text, index: i })),
+      visibleChoices.map((c, i) => ({ text: c.text, index: i, tag: c.tag })),
     )
   }
 
@@ -524,8 +529,8 @@ export class DialogueManager {
     return { id, text, choices, ...opts }
   }
 
-  static choice(text: string, nextNodeId?: string, condition?: () => boolean, onSelect?: () => void): DialogueChoice {
-    return { text, nextNodeId, condition, onSelect }
+  static choice(text: string, nextNodeId?: string, condition?: () => boolean, onSelect?: () => void, tag?: DialogueChoiceTag): DialogueChoice {
+    return { text, nextNodeId, condition, onSelect, tag }
   }
 
   // --------------------------------------------------------------------------
@@ -605,14 +610,30 @@ export class DialogueManager {
     }
   }
 
+  private getChoiceColor(tag: DialogueChoiceTag | undefined, highlighted: boolean): string {
+    switch (tag) {
+      case 'aggressive': return highlighted ? '#ff9d9d' : '#ff6b6b'
+      case 'mercantile': return highlighted ? '#a9d8ff' : '#66b7ff'
+      case 'neutral':    return highlighted ? '#baffc9' : '#7CFC98'
+      case 'escape':     return highlighted ? '#fff1a8' : '#ffd866'
+      default:           return highlighted ? '#ffd866' : '#aee'
+    }
+  }
+
+  private getPromptAccentColor(): string {
+    return '#7CFC98'
+  }
+
   private applyOverlayLayout(): void {
     if (!this.overlayRoot || !this.overlayPrompt || !this.overlayBox || !this.overlayText || !this.overlayChoices) return
 
+    const promptColor = this.getPromptAccentColor()
+
     if (this.isTouchInputMode()) {
       this.overlayPrompt.style.cssText =
-        'position:absolute;left:50%;bottom:calc(100px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);' +
-        'color:rgba(255,255,255,0.85);font-size:22px;letter-spacing:3px;white-space:nowrap;display:none;pointer-events:auto;' +
-        'text-align:center;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;' +
+        'position:absolute;right:20px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
+        `color:${promptColor};font-size:22px;letter-spacing:3px;white-space:nowrap;display:none;pointer-events:auto;` +
+        'text-align:right;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;' +
         'border:none;padding:10px 32px;cursor:pointer;touch-action:manipulation;'
 
       this.overlayBox.style.cssText =
@@ -626,7 +647,7 @@ export class DialogueManager {
     } else {
       this.overlayPrompt.style.cssText =
         'position:absolute;bottom:120px;left:50%;transform:translateX(-50%);' +
-        'background:rgba(0,0,0,0.55);color:#fff;padding:8px 20px;border-radius:6px;' +
+        `background:rgba(18,56,24,0.45);color:${promptColor};padding:8px 20px;border-radius:6px;border:1px solid rgba(124,252,152,0.45);` +
         'font-size:14px;letter-spacing:1px;white-space:nowrap;display:none;pointer-events:none;'
 
       this.overlayBox.style.cssText =
@@ -647,7 +668,7 @@ export class DialogueManager {
     if (!node) return
 
     const visibleChoices = node.choices
-      .map((choice, index) => ({ text: choice.text, index }))
+      .map((choice, index) => ({ text: choice.text, index, tag: choice.tag }))
       .filter(choice => {
         const original = node.choices[choice.index]
         return !original.condition || original.condition()
@@ -695,7 +716,7 @@ export class DialogueManager {
     // Don't hide root — dialogue box may still be visible
   }
 
-  private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number }[]): void {
+  private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number; tag?: DialogueChoiceTag }[]): void {
     if (!this.overlayRoot) return
     this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
@@ -706,16 +727,17 @@ export class DialogueManager {
       this.overlayChoices.innerHTML = ''
       for (const c of choices) {
         const isHighlighted = c.index === this.highlightedChoiceIndex
+        const choiceColor = this.getChoiceColor(c.tag, isHighlighted)
         const btn = document.createElement('div')
         btn.textContent = `${isHighlighted ? '▶ ' : ''}${c.index + 1}. ${c.text}`
         btn.style.cssText =
-          `color:${isHighlighted ? '#ffd866' : '#aee'};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 4px' : '4px 0'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
+          `color:${choiceColor};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 4px' : '4px 0'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
         btn.addEventListener('mouseenter', () => {
           this.highlightedChoiceIndex = c.index
           this.updateChoiceHighlight()
         })
         btn.addEventListener('mouseleave', () => {
-          btn.style.color = c.index === this.highlightedChoiceIndex ? '#ffd866' : '#aee'
+          btn.style.color = this.getChoiceColor(c.tag, c.index === this.highlightedChoiceIndex)
         })
         btn.addEventListener('pointerdown', (event) => {
           if (this.inputMode === 'touch' || (event as PointerEvent).pointerType === 'touch') {
