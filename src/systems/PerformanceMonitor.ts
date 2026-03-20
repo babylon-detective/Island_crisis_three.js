@@ -288,20 +288,21 @@ const TIER_ORDER: QualityTier[] = ['low', 'medium', 'high', 'ultra']
 // Thresholds: avgFPS below this → should be at most this tier
 const DOWNGRADE_THRESHOLDS: { below: number; maxTier: QualityTier }[] = [
   { below: 20, maxTier: 'low' },
-  { below: 35, maxTier: 'medium' },
-  { below: 50, maxTier: 'high' },
+  { below: 30, maxTier: 'medium' },
+  { below: 45, maxTier: 'high' },
 ]
 
 const UPGRADE_THRESHOLDS: { above: number; minTier: QualityTier }[] = [
   { above: 58, minTier: 'ultra' },
-  { above: 48, minTier: 'high' },
-  { above: 32, minTier: 'medium' },
+  { above: 50, minTier: 'high' },
+  { above: 35, minTier: 'medium' },
 ]
 
-const DOWNGRADE_HOLD_MS = 1200   // React faster to drops
-const UPGRADE_HOLD_MS = 4000     // Be patient about upgrades
-const EMERGENCY_DOWNGRADE_MS = 400 // Immediate drop when critically low
-const FPS_SAMPLE_WINDOW = 60 // ~1s at 60fps
+const DOWNGRADE_HOLD_MS = 2000   // Wait longer before downgrading
+const UPGRADE_HOLD_MS = 6000     // Be very patient about upgrades
+const EMERGENCY_DOWNGRADE_MS = 600 // Quick drop when critically low
+const TIER_CHANGE_COOLDOWN_MS = 5000 // Minimum time between any tier changes
+const FPS_SAMPLE_WINDOW = 90 // ~1.5s at 60fps — smoother average
 
 export class AdaptiveQualitySystem {
   private currentTier: QualityTier = 'high'
@@ -311,6 +312,7 @@ export class AdaptiveQualitySystem {
   private maxFps = 0
   private pendingTier: QualityTier | null = null
   private pendingTierSince = 0
+  private lastTierChangeTime = 0
   private onQualityChange: ((tier: QualityTier, settings: QualitySettings) => void) | null = null
   private batterySaver = false
   private maxTierOverride: QualityTier | null = null
@@ -393,6 +395,8 @@ export class AdaptiveQualitySystem {
     // Emergency: if FPS is critically low (<15), use a much shorter hold time
     const effectiveHold = (!isUpgrade && avgFps < 15) ? EMERGENCY_DOWNGRADE_MS : holdMs
     if (now - this.pendingTierSince >= effectiveHold) {
+      // Enforce cooldown between tier changes to prevent oscillation
+      if (now - this.lastTierChangeTime < TIER_CHANGE_COOLDOWN_MS) return
       this.applyTier(desiredTier)
       this.pendingTier = null
       this.pendingTierSince = 0
@@ -441,6 +445,9 @@ export class AdaptiveQualitySystem {
       settings.pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
     }
     logger.info(LogModule.PERFORMANCE, `Quality tier changed: ${prev} → ${tier}`)
+    this.lastTierChangeTime = performance.now()
+    // Clear FPS samples after tier change so old data doesn't immediately trigger another change
+    this.fpsSamples.length = 0
     if (this.onQualityChange) {
       this.onQualityChange(tier, settings)
     }

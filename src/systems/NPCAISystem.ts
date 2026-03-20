@@ -56,6 +56,7 @@ export class NPCAISystem {
   private playerPos = new THREE.Vector3()
   private enabled = true
   private _tmp = new THREE.Vector3()
+  private _waypointScratch = new THREE.Vector3()
 
   constructor(
     npcSystem: NPCSystem, collisionSystem: CollisionSystem,
@@ -118,7 +119,8 @@ export class NPCAISystem {
       const playerWithinLeash = ai.spawnPos.distanceTo(this.playerPos) <= this.cfg.redPursuitLeashRadius
       if (ai.playerNearby && playerWithinLeash) {
         ai.behaviour = 'follow'
-        ai.waypoint = this.playerPos.clone()
+        if (!ai.waypoint) ai.waypoint = new THREE.Vector3()
+        ai.waypoint.copy(this.playerPos)
         return
       }
       if (ai.behaviour === 'follow') {
@@ -141,7 +143,9 @@ export class NPCAISystem {
 
     if (ai.behaviour === 'idle' && Math.random() < 0.6) {
       ai.behaviour = 'wander'
-      ai.waypoint = this.randomWaypoint(ai.spawnPos)
+      const wp = this.randomWaypoint(ai.spawnPos)
+      if (!ai.waypoint) ai.waypoint = new THREE.Vector3()
+      ai.waypoint.copy(wp)
     } else if (ai.behaviour === 'wander' && !ai.waypoint) {
       ai.behaviour = 'idle'
     }
@@ -154,7 +158,7 @@ export class NPCAISystem {
       case 'idle':          this.doIdle(npc); break
       case 'wander': case 'goto': this.doMove(npc, ai, dt); break
       case 'socialize':     this.doSocialize(npc, ai, dt); break
-      case 'follow':        ai.waypoint = this.playerPos.clone(); this.doMove(npc, ai, dt); break
+      case 'follow':        if (!ai.waypoint) ai.waypoint = new THREE.Vector3(); ai.waypoint.copy(this.playerPos); this.doMove(npc, ai, dt); break
       case 'flee':          this.doFlee(npc, ai, dt); break
     }
   }
@@ -202,7 +206,8 @@ export class NPCAISystem {
     const away = this._tmp.copy(npc.position).sub(this.playerPos); away.y = 0
     if (away.length() < 0.01) away.set(1, 0, 0)
     away.normalize()
-    ai.waypoint = npc.position.clone().add(away.multiplyScalar(this.cfg.wanderRadius))
+    if (!ai.waypoint) ai.waypoint = new THREE.Vector3()
+    ai.waypoint.copy(npc.position).add(this._waypointScratch.copy(away).multiplyScalar(this.cfg.wanderRadius))
     this.doMove(npc, ai, dt)
   }
 
@@ -227,7 +232,7 @@ export class NPCAISystem {
     const a = Math.random() * Math.PI * 2, d = 3 + Math.random() * this.cfg.wanderRadius
     const x = origin.x + Math.cos(a) * d, z = origin.z + Math.sin(a) * d
     const y = this.collisionSystem.getGroundHeight(x, z)
-    return new THREE.Vector3(x, y > -Infinity ? y : origin.y, z)
+    return this._waypointScratch.set(x, y > -Infinity ? y : origin.y, z)
   }
 
   // ---- animation helpers ---------------------------------------------------

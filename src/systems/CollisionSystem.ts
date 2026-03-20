@@ -511,8 +511,15 @@ export class CollisionSystem {
    */
   private getGroundHeightOptimized(x: number, z: number): number {
     if (this.landMeshes.length === 0 && this.heightmaps.length === 0) {
-      console.warn(`⚠️ No land meshes registered! Player will sink. Falling back to ocean level (-2.0)`)
       return -2.0 // Ocean surface level
+    }
+
+    // ── 0. Check cache first ──
+    const now = performance.now()
+    const cacheKey = `${Math.round(x * 10)}_${Math.round(z * 10)}`
+    const cached = this.groundHeightCache.get(cacheKey)
+    if (cached && (now - cached.timestamp) < this.cacheTimeout) {
+      return cached.height
     }
 
     let maxGroundHeight = -2.0 // Start with ocean surface level
@@ -542,27 +549,17 @@ export class CollisionSystem {
     
     // If we found a mesh in bounds, raycast down to get exact surface
     if (highestY > -2.0) {
-      // Ensure all meshes have updated world matrices before raycasting
-      for (const mesh of allMeshes) {
-        mesh.updateMatrixWorld(true)
-      }
-      
       // Cast from well above the mesh to ensure we hit the top surface
-      // Use a very high starting point to ensure we're above all geometry
-      const rayStartY = Math.max(highestY + 200, 500) // Start very high
+      const rayStartY = Math.max(highestY + 200, 500)
       this.tempVector.set(x, rayStartY, z)
       this.tempVector2.set(0, -1, 0) // Cast straight down
       
       this.raycaster.set(this.tempVector, this.tempVector2)
-      // Use recursive intersection to account for all transforms
       const intersects = this.raycaster.intersectObjects(allMeshes, true)
       
       if (intersects.length > 0) {
-        // CRITICAL FIX: Find the intersection with the HIGHEST Y value (top surface)
-        // This ensures we get the top of the mesh, not the bottom
-        // Also filter to only use intersections with upward-facing normals (top surface)
         let topIntersection: THREE.Intersection | null = null
-        let highestY = -Infinity
+        let bestY = -Infinity
         
         for (const intersect of intersects) {
           const worldY = intersect.point.y
@@ -570,28 +567,23 @@ export class CollisionSystem {
           // Check if this is a top surface (normal pointing up)
           let isTopSurface = true
           if (intersect.face) {
-            // Get world-space normal
             const worldNormal = this.tempNormal.copy(intersect.face.normal)
             if (intersect.object instanceof THREE.Mesh) {
               intersect.object.getWorldQuaternion(this.tempQuaternion)
               worldNormal.applyQuaternion(this.tempQuaternion)
             }
-            // Check if normal is pointing upward (Y component > 0.5 means mostly upward)
             isTopSurface = worldNormal.y > 0.5
           }
           
-          // Only consider top surfaces, and take the highest one
-          if (isTopSurface && worldY > highestY) {
-            highestY = worldY
+          if (isTopSurface && worldY > bestY) {
+            bestY = worldY
             topIntersection = intersect
           }
         }
         
-        // If we found a top surface, use it; otherwise fall back to highest Y
         if (topIntersection) {
           maxGroundHeight = topIntersection.point.y
         } else {
-          // Fallback: use highest Y from all intersections
           for (const intersect of intersects) {
             if (intersect.point.y > maxGroundHeight) {
               maxGroundHeight = intersect.point.y
@@ -610,8 +602,19 @@ export class CollisionSystem {
       }
     }
     
-    // Apply vertical offset to match land mesh surface
-    return maxGroundHeight + this.groundHeightOffset
+    const result = maxGroundHeight + this.groundHeightOffset
+
+    // ── 3. Write to cache ──
+    this.groundHeightCache.set(cacheKey, { x, z, height: result, timestamp: now })
+    // Prune cache periodically to avoid unbounded growth
+    if (this.groundHeightCache.size > 200) {
+      const cutoff = now - this.cacheTimeout
+      for (const [k, v] of this.groundHeightCache) {
+        if (v.timestamp < cutoff) this.groundHeightCache.delete(k)
+      }
+    }
+
+    return result
   }
 
   /**

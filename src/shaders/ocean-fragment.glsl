@@ -21,17 +21,22 @@ float fresnel(vec3 viewDir, vec3 normal, float power) {
     return pow(1.0 - max(0.0, dot(viewDir, normal)), power);
 }
 
-// Simulated caustics pattern
+// Simulated caustics pattern (unrolled to avoid gradient-in-loop GPU warnings)
 float caustics(vec2 uv, float time) {
     vec2 p = uv * 8.0;
     float c = 0.0;
     
-    // Multiple overlapping caustic patterns
-    for(int i = 0; i < 3; i++) {
-        float fi = float(i);
-        vec2 q = p + vec2(cos(time * 0.3 + fi), sin(time * 0.2 + fi)) * 0.5;
-        c += sin(q.x + cos(q.y + time * 0.4)) * sin(q.y + cos(q.x + time * 0.3));
-    }
+    // Iteration 0
+    vec2 q0 = p + vec2(cos(time * 0.3), sin(time * 0.2)) * 0.5;
+    c += sin(q0.x + cos(q0.y + time * 0.4)) * sin(q0.y + cos(q0.x + time * 0.3));
+    
+    // Iteration 1
+    vec2 q1 = p + vec2(cos(time * 0.3 + 1.0), sin(time * 0.2 + 1.0)) * 0.5;
+    c += sin(q1.x + cos(q1.y + time * 0.4)) * sin(q1.y + cos(q1.x + time * 0.3));
+    
+    // Iteration 2
+    vec2 q2 = p + vec2(cos(time * 0.3 + 2.0), sin(time * 0.2 + 2.0)) * 0.5;
+    c += sin(q2.x + cos(q2.y + time * 0.4)) * sin(q2.y + cos(q2.x + time * 0.3));
     
     return c * 0.1 + 0.5;
 }

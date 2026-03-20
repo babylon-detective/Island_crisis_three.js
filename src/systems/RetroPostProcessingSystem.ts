@@ -13,6 +13,7 @@ export class RetroPostProcessingSystem {
   private retroPass: THREE.ShaderMaterial
   private retroQuad: THREE.Mesh
   private retroScene: THREE.Scene
+  private orthoCamera: THREE.OrthographicCamera
   private fallbackToDirectRender: boolean = false
   
   // Configuration
@@ -55,6 +56,9 @@ export class RetroPostProcessingSystem {
     this.retroQuad = new THREE.Mesh(quadGeometry, this.retroPass)
     this.retroScene = new THREE.Scene()
     this.retroScene.add(this.retroQuad)
+    
+    // Reusable orthographic camera for post-processing quad
+    this.orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
     
     logger.info(LogModule.SYSTEM, 'Retro Post-Processing System initialized (Sega Saturn style)')
   }
@@ -206,13 +210,10 @@ export class RetroPostProcessingSystem {
       // Set the render target texture for post-processing
       this.retroPass.uniforms.tDiffuse.value = this.renderTarget.texture
       
-      // Create orthographic camera for fullscreen quad
-      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
-      
       // Render post-processed quad to screen
       this.renderer.setRenderTarget(null)
       this.renderer.clear()
-      this.renderer.render(this.retroScene, orthoCamera)
+      this.renderer.render(this.retroScene, this.orthoCamera)
       
       // Restore previous render target
       this.renderer.setRenderTarget(oldRenderTarget)

@@ -2451,6 +2451,11 @@ class IntegratedThreeJSApp {
   /** Reusable scratch vectors to avoid per-frame allocations */
   private _lightScratchDir = new THREE.Vector3()
   private _lightingFrameSkip = 0
+  /** Cached references to scene lights — rebuilt when scene changes */
+  private _cachedSceneLights: THREE.Light[] | null = null
+  private _cachedSceneLightsFrame = -1
+  /** Cached player shader materials — rebuilt when player mesh changes */
+  private _cachedPlayerShaderMats: THREE.ShaderMaterial[] | null = null
 
   private updateCharacterLighting(): void {
     // Only recompute dominant lights every 4 frames — lights don't change fast
@@ -2462,68 +2467,87 @@ class IntegratedThreeJSApp {
 
     const playerPos = playerMesh.position
 
-    // ---- Collect candidate lights from the scene ----
+    // ---- Collect scene lights (cache for 60 frames) ----
+    if (!this._cachedSceneLights || (this.frameCount - this._cachedSceneLightsFrame) > 60) {
+      this._cachedSceneLights = []
+      this.scene.traverse((obj: THREE.Object3D) => {
+        if (obj === this.ambientLight) return
+        if (obj instanceof THREE.DirectionalLight || obj instanceof THREE.PointLight || obj instanceof THREE.SpotLight) {
+          this._cachedSceneLights!.push(obj)
+        }
+      })
+      this._cachedSceneLightsFrame = this.frameCount
+    }
+
+    // ---- Cache player shader materials ----
+    if (!this._cachedPlayerShaderMats) {
+      this._cachedPlayerShaderMats = []
+      playerMesh.traverse((child: THREE.Object3D) => {
+        const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
+        if (m?.isShaderMaterial) {
+          this._cachedPlayerShaderMats!.push(m)
+        }
+      })
+    }
+
+    // ---- Score candidate lights ----
     interface LightCandidate {
-      dir: THREE.Vector3    // direction FROM object TO light (normalised)
+      dir: THREE.Vector3
       color: THREE.Color
-      influence: number     // intensity × attenuation
+      influence: number
     }
     const candidates: LightCandidate[] = []
 
-    this.scene.traverse((obj: THREE.Object3D) => {
-      if (obj === this.ambientLight) return // skip ambient
-      if (!obj.visible) return
+    for (const obj of this._cachedSceneLights) {
+      if (!obj.visible) continue
 
       if (obj instanceof THREE.DirectionalLight) {
-        // Directional lights have no position attenuation — influence = intensity
         const dir = this._lightScratchDir
           .copy(obj.position)
           .sub(obj.target.position)
           .normalize()
         candidates.push({
           dir: dir.clone(),
-          color: obj.color.clone(),
+          color: obj.color,
           influence: obj.intensity
         })
       } else if (obj instanceof THREE.PointLight) {
         const dir = this._lightScratchDir.copy(obj.position).sub(playerPos)
         const dist = dir.length()
-        if (dist < 0.01) return
+        if (dist < 0.01) continue
         dir.normalize()
         const attenuation = 1.0 / (1.0 + dist * dist * 0.01)
         candidates.push({
           dir: dir.clone(),
-          color: obj.color.clone(),
+          color: obj.color,
           influence: obj.intensity * attenuation
         })
       } else if (obj instanceof THREE.SpotLight) {
         const dir = this._lightScratchDir.copy(obj.position).sub(playerPos)
         const dist = dir.length()
-        if (dist < 0.01) return
+        if (dist < 0.01) continue
         dir.normalize()
         const attenuation = 1.0 / (1.0 + dist * dist * 0.01)
         candidates.push({
           dir: dir.clone(),
-          color: obj.color.clone(),
-          influence: obj.intensity * attenuation * 0.5 // spot lights contribute less broadly
+          color: obj.color,
+          influence: obj.intensity * attenuation * 0.5
         })
       }
-    })
+    }
 
-    // Sort descending by influence
     candidates.sort((a, b) => b.influence - a.influence)
 
-    // ---- Push top 1-2 lights into character shader uniforms ----
+    // ---- Push top 1-2 lights into cached character shader uniforms ----
     const setAll = (name: string, value: any) => {
-      playerMesh.traverse((child: THREE.Object3D) => {
-        const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
-        if (m?.isShaderMaterial && m.uniforms[name]) {
+      for (const m of this._cachedPlayerShaderMats!) {
+        if (m.uniforms[name]) {
           const u = m.uniforms[name]
           if (value instanceof THREE.Vector3)      (u.value as THREE.Vector3).copy(value)
           else if (value instanceof THREE.Color)   (u.value as THREE.Color).copy(value)
           else                                      u.value = value
         }
-      })
+      }
     }
 
     // Primary dominant light
@@ -2868,14 +2892,16 @@ class IntegratedThreeJSApp {
     // Pixel ratio
     this.renderer.setPixelRatio(settings.pixelRatio)
 
-    // Shadow map size & type
+    // Shadow map size & type — only dispose if size actually changed
     if (this.keyLight?.shadow) {
-      this.keyLight.shadow.mapSize.width = settings.shadowMapSize
-      this.keyLight.shadow.mapSize.height = settings.shadowMapSize
-      // Force Three.js to regenerate the shadow map at the new size
-      if (this.keyLight.shadow.map) {
-        this.keyLight.shadow.map.dispose()
-        this.keyLight.shadow.map = null as any
+      const currentSize = this.keyLight.shadow.mapSize.width
+      if (currentSize !== settings.shadowMapSize) {
+        this.keyLight.shadow.mapSize.width = settings.shadowMapSize
+        this.keyLight.shadow.mapSize.height = settings.shadowMapSize
+        if (this.keyLight.shadow.map) {
+          this.keyLight.shadow.map.dispose()
+          this.keyLight.shadow.map = null as any
+        }
       }
     }
     this.renderer.shadowMap.type = settings.shadowMapType as THREE.ShadowMapType
@@ -3208,8 +3234,10 @@ class IntegratedThreeJSApp {
       // Update dominant light selection for the character shader
       this.updateCharacterLighting()
       
-      // Update HUD with current data
-      this.updateHUD(deltaTime)
+      // Update HUD with current data (throttled to every 3rd frame)
+      if (this.frameCount % 3 === 0) {
+        this.updateHUD(deltaTime)
+      }
       
       // Update collision system (gravity, collision resolution) - throttled for performance
       performanceMonitor.startCollisionCheck()
