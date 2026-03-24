@@ -4,6 +4,7 @@ import { NPCAISystem } from './NPCAISystem'
 import { CharacterAnimationSystem } from './CharacterAnimationSystem'
 import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
+import { traceInputCommand, type InputTraceSource } from './InputTrace'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -255,15 +256,27 @@ export class DialogueManager {
   private handleKey(e: KeyboardEvent): void {
     if (!this.isActive) return
 
-    // During active dialogue: WASD / arrows move the highlighted choice
-    if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+    // During active dialogue: I/K, W/S, or arrows move the highlighted choice.
+    if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyI') {
       e.preventDefault()
-      this.cycleChoice(-1)
+      this.handleNavigateInput(-1, 'keyboard')
       return
     }
-    if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+    if (e.code === 'ArrowDown' || e.code === 'KeyS' || e.code === 'KeyK') {
       e.preventDefault()
-      this.cycleChoice(1)
+      this.handleNavigateInput(1, 'keyboard')
+      return
+    }
+
+    if (e.code === 'KeyJ' || e.code === 'Enter' || e.code === 'NumpadEnter') {
+      e.preventDefault()
+      this.handleConfirmInput('keyboard')
+      return
+    }
+
+    if (e.code === 'KeyL' || e.code === 'Escape') {
+      e.preventDefault()
+      this.handleCancelInput('keyboard')
       return
     }
 
@@ -271,7 +284,7 @@ export class DialogueManager {
     if (e.code.startsWith('Digit')) {
       const digit = parseInt(e.code.replace('Digit', ''), 10)
       if (digit >= 1 && digit <= 9) {
-        this.selectChoice(digit - 1)
+        this.selectChoice(digit - 1, 'keyboard')
       }
     }
   }
@@ -316,7 +329,21 @@ export class DialogueManager {
   // DIALOGUE FLOW
   // --------------------------------------------------------------------------
 
+  private getDialogueStartBlockReason(npcId: string): string | null {
+    const treeId = this.npcDialogueMap.get(npcId)
+    if (!treeId || !this.trees.has(treeId)) return 'missing-dialogue-tree'
+    if (this.isActive) return 'dialogue-already-active'
+    if (this.npcSystem.isInteractionOnCooldown(npcId)) return 'interaction-cooldown'
+    if (this.cameraManager?.isFading()) return 'camera-fading'
+    if (this.cameraManager?.isInDialogueMode()) return 'camera-dialogue-mode'
+    if (this.cameraManager?.isInBattleMode()) return 'camera-battle-mode'
+    return null
+  }
+
   startDialogue(npcId: string): void {
+    const blockReason = this.getDialogueStartBlockReason(npcId)
+    if (blockReason) return
+
     const treeId = this.npcDialogueMap.get(npcId)
     if (!treeId) return
     const tree = this.trees.get(treeId)
@@ -391,15 +418,37 @@ export class DialogueManager {
     )
   }
 
-  selectChoice(index: number): void {
-    if (!this.activeTree || !this.activeNodeId) return
+  selectChoice(index: number, source: InputTraceSource = 'system'): void {
+    if (!this.activeTree || !this.activeNodeId) {
+      traceInputCommand({ source, target: 'dialogue', command: 'select-choice', result: 'ignored' })
+      return
+    }
     const node = this.activeTree.nodes.get(this.activeNodeId)
-    if (!node) return
+    if (!node) {
+      traceInputCommand({ source, target: 'dialogue', command: 'select-choice', result: 'ignored' })
+      return
+    }
 
     const visibleChoices = node.choices.filter(c => !c.condition || c.condition())
-    if (index < 0 || index >= visibleChoices.length) return
+    if (index < 0 || index >= visibleChoices.length) {
+      traceInputCommand({
+        source,
+        target: 'dialogue',
+        command: 'select-choice',
+        result: 'ignored',
+        details: { index, visibleChoiceCount: visibleChoices.length }
+      })
+      return
+    }
 
     const choice = visibleChoices[index]
+    traceInputCommand({
+      source,
+      target: 'dialogue',
+      command: 'select-choice',
+      result: 'executed',
+      details: { index, text: choice.text, nextNodeId: choice.nextNodeId ?? null }
+    })
     choice.onSelect?.()
     if (!this.isActive) return
     if (!choice.nextNodeId) {
@@ -423,6 +472,8 @@ export class DialogueManager {
     this.currentVisibleChoices = []
     this.uiCallbacks?.hideDialogue()
     this.hideDialogueOverlay()
+    this.promptVisible = false
+    this.nearestInteractableNpc = null
 
     // Return camera to gameplay BEFORE clearing active state,
     // so exitDialogueMode sees currentMode === 'dialogue'
@@ -487,32 +538,98 @@ export class DialogueManager {
    * Called by PlayerController when the action button is pressed.
    * Returns true if the dialogue system consumed the input.
    */
-  handleActionButton(): boolean {
+  handleActionButton(source: InputTraceSource = 'system'): boolean {
     // Start dialogue if near an NPC
     if (!this.isActive) {
       if (this.nearestInteractableNpc) {
+        const blockReason = this.getDialogueStartBlockReason(this.nearestInteractableNpc)
+        if (blockReason) {
+          traceInputCommand({
+            source,
+            target: 'dialogue',
+            command: 'talk',
+            result: 'blocked',
+            details: { npcId: this.nearestInteractableNpc, reason: blockReason }
+          })
+          return false
+        }
+        traceInputCommand({
+          source,
+          target: 'dialogue',
+          command: 'talk',
+          result: 'consumed',
+          details: { npcId: this.nearestInteractableNpc }
+        })
         this.startDialogue(this.nearestInteractableNpc)
         return true
       }
+      traceInputCommand({ source, target: 'dialogue', command: 'talk', result: 'ignored' })
       return false
     }
 
     // Dialogue is active — determine what to do
     const node = this.activeTree?.nodes.get(this.activeNodeId ?? '')
-    if (!node) { this.endDialogue(); return true }
+    if (!node) {
+      traceInputCommand({ source, target: 'dialogue', command: 'confirm', result: 'executed', details: { reason: 'missing-node' } })
+      this.endDialogue()
+      return true
+    }
 
     // Terminal node or no choices → end dialogue
     if (node.isTerminal || this.currentVisibleChoices.length === 0) {
+      traceInputCommand({
+        source,
+        target: 'dialogue',
+        command: 'confirm',
+        result: 'executed',
+        details: { terminal: true, activeNodeId: this.activeNodeId }
+      })
       this.endDialogue()
       return true
     }
 
     // Has choices → select the currently highlighted choice
     if (this.currentVisibleChoices.length > 0) {
-      this.selectChoice(this.highlightedChoiceIndex)
+      this.selectChoice(this.highlightedChoiceIndex, source)
       return true
     }
 
+    return true
+  }
+
+  public handleNavigateInput(dir: number, source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive || this.currentVisibleChoices.length === 0) {
+      traceInputCommand({
+        source,
+        target: 'dialogue',
+        command: dir < 0 ? 'navigate-up' : 'navigate-down',
+        result: 'ignored',
+        details: { isActive: this.isActive, choiceCount: this.currentVisibleChoices.length }
+      })
+      return false
+    }
+    this.cycleChoice(dir)
+    traceInputCommand({
+      source,
+      target: 'dialogue',
+      command: dir < 0 ? 'navigate-up' : 'navigate-down',
+      result: 'consumed',
+      details: { highlightedChoiceIndex: this.highlightedChoiceIndex }
+    })
+    return true
+  }
+
+  public handleConfirmInput(source: InputTraceSource = 'system'): boolean {
+    return this.handleActionButton(source)
+  }
+
+  public handleCancelInput(source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive) {
+      traceInputCommand({ source, target: 'dialogue', command: 'cancel', result: 'ignored' })
+      return false
+    }
+    traceInputCommand({ source, target: 'dialogue', command: 'cancel', result: 'executed', details: { activeNodeId: this.activeNodeId } })
+    this.endDialogue()
     return true
   }
 
@@ -596,15 +713,14 @@ export class DialogueManager {
     return this.inputMode === 'touch'
   }
 
-  private getInteractionPromptText(npcId: string): string {
-    const label = npcId.toUpperCase()
+  private getInteractionPromptText(_npcId: string): string {
     switch (this.inputMode) {
       case 'touch':
-        return `TALK ${label}`
+        return 'TALK'
       case 'gamepad':
-        return `A. TALK ${label}`
+        return 'A. TALK'
       default:
-        return `J. TALK ${label}`
+        return 'J. TALK'
     }
   }
 
@@ -640,10 +756,11 @@ export class DialogueManager {
 
     if (this.isTouchInputMode()) {
       this.overlayPrompt.style.cssText =
-        'position:absolute;right:20px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
-        `color:${promptColor};font-size:22px;letter-spacing:3px;white-space:nowrap;display:none;pointer-events:auto;` +
+        'position:absolute;right:16px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
+        `color:${promptColor};font-size:18px;letter-spacing:2px;display:none;pointer-events:auto;` +
         'text-align:right;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;' +
-        'border:none;padding:10px 32px;cursor:pointer;touch-action:manipulation;'
+        'border:none;padding:10px 18px;cursor:pointer;touch-action:manipulation;' +
+        'max-width:calc(50vw - 28px);line-height:1.1;white-space:normal;'
 
       this.overlayBox.style.cssText =
         'position:absolute;left:16px;right:16px;bottom:calc(48px + env(safe-area-inset-bottom, 0px));' +
@@ -703,14 +820,14 @@ export class DialogueManager {
         e.preventDefault()
         e.stopPropagation()
         if (this.nearestInteractableNpc && !this.isActive) {
-          this.startDialogue(this.nearestInteractableNpc)
+          this.handleActionButton('touch')
         }
       }
       this.overlayPrompt.onclick = (e) => {
         e.preventDefault()
         e.stopPropagation()
         if (this.nearestInteractableNpc && !this.isActive) {
-          this.startDialogue(this.nearestInteractableNpc)
+          this.handleActionButton('mouse')
         }
       }
     } else {
@@ -759,7 +876,7 @@ export class DialogueManager {
           event.preventDefault()
           // On touch: directly select the choice (tap-to-execute)
           this.highlightedChoiceIndex = c.index
-          this.selectChoice(c.index)
+          this.selectChoice(c.index, 'touch')
         }, { passive: false })
         btn.addEventListener('click', (event) => {
           if (this.isTouchInputMode()) {
@@ -767,7 +884,7 @@ export class DialogueManager {
             // Tap already handled by touchend
             return
           }
-          this.selectChoice(c.index)
+          this.selectChoice(c.index, 'mouse')
         })
         this.overlayChoices!.appendChild(btn)
       }

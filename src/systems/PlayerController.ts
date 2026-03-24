@@ -2,9 +2,11 @@ import * as THREE from 'three'
 import { CollisionSystem, CollisionVolume, CollidableObject } from './CollisionSystem'
 import { CameraManager } from './CameraManager'
 import { logger, LogModule } from './Logger'
+import { traceInputCommand, type InputTraceSource } from './InputTrace'
 import { ObjectLoader } from './ObjectLoader'
 import type { DialogueManager } from './DialogueSystem'
 import type { BattleSystem } from './BattleSystem'
+import type { GamepadPlayerInput } from './InputSystem'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -113,8 +115,7 @@ export class PlayerController {
   // Touch input handling
   private touchState: {
     activeTouches: Map<number, { x: number, y: number, startX: number, startY: number, prevX: number, prevY: number }>
-    movementTouch: number | null // Unused in tap-to-navigate mode (kept for compatibility)
-    lookTouches: number[] // IDs of touches used for camera look
+    activeLookTouch: number | null
     runTouch: number | null // Double-tap + hold in navigate curtain
     lastTapTime: number
     lastTapX: number
@@ -124,8 +125,7 @@ export class PlayerController {
     movementDirection: THREE.Vector2 // Continuous movement direction from touch position
   } = {
     activeTouches: new Map(),
-    movementTouch: null,
-    lookTouches: [],
+    activeLookTouch: null,
     runTouch: null,
     lastTapTime: 0,
     lastTapX: 0,
@@ -448,19 +448,12 @@ export class PlayerController {
 
   private updateInputState(): void {
     // Keyboard input
-    const modalInputActive =
-      (this.dialogueManager?.isDialogueActive() ?? false) ||
-      (this.battleManager?.isBattleActive() ?? false)
     const keyForward = this.keyStates.get('KeyW') || false
     const keyBackward = this.keyStates.get('KeyS') || false
     const keyLeft = this.keyStates.get('KeyA') || false
     const keyRight = this.keyStates.get('KeyD') || false
-    const keyJump = modalInputActive
-      ? (this.keyStates.get('KeyK') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
-      : (this.keyStates.get('KeyJ') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
-    const keyAttack = modalInputActive
-      ? (this.keyStates.get('KeyJ') || false)
-      : (this.keyStates.get('KeyK') || false)
+    const keyJump = (this.keyStates.get('KeyJ') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
+    const keyAttack = this.keyStates.get('KeyK') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyI') || false
     
@@ -497,10 +490,10 @@ export class PlayerController {
     }
     
     // Touch camera input (single-finger drag for looking)
-    if (this.touchState.lookTouches.length >= 1) {
+    if (this.touchState.activeLookTouch !== null) {
       // Convert touch delta to camera rotation
       // Use higher sensitivity for touch since deltas are pixel-based
-      const lookSensitivity = 0.0065
+      const lookSensitivity = 0.0085
       // Use the look delta even if small - let the camera manager handle deadzone
       this.input.analogCamera = this.touchState.lastLookDelta.clone().multiplyScalar(lookSensitivity)
     } else {
@@ -517,6 +510,7 @@ export class PlayerController {
   // ============================================================================
   
   private handleTouchStart(event: TouchEvent): void {
+    if (!this.shouldHandleGameplayTouchEvent(event)) return
     event.preventDefault()
     
     for (let i = 0; i < event.changedTouches.length; i++) {
@@ -534,6 +528,11 @@ export class PlayerController {
 
       const zone: 'navigate' | 'look' = touch.clientX < (window.innerWidth * 0.5) ? 'navigate' : 'look'
       this.touchZoneById.set(touch.identifier, zone)
+
+      if (zone === 'look' && this.touchState.activeLookTouch === null) {
+        this.touchState.activeLookTouch = touch.identifier
+        this.touchState.lastLookDelta.set(0, 0)
+      }
 
       // Old-feel gesture: double-tap + hold on the navigate curtain to run.
       if (zone === 'navigate') {
@@ -559,36 +558,39 @@ export class PlayerController {
         moved: false,
       })
     }
-    
-    // Reassign touch roles based on total number of touches
-    this.reassignTouchRoles()
+
+    this.updateInputState()
   }
   
   /**
    * Reassign touch roles: one finger drag = camera look, tap = navigation.
    */
   private reassignTouchRoles(): void {
-    const touchCount = this.touchState.activeTouches.size
-    
-    if (touchCount === 0) {
-      // No touches - clear everything
-      this.touchState.movementTouch = null
-      this.touchState.lookTouches = []
+    if (this.touchState.activeTouches.size === 0) {
+      this.touchState.activeLookTouch = null
       this.touchState.runTouch = null
       this.touchState.movementDirection.set(0, 0)
       this.touchState.lastLookDelta.set(0, 0)
-    } else {
-      // Right curtain touches drive camera look.
-      this.touchState.movementTouch = null
-      this.touchState.movementDirection.set(0, 0)
-      const touchIds = Array.from(this.touchState.activeTouches.keys())
-      this.touchState.lookTouches = touchIds
-        .filter(id => this.touchZoneById.get(id) === 'look')
-        .slice(0, 1)
+      return
     }
+
+    if (
+      this.touchState.activeLookTouch !== null &&
+      this.touchState.activeTouches.has(this.touchState.activeLookTouch) &&
+      this.touchZoneById.get(this.touchState.activeLookTouch) === 'look'
+    ) {
+      return
+    }
+
+    const replacementTouchId = Array.from(this.touchState.activeTouches.keys())
+      .find(id => this.touchZoneById.get(id) === 'look') ?? null
+
+    this.touchState.activeLookTouch = replacementTouchId
+    this.touchState.lastLookDelta.set(0, 0)
   }
   
   private handleTouchMove(event: TouchEvent): void {
+    if (!this.shouldHandleGameplayTouchEvent(event)) return
     event.preventDefault()
     
     // Update touch positions and calculate deltas
@@ -599,7 +601,6 @@ export class PlayerController {
       
       if (!touchInfo) continue
       
-      // Calculate delta from current position BEFORE updating
       const deltaX = touch.clientX - touchInfo.x
       const deltaY = touch.clientY - touchInfo.y
       
@@ -620,54 +621,22 @@ export class PlayerController {
       // Update current position
       touchInfo.x = touch.clientX
       touchInfo.y = touch.clientY
-    }
-    
-    // Reassign roles if touch count changed
-    const currentTouchCount = this.touchState.activeTouches.size
-    const expectedMovementTouch = this.touchState.movementTouch !== null ? 1 : 0
-    const expectedLookTouches = this.touchState.lookTouches.length
-    const expectedTotal = expectedMovementTouch + expectedLookTouches
-    
-    if (currentTouchCount !== expectedTotal) {
-      this.reassignTouchRoles()
-    }
-    
-    // Process look touches (single finger)
-    if (this.touchState.lookTouches.length >= 1) {
-      let totalDeltaX = 0
-      let totalDeltaY = 0
-      let validTouches = 0
-      
-      for (const touchId of this.touchState.lookTouches) {
-        const touchInfo = this.touchState.activeTouches.get(touchId)
-        if (touchInfo) {
-          // Calculate delta from previous position
-          const deltaX = touchInfo.x - touchInfo.prevX
-          const deltaY = touchInfo.y - touchInfo.prevY
-          
-          // Accumulate deltas (even small ones for responsiveness)
-          totalDeltaX += deltaX
-          totalDeltaY += deltaY
-          validTouches++
-        }
+
+      if (touchId === this.touchState.activeLookTouch) {
+        this.touchState.lastLookDelta.set(deltaX, deltaY)
       }
-      
-      if (validTouches > 0) {
-        // Average deltas for smooth camera rotation.
-        const avgDeltaX = totalDeltaX / validTouches
-        const avgDeltaY = totalDeltaY / validTouches
-        this.touchState.lastLookDelta.set(avgDeltaX, avgDeltaY)
-      }
-    } else {
-      // Not enough touches for camera look
+    }
+
+    if (this.touchState.activeLookTouch === null) {
       this.touchState.lastLookDelta.set(0, 0)
     }
-    
+
     // Update input state to process touch movement
     this.updateInputState()
   }
   
   private handleTouchEnd(event: TouchEvent): void {
+    if (!this.shouldHandleGameplayTouchEvent(event)) return
     event.preventDefault()
     
     for (let i = 0; i < event.changedTouches.length; i++) {
@@ -685,6 +654,11 @@ export class PlayerController {
 
       if (this.touchState.runTouch === touchId) {
         this.touchState.runTouch = null
+      }
+
+      if (this.touchState.activeLookTouch === touchId) {
+        this.touchState.activeLookTouch = null
+        this.touchState.lastLookDelta.set(0, 0)
       }
       
       this.touchState.activeTouches.delete(touchId)
@@ -726,6 +700,17 @@ export class PlayerController {
       if (hits.length > 0) {
         this.navigationTarget = hits[0].point.clone()
         this.showNavigationMarker(this.navigationTarget)
+        traceInputCommand({
+          source: 'touch',
+          target: 'player',
+          command: 'navigate-tap',
+          result: 'executed',
+          details: {
+            x: Number(screenX.toFixed(1)),
+            y: Number(screenY.toFixed(1)),
+            world: this.navigationTarget.toArray().map(value => Number(value.toFixed(2)))
+          }
+        })
         return
       }
     }
@@ -738,6 +723,17 @@ export class PlayerController {
       hit.y = this.collisionSystem.getGroundHeight(hit.x, hit.z)
       this.navigationTarget = hit
       this.showNavigationMarker(this.navigationTarget)
+      traceInputCommand({
+        source: 'touch',
+        target: 'player',
+        command: 'navigate-tap',
+        result: 'executed',
+        details: {
+          x: Number(screenX.toFixed(1)),
+          y: Number(screenY.toFixed(1)),
+          world: this.navigationTarget.toArray().map(value => Number(value.toFixed(2)))
+        }
+      })
     }
   }
 
@@ -782,21 +778,20 @@ export class PlayerController {
     this.handleTouchEnd(event)
   }
 
+  private shouldHandleGameplayTouchEvent(event: TouchEvent): boolean {
+    const target = event.target
+    if (!(target instanceof Element)) return true
+
+    return !target.closest(
+      '#dialogue-overlay, #battle-overlay, #mobile-start-btn, #mobile-jump-btn, #mobile-ranged-btn, button'
+    )
+  }
+
   // ============================================================================
   // GAMEPAD INPUT HANDLING
   // ============================================================================
   
-  public handleGamepadInput(input: {
-    movement: THREE.Vector2
-    camera: THREE.Vector2
-    jump: boolean
-    run: boolean
-    action: boolean
-    cancel: boolean
-    cameraMode: boolean
-    select: boolean
-    menu: boolean
-  }): void {
+  public handleGamepadInput(input: GamepadPlayerInput): void {
     this.gamepadInput = {
       movement: input.movement.clone(),
       camera: input.camera.clone(),
@@ -843,13 +838,24 @@ export class PlayerController {
     // ---- Contextual confirm button (battle / dialogue) ----
     const confirmPressed = this.input.jump
     if (confirmPressed && !this.actionConsumedThisPress) {
+      const source = this.getConfirmInputSource()
       let consumed = false
       if (this.battleManager) {
-        consumed = this.battleManager.handleConfirmActionButton()
+        consumed = this.battleManager.handleConfirmActionButton(source)
       }
       if (!consumed && this.dialogueManager) {
-        consumed = this.dialogueManager.handleActionButton()
+        consumed = this.dialogueManager.handleActionButton(source)
       }
+      traceInputCommand({
+        source,
+        target: 'player',
+        command: 'confirm/context',
+        result: consumed ? 'consumed' : 'ignored',
+        details: {
+          battleActive: this.battleManager?.isBattleActive() ?? false,
+          dialogueActive: this.dialogueManager?.isDialogueActive() ?? false
+        }
+      })
       if (consumed) {
         this.actionConsumedThisPress = true
       }
@@ -861,8 +867,16 @@ export class PlayerController {
     // ---- Attack button (battle initiation) ----
     const attackPressed = this.input.attack
     if (attackPressed && !this.attackConsumedThisPress) {
+      const source = this.getAttackInputSource()
       if (this.battleManager) {
-        const consumed = this.battleManager.handleAttackButton()
+        const consumed = this.battleManager.handleAttackButton(source)
+        traceInputCommand({
+          source,
+          target: 'player',
+          command: 'attack/context',
+          result: consumed ? 'consumed' : 'ignored',
+          details: { battleActive: this.battleManager.isBattleActive() }
+        })
         if (consumed) {
           this.attackConsumedThisPress = true
         }
@@ -873,7 +887,7 @@ export class PlayerController {
     }
 
     if (this.battleManager?.isBattleActive() && this.gamepadInput.cancel) {
-      this.battleManager.handleEscapeInput()
+      this.battleManager.handleEscapeInput('gamepad')
     }
 
     // Block movement while dialogue or battle is active
@@ -1138,15 +1152,21 @@ export class PlayerController {
     if (this.input.analogCamera) {
       const cameraX = this.input.analogCamera.x
       const cameraY = this.input.analogCamera.y
+      const usingTouchLook = this.touchState.activeLookTouch !== null
       
       // Apply per-component deadzone for precise control
-      const deadzone = 0.05
+      const deadzone = usingTouchLook ? 0.005 : 0.05
       const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
       const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
       
       // Only update camera if at least one axis has input (works for all camera modes including orbital)
       if (adjustedX !== 0 || adjustedY !== 0) {
         this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+      }
+
+      if (usingTouchLook) {
+        this.touchState.lastLookDelta.set(0, 0)
+        this.input.analogCamera.set(0, 0)
       }
     }
   }
@@ -1481,12 +1501,28 @@ export class PlayerController {
 
   public setVirtualJumpPressed(pressed: boolean): void {
     this.virtualJumpPressed = pressed
+    traceInputCommand({ source: 'touch', target: 'player', command: 'virtual-confirm', result: pressed ? 'received' : 'released' })
     this.updateInputState()
   }
 
   public setVirtualAttackPressed(pressed: boolean): void {
     this.virtualAttackPressed = pressed
+    traceInputCommand({ source: 'touch', target: 'player', command: 'virtual-attack', result: pressed ? 'received' : 'released' })
     this.updateInputState()
+  }
+
+  private getConfirmInputSource(): InputTraceSource {
+    if (this.virtualJumpPressed) return 'touch'
+    if (this.keyStates.get('KeyJ') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter')) return 'keyboard'
+    if (this.gamepadInput.jump) return 'gamepad'
+    return 'system'
+  }
+
+  private getAttackInputSource(): InputTraceSource {
+    if (this.virtualAttackPressed) return 'touch'
+    if (this.keyStates.get('KeyK')) return 'keyboard'
+    if (this.gamepadInput.action) return 'gamepad'
+    return 'system'
   }
 
   public isRangedModeEnabled(): boolean {

@@ -16,10 +16,12 @@ import { ParameterManager } from './systems/ParameterManager'
 import { ParameterGUI } from './systems/ParameterGUI'
 import { ParameterIntegration } from './systems/ParameterIntegration'
 import { logger, LogModule } from './systems/Logger'
+import { traceInputCommand } from './systems/InputTrace'
 import { performanceMonitor, adaptiveQuality, QualityTier, QualitySettings } from './systems/PerformanceMonitor'
 import { DebugGUIManager } from './systems/DebugGUIManager'
 import { HUDSystem, HUDData } from './systems/HUDSystem'
 import { InputSystem, GamepadInputHandler } from './systems/InputSystem'
+import type { GamepadPlayerInput } from './systems/InputSystem'
 import { RetroPostProcessingSystem } from './systems/RetroPostProcessingSystem'
 import { PauseManager } from './systems/PauseManager'
 import { PauseOverlay } from './systems/PauseOverlay'
@@ -1043,10 +1045,13 @@ class IntegratedThreeJSApp {
       if (this.isGamepadInputActive(input)) {
         this.setActiveInputMode('gamepad')
       }
-      this.playerController.handleGamepadInput(input)
+      const modalActive = (this.dialogueManager?.isDialogueActive() ?? false) || (this.battleSystem?.isBattleActive() ?? false)
+      const modalConsumed = this.handleModalGamepadInput(input)
+      this.playerController.handleGamepadInput(modalActive || modalConsumed ? this.getNeutralGamepadInput() : input)
       
       // Handle menu/pause button (start button)
       if (input.menu) {
+        traceInputCommand({ source: 'gamepad', target: 'main', command: 'menu/pause', result: 'executed' })
         console.log('🎮 Menu/Pause button pressed (gamepad)')
         this.togglePause()
       }
@@ -2833,6 +2838,7 @@ class IntegratedThreeJSApp {
     
     // Click handler for objects
     this.renderer.domElement.addEventListener('click', this.onCanvasClick.bind(this))
+    this.renderer.domElement.addEventListener('contextmenu', this.onCanvasContextMenu.bind(this))
     this.renderer.domElement.addEventListener('pointerdown', (event) => {
       this.setActiveInputMode(event.pointerType === 'touch' ? 'touch' : 'mouse')
     })
@@ -2974,7 +2980,18 @@ class IntegratedThreeJSApp {
       }
     }
 
+    this.reconcileModalState()
+
     console.log(`🎥 Graphics pipeline recovered: reason=${reason}, viewport=${safeWidth}x${safeHeight}, mode=${this.cameraManager?.getCurrentMode?.() ?? 'unknown'}`)
+  }
+
+  private reconcileModalState(): void {
+    if (!this.cameraManager || this.cameraManager.isFading()) return
+
+    const cameraMode = this.cameraManager.getCurrentMode()
+    if (cameraMode !== 'dialogue' && (this.dialogueManager?.isDialogueActive() ?? false)) {
+      this.dialogueManager?.endDialogue()
+    }
   }
 
   private onVisibilityChange(): void {
@@ -2990,6 +3007,13 @@ class IntegratedThreeJSApp {
   }
 
   private onCanvasClick(event: MouseEvent): void {
+    this.setActiveInputMode('mouse')
+
+    if (this.handleMouseNavigationAction('talk')) {
+      event.preventDefault()
+      return
+    }
+
     const rect = this.renderer.domElement.getBoundingClientRect()
     const mouse = new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -3099,6 +3123,48 @@ class IntegratedThreeJSApp {
     } else {
       // console.log('❌ No mesh clicked - clicked on empty space')
     }
+  }
+
+  private onCanvasContextMenu(event: MouseEvent): void {
+    this.setActiveInputMode('mouse')
+
+    if (this.handleMouseNavigationAction('fight')) {
+      event.preventDefault()
+      return
+    }
+
+    event.preventDefault()
+  }
+
+  private handleMouseNavigationAction(action: 'talk' | 'fight'): boolean {
+    if (!this.gameplayInputEnabled || !this.cameraManager) {
+      traceInputCommand({ source: 'mouse', target: 'main', command: action, result: 'blocked', details: { reason: 'gameplay-disabled-or-missing-camera' } })
+      return false
+    }
+    if (this.cameraManager.isFading()) {
+      traceInputCommand({ source: 'mouse', target: 'main', command: action, result: 'blocked', details: { reason: 'camera-fading' } })
+      return false
+    }
+    if (this.dialogueManager?.isDialogueActive() || this.battleSystem?.isBattleActive()) {
+      traceInputCommand({ source: 'mouse', target: 'main', command: action, result: 'blocked', details: { reason: 'modal-active' } })
+      return false
+    }
+
+    const mode = this.cameraManager.getCurrentMode()
+    if (mode === 'dialogue' || mode === 'battle' || mode === 'freeview') {
+      traceInputCommand({ source: 'mouse', target: 'main', command: action, result: 'blocked', details: { reason: 'camera-mode', mode } })
+      return false
+    }
+
+    if (action === 'talk') {
+      const consumed = this.dialogueManager?.handleActionButton('mouse') ?? false
+      traceInputCommand({ source: 'mouse', target: 'main', command: action, result: consumed ? 'consumed' : 'ignored', details: { mode } })
+      return consumed
+    }
+
+    const consumed = this.battleSystem?.handleAttackButton('mouse') ?? false
+    traceInputCommand({ source: 'mouse', target: 'main', command: action, result: consumed ? 'consumed' : 'ignored', details: { mode } })
+    return consumed
   }
 
   /**
@@ -3255,6 +3321,7 @@ class IntegratedThreeJSApp {
 
       // Update NPC systems
       try {
+        this.reconcileModalState()
         const inDialogue = this.dialogueManager?.isDialogueActive() ?? false
         const inBattle = this.battleSystem?.isBattleActive() ?? false
         // Update AI first so animation state reads the current movement on the same frame.
@@ -3385,17 +3452,7 @@ class IntegratedThreeJSApp {
     animate(performance.now())
   }
 
-  private isGamepadInputActive(input: {
-    movement: THREE.Vector2
-    camera: THREE.Vector2
-    jump: boolean
-    run: boolean
-    action: boolean
-    cancel: boolean
-    cameraMode: boolean
-    select: boolean
-    menu: boolean
-  }): boolean {
+  private isGamepadInputActive(input: GamepadPlayerInput): boolean {
     return (
       input.movement.lengthSq() > 0.0001 ||
       input.camera.lengthSq() > 0.0001 ||
@@ -3405,12 +3462,59 @@ class IntegratedThreeJSApp {
       input.cancel ||
       input.cameraMode ||
       input.select ||
-      input.menu
+      input.menu ||
+      input.confirmPressed ||
+      input.actionPressed ||
+      input.itemPressed ||
+      input.navigateY !== 0
     )
+  }
+
+  private getNeutralGamepadInput(): GamepadPlayerInput {
+    return {
+      movement: new THREE.Vector2(),
+      camera: new THREE.Vector2(),
+      jump: false,
+      run: false,
+      action: false,
+      cancel: false,
+      cameraMode: false,
+      select: false,
+      menu: false,
+      confirmPressed: false,
+      actionPressed: false,
+      itemPressed: false,
+      navigateY: 0,
+    }
+  }
+
+  private handleModalGamepadInput(input: GamepadPlayerInput): boolean {
+    let consumed = false
+
+    if (this.battleSystem?.isBattleActive()) {
+      if (input.navigateY > 0) consumed = this.battleSystem.handleNavigateInput(-1, 'gamepad') || consumed
+      if (input.navigateY < 0) consumed = this.battleSystem.handleNavigateInput(1, 'gamepad') || consumed
+      if (input.actionPressed) consumed = this.battleSystem.handleDirectActionInput('attack', 'gamepad') || consumed
+      if (input.confirmPressed) consumed = this.battleSystem.handleDirectActionInput('guard', 'gamepad') || consumed
+      if (input.itemPressed) consumed = this.battleSystem.handleDirectActionInput('item', 'gamepad') || consumed
+      if (input.cancel) consumed = this.battleSystem.handleCancelInput('gamepad') || consumed
+      return consumed
+    }
+
+    if (this.dialogueManager?.isDialogueActive()) {
+      if (input.navigateY > 0) consumed = this.dialogueManager.handleNavigateInput(-1, 'gamepad') || consumed
+      if (input.navigateY < 0) consumed = this.dialogueManager.handleNavigateInput(1, 'gamepad') || consumed
+      if (input.confirmPressed) consumed = this.dialogueManager.handleConfirmInput('gamepad') || consumed
+      if (input.cancel) consumed = this.dialogueManager.handleCancelInput('gamepad') || consumed
+      return consumed
+    }
+
+    return false
   }
 
   private setActiveInputMode(mode: ActiveInputMode): void {
     if (this.activeInputMode === mode) return
+    traceInputCommand({ source: 'system', target: 'main', command: 'active-input-mode', result: 'forwarded', details: { from: this.activeInputMode, to: mode } })
     this.activeInputMode = mode
     this.dialogueManager?.setInputMode(mode)
     this.battleSystem?.setInputMode(mode)
@@ -3779,5 +3883,6 @@ logger.setDevelopmentMode()
 // Enable only specific modules for focused debugging
 logger.enableModule(LogModule.PLAYER)
 logger.enableModule(LogModule.CAMERA)
+logger.enableModule(LogModule.INPUT)
 // Enable collision debug logging temporarily to diagnose the issue
 logger.enableModule(LogModule.COLLISION)

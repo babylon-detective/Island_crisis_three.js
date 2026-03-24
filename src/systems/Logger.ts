@@ -17,6 +17,7 @@ export enum LogLevel {
 
 export enum LogModule {
   SYSTEM = 'SYSTEM',
+  INPUT = 'INPUT',
   PLAYER = 'PLAYER',
   CAMERA = 'CAMERA',
   COLLISION = 'COLLISION',

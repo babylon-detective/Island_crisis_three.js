@@ -90,6 +90,7 @@ export class BattleCameraController {
   // ============================================================================
 
   get active(): boolean { return this._active }
+  get busy(): boolean { return this.openingActive || this.currentShot !== null || this.queue.length > 0 }
 
   /** Set the fixed battle positions (exactly 8 units apart). */
   setBattlePositions(player: THREE.Vector3, enemy: THREE.Vector3): void {

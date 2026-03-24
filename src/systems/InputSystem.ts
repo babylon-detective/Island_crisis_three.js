@@ -1,5 +1,6 @@
 // @ts-nocheck
 import * as THREE from 'three'
+import { traceInputCommand } from './InputTrace'
 
 // Advanced TypeScript: String literal types for input events
 type InputEventType = 
@@ -39,6 +40,22 @@ interface GamepadState {
   connected: boolean
   index: number
   id: string
+}
+
+export interface GamepadPlayerInput {
+  movement: THREE.Vector2
+  camera: THREE.Vector2
+  jump: boolean
+  run: boolean
+  action: boolean
+  cancel: boolean
+  cameraMode: boolean
+  select: boolean
+  menu: boolean
+  confirmPressed: boolean
+  actionPressed: boolean
+  itemPressed: boolean
+  navigateY: number
 }
 
 // Discriminated union for different input events
@@ -283,17 +300,7 @@ class GamepadInputHandler extends BaseInputHandler {
   private previousState: GamepadState | null = null
 
   constructor(
-    private onPlayerInput?: (input: {
-      movement: THREE.Vector2
-      camera: THREE.Vector2
-      jump: boolean
-      run: boolean
-      action: boolean
-      cancel: boolean
-      cameraMode: boolean
-      select: boolean
-      menu: boolean
-    }) => void
+    private onPlayerInput?: (input: GamepadPlayerInput) => void
   ) {
     super()
   }
@@ -329,10 +336,35 @@ class GamepadInputHandler extends BaseInputHandler {
     const jump = gamepad.buttons.a
     const run = gamepad.buttons.ls // Hold left stick (L3) to run (like SHIFT on keyboard)
     const action = gamepad.buttons.x
+    const confirmPressed = this.wasButtonPressed('a', gamepad)
+    const actionPressed = this.wasButtonPressed('x', gamepad)
+    const itemPressed = this.wasButtonPressed('y', gamepad)
     const cancel = this.wasButtonPressed('b', gamepad)
     const cameraMode = this.wasButtonPressed('rs', gamepad) // Right stick (R3) to toggle camera (like C key)
     const select = this.wasButtonPressed('select', gamepad) // Select/Back button for view cycle
     const menu = this.wasButtonPressed('start', gamepad) // Start button for menu/pause
+    const navigateY = this.getDiscreteNavigateY(gamepad)
+
+    if (confirmPressed || actionPressed || itemPressed || cancel || cameraMode || select || menu || navigateY !== 0) {
+      const commands: string[] = []
+      if (confirmPressed) commands.push('confirm')
+      if (actionPressed) commands.push('action')
+      if (itemPressed) commands.push('item')
+      if (cancel) commands.push('cancel')
+      if (cameraMode) commands.push('camera-mode')
+      if (select) commands.push('select')
+      if (menu) commands.push('menu')
+      if (navigateY > 0) commands.push('navigate-up')
+      if (navigateY < 0) commands.push('navigate-down')
+
+      traceInputCommand({
+        source: 'gamepad',
+        target: 'input-system',
+        command: 'semantic-poll',
+        result: 'received',
+        details: { commands }
+      })
+    }
 
     // Send processed input to player controller
     if (this.onPlayerInput) {
@@ -345,7 +377,11 @@ class GamepadInputHandler extends BaseInputHandler {
         cancel,
         cameraMode,
         select,
-        menu
+        menu,
+        confirmPressed,
+        actionPressed,
+        itemPressed,
+        navigateY
       })
     }
 
@@ -360,6 +396,19 @@ class GamepadInputHandler extends BaseInputHandler {
     const current = currentState.buttons[button]
     const previous = this.previousState?.buttons[button] || false
     return current && !previous
+  }
+
+  private getDiscreteNavigateY(currentState: GamepadState): number {
+    if (this.wasButtonPressed('dpadUp', currentState)) return 1
+    if (this.wasButtonPressed('dpadDown', currentState)) return -1
+
+    const previousY = -(this.previousState?.axes.leftStickY ?? 0)
+    const currentY = -currentState.axes.leftStickY
+
+    if (currentY > 0.6 && previousY <= 0.6) return 1
+    if (currentY < -0.6 && previousY >= -0.6) return -1
+
+    return 0
   }
 
   public setDeadzone(deadzone: number): void {
@@ -739,17 +788,7 @@ export class InputSystem {
   }
 
   public createGamepadHandler(
-    onPlayerInput?: (input: {
-      movement: THREE.Vector2
-      camera: THREE.Vector2
-      jump: boolean
-      run: boolean
-      action: boolean
-      cancel: boolean
-      cameraMode: boolean
-      select: boolean
-      menu: boolean
-    }) => void
+    onPlayerInput?: (input: GamepadPlayerInput) => void
   ): GamepadInputHandler {
     return new GamepadInputHandler(onPlayerInput)
   }

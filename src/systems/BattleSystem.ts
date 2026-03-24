@@ -7,6 +7,7 @@ import type { BattleCameraShot } from './BattleCameraController'
 import type { PlayerController } from './PlayerController'
 import type { DialogueManager } from './DialogueSystem'
 import { logger, LogModule } from './Logger'
+import { traceInputCommand, type InputTraceSource } from './InputTrace'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -39,7 +40,7 @@ export class BattleSystem {
   private readonly maxEnemyHP = 18
   private statusText = 'Choose an action.'
 
-  private readonly interactionRange = 4.5
+  private readonly interactionRange = 3.5
   private readonly hostileAutoTriggerRange = 1.85
   private readonly recentBattleCooldownMs = 3000
   private readonly postDialogueAutoTriggerGraceMs = 3000
@@ -135,6 +136,8 @@ export class BattleSystem {
   }
 
   update(playerPosition: THREE.Vector3): void {
+    this.reconcileInputLock()
+
     if (this.dialogueManager?.isDialogueActive()) {
       this.clearPromptState()
       return
@@ -193,9 +196,27 @@ export class BattleSystem {
     return this.activeNpcId
   }
 
-  handleAttackButton(): boolean {
-    if (this.isActive) return false
-    if (this.dialogueManager?.isDialogueActive()) return false
+  handleAttackButton(source: InputTraceSource = 'system'): boolean {
+    if (this.isActive) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'ignored', details: { reason: 'battle-already-active' } })
+      return false
+    }
+    if (this.dialogueManager?.isDialogueActive()) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'blocked', details: { reason: 'dialogue-active' } })
+      return false
+    }
+    if (this.cameraManager?.isFading()) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'blocked', details: { reason: 'camera-fading' } })
+      return false
+    }
+    if (this.cameraManager?.isInDialogueMode()) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'blocked', details: { reason: 'camera-dialogue-mode' } })
+      return false
+    }
+    if (this.cameraManager?.isInBattleMode()) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'blocked', details: { reason: 'camera-battle-mode' } })
+      return false
+    }
 
     const candidate = this.npcSystem.getNPCsInRadius(
       this.playerController?.getPosition() ?? new THREE.Vector3(),
@@ -208,7 +229,11 @@ export class BattleSystem {
         return a.position.distanceToSquared(playerPos) - b.position.distanceToSquared(playerPos)
       })[0]
 
-    if (!candidate) return false
+    if (!candidate) {
+      traceInputCommand({ source, target: 'battle', command: 'engage', result: 'ignored', details: { reason: 'no-nearby-battle-npc' } })
+      return false
+    }
+    traceInputCommand({ source, target: 'battle', command: 'engage', result: 'consumed', details: { npcId: candidate.id } })
     return this.startBattle(candidate.id, 'player')
   }
 
@@ -226,10 +251,13 @@ export class BattleSystem {
     return this.startBattle(npcId, 'player')
   }
 
-  handleConfirmActionButton(): boolean {
-    if (!this.isActive) return false
-    if (this.attackSequencePlaying) return true  // Block input during attack animation
+  handleConfirmActionButton(source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive) {
+      traceInputCommand({ source, target: 'battle', command: 'confirm', result: 'ignored' })
+      return false
+    }
     if (this.phase === 'ended') {
+      traceInputCommand({ source, target: 'battle', command: 'confirm', result: 'executed', details: { phase: this.phase } })
       this.leaveBattle(true)
       return true
     }
@@ -237,16 +265,84 @@ export class BattleSystem {
     const action = this.menuActions[this.highlightedActionIndex]
     if (!action) return true
 
-    return this.handleMenuAction(action.id)
+    return this.executeBattleCommand(action.id, source)
   }
 
-  handleMenuAction(actionId: BattleActionId): boolean {
-    if (!this.isActive) return false
-    if (this.attackSequencePlaying) return true
+  public handleConfirmInput(source: InputTraceSource = 'system'): boolean {
+    return this.handleConfirmActionButton(source)
+  }
+
+  public handleCancelInput(source: InputTraceSource = 'system'): boolean {
+    return this.handleEscapeInput(source)
+  }
+
+  public handleNavigateInput(dir: number, source: InputTraceSource = 'system'): boolean {
+    const blocked = this.isCommandInputBlocked()
+    if (!this.isActive || this.phase !== 'player-turn' || blocked) {
+      traceInputCommand({
+        source,
+        target: 'battle',
+        command: dir < 0 ? 'navigate-up' : 'navigate-down',
+        result: blocked ? 'blocked' : 'ignored',
+        details: { isActive: this.isActive, phase: this.phase, attackSequencePlaying: this.attackSequencePlaying, battleCameraBusy: this.isBattleCameraBusy() }
+      })
+      return false
+    }
+    this.cycleChoice(dir)
+    traceInputCommand({
+      source,
+      target: 'battle',
+      command: dir < 0 ? 'navigate-up' : 'navigate-down',
+      result: 'consumed',
+      details: { highlightedActionIndex: this.highlightedActionIndex, actionId: this.menuActions[this.highlightedActionIndex]?.id ?? null }
+    })
+    return true
+  }
+
+  public handleDirectActionInput(actionId: BattleActionId, source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive) {
+      const consumed = actionId === 'attack' ? this.handleAttackButton(source) : false
+      if (!consumed && actionId !== 'attack') {
+        traceInputCommand({ source, target: 'battle', command: actionId, result: 'ignored', details: { reason: 'battle-inactive' } })
+      }
+      return consumed
+    }
+    return this.executeBattleCommand(actionId, source)
+  }
+
+  handleMenuAction(actionId: BattleActionId, source: InputTraceSource = 'system'): boolean {
+    return this.executeBattleCommand(actionId, source)
+  }
+
+  private executeBattleCommand(actionId: BattleActionId, source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive) {
+      traceInputCommand({ source, target: 'battle', command: actionId, result: 'ignored' })
+      return false
+    }
     if (this.phase === 'ended') {
+      traceInputCommand({ source, target: 'battle', command: actionId, result: 'executed', details: { phase: this.phase } })
       this.leaveBattle(true)
       return true
     }
+
+    if (actionId !== 'escape' && this.isCommandInputBlocked()) {
+      traceInputCommand({
+        source,
+        target: 'battle',
+        command: actionId,
+        result: 'blocked',
+        details: { attackSequencePlaying: this.attackSequencePlaying, battleCameraBusy: this.isBattleCameraBusy(), phase: this.phase }
+      })
+      return true
+    }
+
+    traceInputCommand({
+      source,
+      target: 'battle',
+      command: actionId,
+      result: 'executed',
+      details: { phase: this.phase, activeNpcId: this.activeNpcId }
+    })
 
     switch (actionId) {
       case 'attack':
@@ -256,16 +352,22 @@ export class BattleSystem {
         this.performGuardTurn()
         return true
       case 'escape':
-        this.handleEscapeInput()
+        this.handleEscapeInput(source)
         return true
       case 'item':
         this.performItemAction()
         return true
     }
+
+    return false
   }
 
-  handleEscapeInput(): boolean {
-    if (!this.isActive) return false
+  handleEscapeInput(source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive) {
+      traceInputCommand({ source, target: 'battle', command: 'escape', result: 'ignored' })
+      return false
+    }
+    traceInputCommand({ source, target: 'battle', command: 'escape', result: 'executed', details: { phase: this.phase } })
     this.statusText = 'You escaped the battle.'
     this.renderBattleOverlay()
     this.leaveBattle(true)
@@ -310,9 +412,18 @@ export class BattleSystem {
       this.leaveBattle(true)
       return
     }
-    if (!this.cameraManager || !this.battlePlayerPos || !this.battleEnemyPos || !this.playerController) {
+    if (
+      !this.cameraManager ||
+      !this.battlePlayerPos ||
+      !this.battleEnemyPos ||
+      !this.playerController ||
+      !this.cameraManager.isInBattleMode()
+    ) {
       // Fallback: no camera choreography
       this.performAttackDamage(npc)
+      if (this.phase !== 'ended') {
+        this.resolveEnemyTurn(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
+      }
       return
     }
 
@@ -369,6 +480,27 @@ export class BattleSystem {
     ]
 
     this.cameraManager.battlePlaySequence(sequence)
+  }
+
+  private isBattleCameraBusy(): boolean {
+    return this.cameraManager?.getBattleCameraController().busy ?? false
+  }
+
+  private isCommandInputBlocked(): boolean {
+    return this.attackSequencePlaying && this.isBattleCameraBusy()
+  }
+
+  private reconcileInputLock(): void {
+    if (this.attackSequencePlaying && !this.isBattleCameraBusy()) {
+      traceInputCommand({
+        source: 'system',
+        target: 'battle',
+        command: 'reconcile-input-lock',
+        result: 'executed',
+        details: { staleAttackSequencePlaying: true }
+      })
+      this.attackSequencePlaying = false
+    }
   }
 
   /** Damage-only portion of the attack turn (no camera). */
@@ -437,7 +569,7 @@ export class BattleSystem {
    */
   private resolveEnemyTurnWithCamera(prefix: string): void {
     const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
-    if (!npc || !this.cameraManager) {
+    if (!npc || !this.cameraManager || !this.cameraManager.isInBattleMode()) {
       this.resolveEnemyTurn(prefix)
       return
     }
@@ -580,8 +712,9 @@ export class BattleSystem {
     if (!this.isActive) return
 
     if (this.phase === 'ended') {
-      if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'KeyK' || e.code === 'KeyL') {
+      if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'KeyJ' || e.code === 'KeyL') {
         e.preventDefault()
+        traceInputCommand({ source: 'keyboard', target: 'battle', command: 'continue', result: 'executed', details: { phase: this.phase } })
         this.leaveBattle(true)
       }
       return
@@ -589,27 +722,45 @@ export class BattleSystem {
 
     if (e.code === 'Escape' || e.code === 'KeyL') {
       e.preventDefault()
-      this.handleMenuAction('escape')
+      this.handleMenuAction('escape', 'keyboard')
       return
     }
 
     if (this.phase !== 'player-turn') return
 
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault()
+      this.handleNavigateInput(-1, 'keyboard')
+      return
+    }
+
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      e.preventDefault()
+      this.handleNavigateInput(1, 'keyboard')
+      return
+    }
+
+    if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+      e.preventDefault()
+      this.handleConfirmInput('keyboard')
+      return
+    }
+
     if (e.code === 'KeyJ') {
       e.preventDefault()
-      this.handleMenuAction('attack')
+      this.handleDirectActionInput('attack', 'keyboard')
       return
     }
 
     if (e.code === 'KeyK') {
       e.preventDefault()
-      this.handleMenuAction('guard')
+      this.handleDirectActionInput('guard', 'keyboard')
       return
     }
 
     if (e.code === 'KeyI') {
       e.preventDefault()
-      this.handleMenuAction('item')
+      this.handleDirectActionInput('item', 'keyboard')
       return
     }
   }
@@ -665,10 +816,23 @@ export class BattleSystem {
     }
 
     this.menuActions.forEach((action, index) => {
-      const item = document.createElement('div')
+      const item = document.createElement('button')
+      item.type = 'button'
       const itemColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
       item.textContent = this.getActionDisplayText(action, index)
-      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '10px 4px' : '4px 0'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
+      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '12px 10px' : '4px 0'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;background:transparent;border:none;outline:none;text-align:left;width:100%;appearance:none;-webkit-appearance:none;`
+      let lastActivateTime = 0
+      const activate = (event: Event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const now = performance.now()
+        if (now - lastActivateTime < 120) return
+        lastActivateTime = now
+        if (this.inputMode !== 'touch') {
+          this.highlightedActionIndex = index
+        }
+        this.handleDirectActionInput(action.id, this.inputMode === 'touch' ? 'touch' : 'mouse')
+      }
       item.addEventListener('mouseenter', () => {
         this.highlightedActionIndex = index
         this.updateChoiceHighlight()
@@ -676,22 +840,27 @@ export class BattleSystem {
       item.addEventListener('pointerdown', (event) => {
         if (this.inputMode === 'touch' || (event as PointerEvent).pointerType === 'touch') {
           event.preventDefault()
-          this.highlightedActionIndex = index
-          this.updateChoiceHighlight()
+          event.stopPropagation()
+        }
+      })
+      item.addEventListener('touchstart', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+      }, { passive: false })
+      item.addEventListener('pointerup', (event) => {
+        if (this.inputMode === 'touch' || (event as PointerEvent).pointerType === 'touch') {
+          activate(event)
         }
       })
       item.addEventListener('touchend', (event) => {
-        event.preventDefault()
-        this.highlightedActionIndex = index
-        this.handleMenuAction(action.id)
+        activate(event)
       }, { passive: false })
       item.addEventListener('click', (event) => {
         if (this.inputMode === 'touch') {
           event.preventDefault()
           return
         }
-        this.highlightedActionIndex = index
-        this.handleMenuAction(action.id)
+        activate(event)
       })
       this.overlayChoices!.appendChild(item)
     })
@@ -712,9 +881,6 @@ export class BattleSystem {
   private getActionDisplayText(action: BattleMenuAction, index: number): string {
     const bindingLabel = this.getActionBindingLabel(action.id)
     const label = bindingLabel ? `${bindingLabel}. ${action.label}` : action.label
-    if (this.inputMode === 'touch') {
-      return `${index === this.highlightedActionIndex ? '▶ ' : ''}${label}`
-    }
     return label
   }
 
@@ -794,15 +960,14 @@ export class BattleSystem {
     this.updateChoiceHighlight()
   }
 
-  private getEngagePromptText(npcId: string): string {
-    const label = npcId.toUpperCase()
+  private getEngagePromptText(_npcId: string): string {
     switch (this.inputMode) {
       case 'touch':
-        return `FIGHT ${label}`
+        return 'FIGHT'
       case 'gamepad':
-        return `X. FIGHT ${label}`
+        return 'X. FIGHT'
       default:
-        return `K. FIGHT ${label}`
+        return 'K. FIGHT'
     }
   }
 
@@ -841,10 +1006,11 @@ export class BattleSystem {
 
     if (this.inputMode === 'touch') {
       this.overlayPrompt.style.cssText =
-        'position:absolute;left:20px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
-        `color:${promptColor};font-size:22px;letter-spacing:3px;display:none;text-align:center;` +
-        'background:transparent;border:none;padding:10px 32px;' +
-        'text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:auto;cursor:pointer;white-space:nowrap;touch-action:manipulation;'
+        'position:absolute;left:16px;bottom:calc(56px + env(safe-area-inset-bottom, 0px));transform:none;' +
+        `color:${promptColor};font-size:18px;letter-spacing:2px;display:none;text-align:left;` +
+        'background:transparent;border:none;padding:10px 18px;' +
+        'text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:auto;cursor:pointer;' +
+        'max-width:calc(50vw - 28px);line-height:1.1;white-space:normal;touch-action:manipulation;'
 
       this.overlayPanel.style.cssText =
         'position:absolute;left:16px;right:16px;bottom:calc(48px + env(safe-area-inset-bottom, 0px));' +
