@@ -815,6 +815,43 @@ export class CameraManager {
     }
   }
 
+  /**
+   * Update camera rotation from touch input.
+   * Unlike the gamepad path this does NOT multiply by deltaTime — touch deltas
+   * are already per-frame accumulated pixel values, so time-scaling would make
+   * sensitivity frame-rate dependent (too slow on high-refresh-rate phones).
+   * Sensitivity: ~150° rotation for a full 375 px phone-width swipe.
+   */
+  public updatePlayerCameraFromTouch(rawDeltaX: number, rawDeltaY: number): void {
+    const touchSens = 0.007 // rad per raw CSS pixel
+    if (this.currentMode === 'thirdperson') {
+      this.tpYaw -= rawDeltaX * touchSens
+      this.tpPitch += rawDeltaY * touchSens
+      this.tpPitch = Math.max(
+        this.config.thirdPerson.pitchMin,
+        Math.min(this.config.thirdPerson.pitchMax, this.tpPitch),
+      )
+    } else if (this.currentMode === 'freeview') {
+      const orbitSens = 0.005
+      const offset = new THREE.Vector3()
+      offset.copy(this.freeViewCamera.position).sub(this.orbitControls.target)
+      const spherical = new THREE.Spherical()
+      spherical.setFromVector3(offset)
+      spherical.theta -= rawDeltaX * orbitSens
+      spherical.phi -= rawDeltaY * orbitSens
+      spherical.phi = Math.max(
+        this.orbitControls.minPolarAngle,
+        Math.min(this.orbitControls.maxPolarAngle, spherical.phi),
+      )
+      offset.setFromSpherical(spherical)
+      this.freeViewCamera.position.copy(this.orbitControls.target).add(offset)
+      this.freeViewCamera.lookAt(this.orbitControls.target)
+      if (this.orbitCameraOffset) {
+        this.orbitCameraOffset.copy(offset)
+      }
+    }
+  }
+
   public setTransitionDuration(duration: number): void {
     this.transitionDuration = duration
   }

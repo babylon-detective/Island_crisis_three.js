@@ -147,6 +147,7 @@ export class PlayerController {
     moved: boolean
   }> = new Map()
   private touchZoneById: Map<number, 'navigate' | 'look'> = new Map()
+  private touchCameraVelocity = new THREE.Vector2(0, 0)
   private navigationMarker: THREE.Mesh | null = null
   
   // Gamepad input
@@ -532,6 +533,7 @@ export class PlayerController {
       if (zone === 'look' && this.touchState.activeLookTouch === null) {
         this.touchState.activeLookTouch = touch.identifier
         this.touchState.lastLookDelta.set(0, 0)
+        this.touchCameraVelocity.set(0, 0) // cancel any inertia from previous swipe
         this.cameraManager.setTouchLookActive(true)
       }
 
@@ -661,6 +663,11 @@ export class PlayerController {
       }
 
       if (this.touchState.activeLookTouch === touchId) {
+        // Capture any un-consumed delta as the initial momentum for inertia
+        const ld = this.touchState.lastLookDelta
+        if (ld.lengthSq() > 0.25) {
+          this.touchCameraVelocity.copy(ld)
+        }
         this.touchState.activeLookTouch = null
         this.touchState.lastLookDelta.set(0, 0)
         this.cameraManager.setTouchLookActive(false)
@@ -1152,26 +1159,44 @@ export class PlayerController {
   private updateCamera(deltaTime: number): void {
     // Update camera position through camera manager
     this.cameraManager.setPlayerPosition(this.state.position)
-    
-    // Handle camera rotation from gamepad or touch (two fingers)
-    if (this.input.analogCamera) {
-      const cameraX = this.input.analogCamera.x
-      const cameraY = this.input.analogCamera.y
-      const usingTouchLook = this.touchState.activeLookTouch !== null
-      
-      // Apply per-component deadzone for precise control
-      const deadzone = usingTouchLook ? 0.005 : 0.05
-      const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
-      const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
-      
-      // Only update camera if at least one axis has input (works for all camera modes including orbital)
-      if (adjustedX !== 0 || adjustedY !== 0) {
-        this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+
+    const usingTouchLook = this.touchState.activeLookTouch !== null
+
+    if (usingTouchLook) {
+      // Touch path: lastLookDelta is pixel-accurate and already accumulated since
+      // the last render frame — do NOT multiply by deltaTime (that introduces
+      // frame-rate-dependent stiffness on high-refresh-rate phones).
+      const rawX = this.touchState.lastLookDelta.x
+      const rawY = this.touchState.lastLookDelta.y
+      if (Math.abs(rawX) > 0.5 || Math.abs(rawY) > 0.5) {
+        this.cameraManager.updatePlayerCameraFromTouch(rawX, rawY)
+        this.touchCameraVelocity.set(rawX, rawY) // save for inertia after lift
+      }
+      this.touchState.lastLookDelta.set(0, 0)
+      if (this.input.analogCamera) this.input.analogCamera.set(0, 0)
+    } else {
+      // Gamepad path: analog stick is a continuous rate, needs deltaTime scaling
+      if (this.input.analogCamera) {
+        const cameraX = this.input.analogCamera.x
+        const cameraY = this.input.analogCamera.y
+        const deadzone = 0.05
+        const adjustedX = Math.abs(cameraX) > deadzone ? cameraX : 0
+        const adjustedY = Math.abs(cameraY) > deadzone ? cameraY : 0
+        if (adjustedX !== 0 || adjustedY !== 0) {
+          this.cameraManager.updatePlayerCameraFromGamepad(adjustedX, adjustedY, deltaTime)
+        }
       }
 
-      if (usingTouchLook) {
-        this.touchState.lastLookDelta.set(0, 0)
-        this.input.analogCamera.set(0, 0)
+      // Touch inertia: continue rotating after finger lifts with exponential decay
+      if (this.touchCameraVelocity.lengthSq() > 0.25) {
+        this.cameraManager.updatePlayerCameraFromTouch(
+          this.touchCameraVelocity.x,
+          this.touchCameraVelocity.y,
+        )
+        this.touchCameraVelocity.multiplyScalar(0.82)
+        if (this.touchCameraVelocity.lengthSq() < 0.25) {
+          this.touchCameraVelocity.set(0, 0)
+        }
       }
     }
   }

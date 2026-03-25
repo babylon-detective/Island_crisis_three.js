@@ -55,26 +55,54 @@ function easeOutCubic(t: number): number {
 }
 
 // ============================================================================
-// Default FOVs per shot type
+// PER-SHOT CAMERA PARAMETERS  (edit these to dial in angles)
 // ============================================================================
-const SHOT_FOV: Record<BattleShotType, number> = {
-  // Base
-  menuIdle: 48,
-  // Player action
-  attackerFocus: 38,
-  strikeImpact: 34,
-  targetReaction: 40,
-  // Enemy action
-  enemyFocus: 36,
-  playerReaction: 40,
-  // Special
-  deathHold: 44,
-  wideAction: 52,
-  overShoulder: 50,
-  // Legacy aliases
-  establishing: 48,
-  playerCloseUp: 40,
-  enemyCloseUp: 40,
+//
+// posAnchor / lookAnchor: the world-space reference point.
+//   'player'  — player's battle position
+//   'enemy'   — enemy's battle position
+//   'mid'     — midpoint between the two
+//   'impact'  — lerp(player, enemy, 0.75): the melee contact zone
+//
+// Offsets are in world units, relative to the anchor, along the
+// battlefield-local axes:
+//   fwdOffset    — along the player→enemy direction (positive = toward enemy)
+//   sideOffset   — perpendicular (positive = camera's right in menu-idle view)
+//   heightOffset — above the anchor's Y
+//
+// lookFwdOffset / lookSideOffset fine-shift the look-at point along those
+// same axes (leave 0 in the common case).
+//
+export interface ShotParams {
+  posAnchor: 'player' | 'enemy' | 'mid' | 'impact'
+  fwdOffset: number
+  sideOffset: number
+  heightOffset: number
+  lookAnchor: 'player' | 'enemy' | 'mid' | 'impact'
+  lookFwdOffset: number
+  lookSideOffset: number
+  lookHeightOffset: number
+  fov: number
+}
+
+export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
+  // ¾ isometric overview — wide enough to read both combatants + UI
+  menuIdle:       { posAnchor: 'mid',    fwdOffset: -8.2, sideOffset: -10.3, heightOffset: 3.3, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.2,  fov: 30 },
+  // Player action shots
+  attackerFocus:  { posAnchor: 'player', fwdOffset:  7.1, sideOffset:  -1.1, heightOffset: 1.5, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.75, fov: 35 },
+  strikeImpact:   { posAnchor: 'impact', fwdOffset: -12.0, sideOffset: 12.0, heightOffset: 0.0, lookAnchor: 'impact', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.15, fov: 46 },
+  targetReaction: { posAnchor: 'enemy',  fwdOffset: -6.7, sideOffset:   0.0, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
+  // Enemy action shots
+  enemyFocus:     { posAnchor: 'enemy',  fwdOffset:  8.3, sideOffset:   4.2, heightOffset: 1.5, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.15, fov: 28 },
+  playerReaction: { posAnchor: 'player', fwdOffset:  8.3, sideOffset:  -4.1, heightOffset: 0.5, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.35, fov: 27 },
+  // Special event shots
+  deathHold:      { posAnchor: 'enemy',  fwdOffset:  5.9, sideOffset:   0.6, heightOffset: 2.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.7,  fov: 32 },
+  wideAction:     { posAnchor: 'mid',    fwdOffset: -3.8, sideOffset:   7.7, heightOffset: 2.1, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.65, fov: 60 },
+  overShoulder:   { posAnchor: 'player', fwdOffset: -1.5, sideOffset:   0.8, heightOffset: 1.0, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.4,  fov: 81 },
+  // Legacy aliases — unchanged
+  establishing:   { posAnchor: 'mid',    fwdOffset: -1.5, sideOffset:   8.0, heightOffset: 5.5, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.8,  fov: 48 },
+  playerCloseUp:  { posAnchor: 'player', fwdOffset: -2.2, sideOffset:  -0.8, heightOffset: 1.3, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
+  enemyCloseUp:   { posAnchor: 'enemy',  fwdOffset:  2.2, sideOffset:   0.8, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
 }
 
 export class BattleCameraController {
@@ -201,7 +229,7 @@ export class BattleCameraController {
     const { pos, lookAt } = this.computeShotPosAndLookAt(type)
     this.camera.position.copy(pos)
     this.camera.lookAt(lookAt)
-    const fov = fovOverride ?? SHOT_FOV[type]
+    const fov = fovOverride ?? SHOT_PARAMS[type].fov
     if (this.camera.fov !== fov) {
       this.camera.fov = fov
       this.camera.updateProjectionMatrix()
@@ -209,6 +237,32 @@ export class BattleCameraController {
     this.currentPos.copy(pos)
     this.currentLookAt.copy(lookAt)
     this.currentShot = null
+  }
+
+  /**
+   * Instantly preview any shot type without a live battle.
+   * Useful for tuning angles in the debug GUI — call this and the camera
+   * jumps to the computed position immediately.
+   */
+  previewShot(type: BattleShotType): void {
+    this.cutTo(type)
+  }
+
+  /** Return a direct (live) reference to the params for a given shot type,
+   * so the debug GUI can mutate values and see changes in real time. */
+  getShotParams(type: BattleShotType): ShotParams {
+    return SHOT_PARAMS[type]
+  }
+
+  /** Print the current SHOT_PARAMS table to the browser console as JSON
+   * so you can copy tweaked values back into the source. */
+  printConfig(): void {
+    const out: Record<string, object> = {}
+    for (const [key, val] of Object.entries(SHOT_PARAMS)) {
+      out[key] = { ...val }
+    }
+    console.log('⚔️ BattleCameraController SHOT_PARAMS (copy into source):')
+    console.log(JSON.stringify(out, null, 2))
   }
 
   /** Queue a sequence of shots to play in order. */
@@ -275,7 +329,7 @@ export class BattleCameraController {
     this.camera.position.copy(frame.pos)
     this.camera.lookAt(frame.lookAt)
 
-    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_FOV.menuIdle, easeOutCubic(t))
+    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_PARAMS.menuIdle.fov, easeOutCubic(t))
     this.camera.updateProjectionMatrix()
 
     if (t >= 1) {
@@ -324,6 +378,16 @@ export class BattleCameraController {
   // SHOT QUEUE
   // ============================================================================
 
+  private resolveAnchor(anchor: ShotParams['posAnchor']): THREE.Vector3 {
+    const impact = this.positions.player.clone().lerp(this.positions.enemy, 0.75)
+    switch (anchor) {
+      case 'player': return this.positions.player.clone()
+      case 'enemy':  return this.positions.enemy.clone()
+      case 'mid':    return this.midpoint.clone()
+      case 'impact': return impact
+    }
+  }
+
   private advanceQueue(): void {
     if (this.queue.length === 0) {
       this.currentShot = null
@@ -340,7 +404,7 @@ export class BattleCameraController {
     this.targetLookAt.copy(computed.lookAt)
 
     // Apply FOV
-    const fov = shot.fov ?? SHOT_FOV[shot.type]
+    const fov = shot.fov ?? SHOT_PARAMS[shot.type].fov
     if (this.camera.fov !== fov) {
       this.camera.fov = fov
       this.camera.updateProjectionMatrix()
@@ -367,143 +431,28 @@ export class BattleCameraController {
   // ============================================================================
 
   /**
-   * Given a shot type, compute the world-space camera position and lookAt.
-   * All positions are derived from `this.positions` (player/enemy at 8u apart).
-   *
-   * Player is on the "right" of the battlefield, enemy on the "left"
-   * from the camera's perspective in the menu idle view.
+   * Resolve world-space camera pos + lookAt for a shot type, reading all
+   * numeric values from the mutable SHOT_PARAMS table so the debug GUI
+   * (and console commands) can tweak angles without touching logic code.
    */
   computeShotPosAndLookAt(type: BattleShotType): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
-    const p = this.positions.player
-    const e = this.positions.enemy
-    const mid = this.midpoint
-    const fwd = this.forward
+    const params = SHOT_PARAMS[type]
+    const fwd  = this.forward
     const side = this.side
 
-    switch (type) {
-      // ----------------------------------------------------------------
-      // BASE / MENU STATE
-      // ----------------------------------------------------------------
-      case 'menuIdle':
-      case 'establishing': {
-        // ¾ isometric: offset to the side and above, angled down at the
-        // battlefield. Wide enough to read both combatants and UI.
-        const pos = mid.clone()
-          .addScaledVector(side, 8)
-          .addScaledVector(fwd, -1.5)
-        pos.y = mid.y + 5.5
-        const lookAt = mid.clone()
-        lookAt.y += 0.8
-        return { pos, lookAt }
-      }
+    const posBase = this.resolveAnchor(params.posAnchor)
+    const basePosY = posBase.y
+    const pos = posBase
+      .addScaledVector(fwd,  params.fwdOffset)
+      .addScaledVector(side, params.sideOffset)
+    pos.y = basePosY + params.heightOffset
 
-      // ----------------------------------------------------------------
-      // PLAYER ACTION SHOTS
-      // ----------------------------------------------------------------
-      case 'attackerFocus': {
-        // Medium low-angle on the player, emphasising physicality.
-        // Camera slightly below chest level, in front and to the side.
-        const pos = p.clone()
-          .addScaledVector(fwd, -2.0)
-          .addScaledVector(side, 1.5)
-        pos.y = p.y + 0.6 // low angle
-        const lookAt = p.clone()
-        lookAt.y += 1.1 // chest-to-head
-        return { pos, lookAt }
-      }
+    const lookBase = this.resolveAnchor(params.lookAnchor)
+    const baseLookY = lookBase.y
+    if (params.lookFwdOffset  !== 0) lookBase.addScaledVector(fwd,  params.lookFwdOffset)
+    if (params.lookSideOffset !== 0) lookBase.addScaledVector(side, params.lookSideOffset)
+    lookBase.y = baseLookY + params.lookHeightOffset
 
-      case 'strikeImpact': {
-        // Tight shot at the point of melee impact — between combatants,
-        // biased toward the enemy so the strike lands in frame.
-        const impactPoint = p.clone().lerp(e, 0.75)
-        const pos = impactPoint.clone()
-          .addScaledVector(side, 2.5)
-        pos.y = impactPoint.y + 1.2
-        const lookAt = impactPoint.clone()
-        lookAt.y += 0.8
-        return { pos, lookAt }
-      }
-
-      case 'targetReaction':
-      case 'enemyCloseUp': {
-        // Cut to the enemy receiving a hit — front-on medium shot
-        // slightly offset to the side for visual interest.
-        const pos = e.clone()
-          .addScaledVector(fwd, 2.2)
-          .addScaledVector(side, 0.8)
-        pos.y = e.y + 1.3
-        const lookAt = e.clone()
-        lookAt.y += 1.0
-        return { pos, lookAt }
-      }
-
-      // ----------------------------------------------------------------
-      // ENEMY ACTION SHOTS
-      // ----------------------------------------------------------------
-      case 'enemyFocus': {
-        // Low-angle dramatic framing on the enemy — reinforces threat.
-        // Camera below and in front, looking up.
-        const pos = e.clone()
-          .addScaledVector(fwd, 2.5)
-          .addScaledVector(side, -1.0)
-        pos.y = e.y + 0.4 // very low angle
-        const lookAt = e.clone()
-        lookAt.y += 1.3
-        return { pos, lookAt }
-      }
-
-      case 'playerReaction':
-      case 'playerCloseUp': {
-        // Player receiving hit — front-on medium, mirrored from targetReaction
-        const pos = p.clone()
-          .addScaledVector(fwd, -2.2)
-          .addScaledVector(side, -0.8)
-        pos.y = p.y + 1.3
-        const lookAt = p.clone()
-        lookAt.y += 1.0
-        return { pos, lookAt }
-      }
-
-      // ----------------------------------------------------------------
-      // SPECIAL EVENT SHOTS
-      // ----------------------------------------------------------------
-      case 'deathHold': {
-        // Wider deliberate frame on the dying enemy — gives the death
-        // animation room to play out.
-        const pos = e.clone()
-          .addScaledVector(fwd, 3.5)
-          .addScaledVector(side, 2.0)
-        pos.y = e.y + 2.0
-        const lookAt = e.clone()
-        lookAt.y += 0.6
-        return { pos, lookAt }
-      }
-
-      case 'wideAction': {
-        // Broad frame for magic / area-of-effect — keeps all targets
-        // visible with room for the visual spectacle.
-        const pos = mid.clone()
-          .addScaledVector(side, 7)
-        pos.y = mid.y + 4.0
-        const lookAt = mid.clone()
-        lookAt.y += 1.0
-        return { pos, lookAt }
-      }
-
-      case 'overShoulder': {
-        // Behind player looking at enemy — transition / utility shot
-        const pos = p.clone()
-          .addScaledVector(fwd, -1.5)
-          .addScaledVector(side, 0.8)
-        pos.y = p.y + 1.8
-        const lookAt = e.clone()
-        lookAt.y += 1.0
-        return { pos, lookAt }
-      }
-
-      default: {
-        return this.computeShotPosAndLookAt('menuIdle')
-      }
-    }
+    return { pos, lookAt: lookBase }
   }
 }

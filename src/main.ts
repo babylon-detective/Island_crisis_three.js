@@ -28,6 +28,7 @@ import { PauseOverlay } from './systems/PauseOverlay'
 import { CharacterAnimationSystem, AnimationClipRegistry, buildQuaterniusToRigifyRemap } from './systems/CharacterAnimationSystem'
 import { AnimationBrowser } from './systems/AnimationBrowser'
 import { AnimationStateMachine, createPlayerStateMachineConfig, AnimStateParams } from './systems/AnimationStateMachine'
+import { SHOT_PARAMS, type BattleShotType } from './systems/BattleCameraController'
 import { NPCSystem } from './systems/NPCSystem'
 import { NPCAISystem } from './systems/NPCAISystem'
 import { DialogueManager } from './systems/DialogueSystem'
@@ -800,6 +801,7 @@ interface DebugState {
   gui: GUI | null
   gameplayGui: GUI | null
   lightingGui: GUI | null
+  battleCameraGui: GUI | null
   debugGUIManager: DebugGUIManager | null
   helpers: THREE.Object3D[]
 }
@@ -957,6 +959,7 @@ class IntegratedThreeJSApp {
     gui: null,
     gameplayGui: null,
     lightingGui: null,
+    battleCameraGui: null,
     debugGUIManager: null,
     helpers: []
   }
@@ -1623,9 +1626,12 @@ class IntegratedThreeJSApp {
     
     // Create Gameplay GUI column (separate panel to the left of Controls)
     this.setupGameplayGUI()
-    
+
     // Create Lighting GUI column
     this.setupLightingGUI()
+
+    // Create Battle Camera tuning panel
+    this.setupBattleCameraGUI()
     
     // Add helpers
     this.addHelpers()
@@ -1664,6 +1670,11 @@ class IntegratedThreeJSApp {
     if (this.debugState.lightingGui) {
       this.debugState.lightingGui.destroy()
       this.debugState.lightingGui = null
+    }
+
+    if (this.debugState.battleCameraGui) {
+      this.debugState.battleCameraGui.destroy()
+      this.debugState.battleCameraGui = null
     }
     
     // Dispose of centralized GUI Manager
@@ -2023,6 +2034,55 @@ class IntegratedThreeJSApp {
 
     gui.open()
     console.log('🎮 Gameplay GUI created')
+  }
+
+  private setupBattleCameraGUI(): void {
+    if (this.debugState.battleCameraGui) return
+
+    const battleCtrl = this.cameraManager.getBattleCameraController()
+    if (!battleCtrl) return
+
+    const gui = new GUI({ title: '⚔️ Battle Camera' })
+    gui.domElement.style.position = 'absolute'
+    gui.domElement.style.top = '0px'
+    gui.domElement.style.right = '735px' // 4th column, left of Lighting panel
+    this.container.appendChild(gui.domElement)
+    this.debugState.battleCameraGui = gui
+
+    const shots: BattleShotType[] = [
+      'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
+      'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
+    ]
+
+    for (const type of shots) {
+      const params = SHOT_PARAMS[type]
+      const sub = gui.addFolder(type)
+
+      sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
+      sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
+      sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
+      sub.add(params, 'lookHeightOffset',   0,  4, 0.05).name('look height')
+      sub.add(params, 'fov',               20, 90,   1).name('FOV')
+
+      const actions = {
+        preview: () => {
+          if (battleCtrl.active) {
+            battleCtrl.previewShot(type)
+          } else {
+            console.warn(`⚔️ [BattleCam] Not active — enter a battle first, then use Preview.`)
+          }
+        },
+      }
+      sub.add(actions, 'preview').name('▶ Preview shot')
+      sub.close()
+    }
+
+    const globalActions = {
+      printConfig: () => battleCtrl.printConfig(),
+    }
+    gui.add(globalActions, 'printConfig').name('📋 Print config to console')
+    gui.close()
+    console.log('⚔️ Battle Camera GUI created')
   }
 
   private addHelpers(): void {

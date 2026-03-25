@@ -1,6 +1,7 @@
 import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js'
 import * as THREE from 'three'
 import { logger, LogModule } from './Logger'
+import { SHOT_PARAMS, type BattleShotType } from './BattleCameraController'
 
 export interface SystemReferences {
   scene: THREE.Scene
@@ -49,6 +50,7 @@ export class DebugGUIManager {
       this.setupLightControls()
       this.setupCameraControls()
       this.setupPlayerControls()
+      this.setupBattleCameraControls()
     } catch (error) {
       logger.error(LogModule.SYSTEM, 'Error setting up debug controls:', error)
     }
@@ -282,6 +284,63 @@ export class DebugGUIManager {
     }
     
     this.folders.player.close()
+  }
+
+  // ============================================================================
+  // BATTLE CAMERA TUNING
+  // ============================================================================
+
+  /**
+   * Live-tweakable battle camera shot parameters.
+   *
+   * Each shot type gets its own sub-folder with sliders for every offset
+   * value.  Changes take effect on the NEXT cut-to for that shot, or
+   * instantly when you hit the "Preview" button.
+   *
+   * When you've found values you like, click "Print Config" and paste the
+   * JSON from the browser console back into SHOT_PARAMS in
+   * BattleCameraController.ts.
+   */
+  private setupBattleCameraControls(): void {
+    const battleCtrl = this.systems.cameraManager?.getBattleCameraController?.()
+    if (!battleCtrl) return
+
+    const folder = this.gui!.addFolder('\u2694\ufe0f Battle Camera')
+
+    // Canonical shot names only (legacy aliases follow the same objects)
+    const shots: BattleShotType[] = [
+      'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
+      'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
+    ]
+
+    for (const type of shots) {
+      const params = SHOT_PARAMS[type]
+      const sub = folder.addFolder(type)
+
+      sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
+      sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
+      sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
+      sub.add(params, 'lookHeightOffset',   0,  4,  0.05).name('look height')
+      sub.add(params, 'fov',              20, 90,  1).name('FOV')
+
+      const actions = {
+        preview: () => {
+          if (battleCtrl.active) {
+            battleCtrl.previewShot(type)
+          } else {
+            console.warn(`\u2694\ufe0f [BattleCam] Controller not active — enter a battle first, or call battleCtrl.start() + setBattlePositions() manually.`)
+          }
+        },
+      }
+      sub.add(actions, 'preview').name('\u25b6 Preview shot')
+      sub.close()
+    }
+
+    const globalActions = {
+      printConfig: () => battleCtrl.printConfig(),
+    }
+    folder.add(globalActions, 'printConfig').name('\ud83d\udccb Print config to console')
+    folder.close()
   }
 
   /**
