@@ -2,21 +2,39 @@ import * as THREE from 'three'
 
 // ============================================================================
 // BATTLE CAMERA CONTROLLER
-// Cinematic camera system for turn-based battle sequences.
-// Manages shot types, shot queues, timed sequences, and the opening cinematic.
+// Cut-based cinematic camera system for turn-based battle sequences.
+//
+// Design philosophy: punchy, efficient hard cuts between fixed positions —
+// manga-panel rhythm. Fluid pans are reserved for the opening cinematic only.
+// Each cut answers: whose action matters most right now, and what angle
+// makes it hit hardest?
 // ============================================================================
 
 export type BattleShotType =
+  // Base / menu state
+  | 'menuIdle'          // ¾ isometric overview — full battlefield readable
+  // Player action shots
+  | 'attackerFocus'     // Medium low-angle on the player — physicality emphasis
+  | 'strikeImpact'      // Tight shot at the point of melee impact
+  | 'targetReaction'    // Cut to enemy receiving hit — recoil / damage flash
+  // Enemy action shots
+  | 'enemyFocus'        // Low-angle dramatic framing on the enemy attacker
+  | 'playerReaction'    // Cut to player receiving hit
+  // Special event shots
+  | 'deathHold'         // Wider deliberate frame on a dying unit
+  | 'wideAction'        // Broad frame for magic / area-of-effect skills
+  | 'overShoulder'      // Utility: behind player looking at enemy
+  // Legacy aliases (kept for external compatibility)
   | 'establishing'
   | 'playerCloseUp'
   | 'enemyCloseUp'
-  | 'attackAction'
-  | 'overShoulder'
 
 export interface BattleCameraShot {
   type: BattleShotType
-  duration: number            // seconds this shot holds
+  duration: number            // seconds this shot holds before advancing
   fov?: number                // override FOV for this shot
+  /** When true the camera hard-cuts to position instantly (default). */
+  hardCut?: boolean
   onStart?: () => void        // fires when shot begins
   onComplete?: () => void     // fires when shot ends
 }
@@ -40,11 +58,23 @@ function easeOutCubic(t: number): number {
 // Default FOVs per shot type
 // ============================================================================
 const SHOT_FOV: Record<BattleShotType, number> = {
-  establishing: 46,
+  // Base
+  menuIdle: 48,
+  // Player action
+  attackerFocus: 38,
+  strikeImpact: 34,
+  targetReaction: 40,
+  // Enemy action
+  enemyFocus: 36,
+  playerReaction: 40,
+  // Special
+  deathHold: 44,
+  wideAction: 52,
+  overShoulder: 50,
+  // Legacy aliases
+  establishing: 48,
   playerCloseUp: 40,
   enemyCloseUp: 40,
-  attackAction: 50,
-  overShoulder: 55,
 }
 
 export class BattleCameraController {
@@ -64,7 +94,7 @@ export class BattleCameraController {
   private currentShot: BattleCameraShot | null = null
   private shotElapsed: number = 0
 
-  // Interpolation targets for the active shot
+  // Interpolation targets (used only for non-hardCut shots)
   private targetPos: THREE.Vector3 = new THREE.Vector3()
   private targetLookAt: THREE.Vector3 = new THREE.Vector3()
   private currentPos: THREE.Vector3 = new THREE.Vector3()
@@ -75,7 +105,7 @@ export class BattleCameraController {
   // Opening cinematic state
   private openingActive: boolean = false
   private openingElapsed: number = 0
-  private openingDuration: number = 3.0
+  private openingDuration: number = 2.0
   private openingCompleteCallback: (() => void) | null = null
 
   // Flag: is the controller actively driving the camera?
@@ -91,6 +121,7 @@ export class BattleCameraController {
 
   get active(): boolean { return this._active }
   get busy(): boolean { return this.openingActive || this.currentShot !== null || this.queue.length > 0 }
+  get openingPlaying(): boolean { return this.openingActive }
 
   /** Set the fixed battle positions (exactly 8 units apart). */
   setBattlePositions(player: THREE.Vector3, enemy: THREE.Vector3): void {
@@ -125,22 +156,47 @@ export class BattleCameraController {
     this.openingCompleteCallback = null
   }
 
-  /** Play the 3-second opening cinematic, then call onComplete. */
+  /** Play the opening cinematic, then call onComplete. */
   playOpening(onComplete?: () => void): void {
     this.openingActive = true
     this.openingElapsed = 0
-    this.openingDuration = 3.0
+    this.openingDuration = 2.0
     this.openingCompleteCallback = onComplete ?? null
 
-    // Set initial camera to the front-of-player hero shot
-    const heroPos = this.getHeroFrontPosition(0)
-    this.camera.position.copy(heroPos.pos)
-    this.camera.lookAt(heroPos.lookAt)
-    this.camera.fov = 48
+    // Start from a low-angle behind the player, looking toward the enemy
+    const start = this.getOpeningPosition(0)
+    this.camera.position.copy(start.pos)
+    this.camera.lookAt(start.lookAt)
+    this.camera.fov = 44
     this.camera.updateProjectionMatrix()
   }
 
-  /** Immediately cut to a shot type (no interpolation). */
+  /** Skip the current opening or shot sequence — immediately finish all pending work. */
+  skipSequence(): void {
+    if (this.openingActive) {
+      this.openingActive = false
+      this.cutTo('menuIdle')
+      const cb = this.openingCompleteCallback
+      this.openingCompleteCallback = null
+      cb?.()
+    }
+    // Drain remaining shot queue, firing all callbacks instantly
+    while (this.currentShot || this.queue.length > 0) {
+      if (this.currentShot) {
+        const cb = this.currentShot.onComplete
+        this.currentShot = null
+        cb?.()
+      }
+      if (this.queue.length > 0) {
+        const shot = this.queue.shift()!
+        shot.onStart?.()
+        shot.onComplete?.()
+      }
+    }
+    this.currentShot = null
+  }
+
+  /** Immediately hard-cut to a shot type (no interpolation). */
   cutTo(type: BattleShotType, fovOverride?: number): void {
     const { pos, lookAt } = this.computeShotPosAndLookAt(type)
     this.camera.position.copy(pos)
@@ -176,13 +232,18 @@ export class BattleCameraController {
     if (this.currentShot) {
       this.shotElapsed += deltaTime
       const t = Math.min(this.shotElapsed / Math.max(this.currentShot.duration, 0.01), 1)
-      const eased = easeOutCubic(t)
 
-      // Lerp camera
-      this.currentPos.lerpVectors(this.shotStartPos, this.targetPos, eased)
-      this.currentLookAt.lerpVectors(this.shotStartLookAt, this.targetLookAt, eased)
-      this.camera.position.copy(this.currentPos)
-      this.camera.lookAt(this.currentLookAt)
+      // Hard-cut shots sit at their target for the hold duration (no lerp).
+      // Smooth shots interpolate from start to target.
+      const isHardCut = this.currentShot.hardCut !== false // default true
+      if (!isHardCut) {
+        const eased = easeOutCubic(t)
+        this.currentPos.lerpVectors(this.shotStartPos, this.targetPos, eased)
+        this.currentLookAt.lerpVectors(this.shotStartLookAt, this.targetLookAt, eased)
+        this.camera.position.copy(this.currentPos)
+        this.camera.lookAt(this.currentLookAt)
+      }
+      // (Hard-cut shots already placed the camera in advanceQueue.)
 
       if (t >= 1) {
         const cb = this.currentShot.onComplete
@@ -190,6 +251,9 @@ export class BattleCameraController {
         cb?.()
         this.advanceQueue()
       }
+    } else if (this.queue.length > 0) {
+      // Recover orphaned queue (e.g. opening cinematic overwrote currentShot)
+      this.advanceQueue()
     }
   }
 
@@ -198,68 +262,60 @@ export class BattleCameraController {
   // ============================================================================
 
   /**
-   * 0–1.5 s  : Camera in front of player at low angle, hero framing
-   * 1.5–3.0 s: Camera pivots 180° around player, ending behind looking at enemy
+   * Opening cinematic: camera sweeps from a low angle behind the player
+   * up to the ¾ isometric menu view, keeping both combatants in frame.
+   * This is the one moment that uses a fluid motion — everything else
+   * in battle is hard cuts.
    */
   private updateOpening(dt: number): void {
     this.openingElapsed += dt
     const t = Math.min(this.openingElapsed / this.openingDuration, 1)
 
-    const hero = this.getHeroFrontPosition(t)
-    this.camera.position.copy(hero.pos)
-    this.camera.lookAt(hero.lookAt)
+    const frame = this.getOpeningPosition(t)
+    this.camera.position.copy(frame.pos)
+    this.camera.lookAt(frame.lookAt)
 
-    // Animate FOV: start at 48, settle at establishing 46
-    this.camera.fov = THREE.MathUtils.lerp(48, SHOT_FOV.establishing, easeOutCubic(t))
+    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_FOV.menuIdle, easeOutCubic(t))
     this.camera.updateProjectionMatrix()
 
     if (t >= 1) {
       this.openingActive = false
-      // Snap to establishing shot
-      this.cutTo('establishing')
-      this.openingCompleteCallback?.()
+      this.cutTo('menuIdle')
+      const cb = this.openingCompleteCallback
       this.openingCompleteCallback = null
+      cb?.()
     }
   }
 
   /**
-   * Compute a camera pos+lookAt for the opening cinematic at normalised time `t` [0..1].
-   * t=0: camera directly in front of player at low angle.
-   * t=1: camera behind player looking at enemy.
+   * Compute camera pos+lookAt for the opening cinematic at normalised time `t`.
+   * t=0 — low angle behind the player, gazing toward the enemy.
+   * t=1 — the ¾ isometric menu idle position.
    */
-  private getHeroFrontPosition(t: number): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
+  private getOpeningPosition(t: number): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
     const player = this.positions.player
     const enemy = this.positions.enemy
+    const mid = this.midpoint
 
-    // Orbit radius around the player
-    const radius = 4.0
-    const height = THREE.MathUtils.lerp(1.0, 2.5, easeInOutCubic(t))
+    // Start: low behind player, offset to side
+    const startPos = player.clone()
+      .addScaledVector(this.forward, -3.0)
+      .addScaledVector(this.side, 2.0)
+    startPos.y = player.y + 1.2 // low angle
 
-    // Angle: start at 0 (in front of player, facing them), end at PI (behind player facing enemy)
-    // "In front" means in the direction opposite to the forward (player→enemy) vector
-    const angle = easeInOutCubic(t) * Math.PI
+    // End: menu idle position
+    const endPosData = this.computeShotPosAndLookAt('menuIdle')
 
-    // Camera orbits in XZ plane around the player
-    // At angle=0: camera is on the -forward side (facing the player)
-    // At angle=PI: camera is on the +forward side (behind the player, facing enemy)
-    const orbitDir = new THREE.Vector3()
-    orbitDir.x = -this.forward.x * Math.cos(angle) + this.side.x * Math.sin(angle)
-    orbitDir.z = -this.forward.z * Math.cos(angle) + this.side.z * Math.sin(angle)
+    const eased = easeInOutCubic(t)
+    const pos = new THREE.Vector3().lerpVectors(startPos, endPosData.pos, eased)
 
-    const pos = new THREE.Vector3(
-      player.x + orbitDir.x * radius,
-      player.y + height,
-      player.z + orbitDir.z * radius,
+    // Look-at biased toward enemy early, then settles on battlefield mid
+    const startLookAt = new THREE.Vector3().lerpVectors(
+      new THREE.Vector3(enemy.x, enemy.y + 1.0, enemy.z),
+      new THREE.Vector3(mid.x, mid.y + 1.0, mid.z),
+      0.3,
     )
-
-    // LookAt: first half looks at player, second half transitions to enemy
-    const lookAt = new THREE.Vector3()
-    const lookBlend = easeInOutCubic(Math.max(0, (t - 0.4) / 0.6)) // starts blending at t=0.4
-    lookAt.lerpVectors(
-      new THREE.Vector3(player.x, player.y + 1.2, player.z),
-      new THREE.Vector3(enemy.x, enemy.y + 1.2, enemy.z),
-      lookBlend,
-    )
+    const lookAt = new THREE.Vector3().lerpVectors(startLookAt, endPosData.lookAt, eased)
 
     return { pos, lookAt }
   }
@@ -278,10 +334,6 @@ export class BattleCameraController {
     this.currentShot = shot
     this.shotElapsed = 0
 
-    // Snapshot current camera state as the start of interpolation
-    this.shotStartPos.copy(this.camera.position)
-    this.shotStartLookAt.copy(this.currentLookAt)
-
     // Compute target for the new shot
     const computed = this.computeShotPosAndLookAt(shot.type)
     this.targetPos.copy(computed.pos)
@@ -294,6 +346,19 @@ export class BattleCameraController {
       this.camera.updateProjectionMatrix()
     }
 
+    const isHardCut = shot.hardCut !== false // default true
+    if (isHardCut) {
+      // Instant placement — manga-panel cut
+      this.camera.position.copy(computed.pos)
+      this.camera.lookAt(computed.lookAt)
+      this.currentPos.copy(computed.pos)
+      this.currentLookAt.copy(computed.lookAt)
+    } else {
+      // Snapshot current camera state as the start of interpolation
+      this.shotStartPos.copy(this.camera.position)
+      this.shotStartLookAt.copy(this.currentLookAt)
+    }
+
     shot.onStart?.()
   }
 
@@ -304,6 +369,9 @@ export class BattleCameraController {
   /**
    * Given a shot type, compute the world-space camera position and lookAt.
    * All positions are derived from `this.positions` (player/enemy at 8u apart).
+   *
+   * Player is on the "right" of the battlefield, enemy on the "left"
+   * from the camera's perspective in the menu idle view.
    */
   computeShotPosAndLookAt(type: BattleShotType): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
     const p = this.positions.player
@@ -313,49 +381,117 @@ export class BattleCameraController {
     const side = this.side
 
     switch (type) {
+      // ----------------------------------------------------------------
+      // BASE / MENU STATE
+      // ----------------------------------------------------------------
+      case 'menuIdle':
       case 'establishing': {
-        // Side view, ~10u back from midpoint, 3u up
+        // ¾ isometric: offset to the side and above, angled down at the
+        // battlefield. Wide enough to read both combatants and UI.
         const pos = mid.clone()
-          .addScaledVector(side, 10)
-        pos.y = mid.y + 3
+          .addScaledVector(side, 8)
+          .addScaledVector(fwd, -1.5)
+        pos.y = mid.y + 5.5
         const lookAt = mid.clone()
-        lookAt.y += 1.2
+        lookAt.y += 0.8
         return { pos, lookAt }
       }
 
-      case 'playerCloseUp': {
-        // 2.5u in front of player (facing them), 1.5u up
+      // ----------------------------------------------------------------
+      // PLAYER ACTION SHOTS
+      // ----------------------------------------------------------------
+      case 'attackerFocus': {
+        // Medium low-angle on the player, emphasising physicality.
+        // Camera slightly below chest level, in front and to the side.
         const pos = p.clone()
-          .addScaledVector(fwd, -2.5)
-        pos.y = p.y + 1.5
+          .addScaledVector(fwd, -2.0)
+          .addScaledVector(side, 1.5)
+        pos.y = p.y + 0.6 // low angle
         const lookAt = p.clone()
-        lookAt.y += 1.0  // chest height
+        lookAt.y += 1.1 // chest-to-head
         return { pos, lookAt }
       }
 
+      case 'strikeImpact': {
+        // Tight shot at the point of melee impact — between combatants,
+        // biased toward the enemy so the strike lands in frame.
+        const impactPoint = p.clone().lerp(e, 0.75)
+        const pos = impactPoint.clone()
+          .addScaledVector(side, 2.5)
+        pos.y = impactPoint.y + 1.2
+        const lookAt = impactPoint.clone()
+        lookAt.y += 0.8
+        return { pos, lookAt }
+      }
+
+      case 'targetReaction':
       case 'enemyCloseUp': {
-        // 2.5u in front of enemy (facing them), 1.5u up
+        // Cut to the enemy receiving a hit — front-on medium shot
+        // slightly offset to the side for visual interest.
         const pos = e.clone()
-          .addScaledVector(fwd, 2.5)
-        pos.y = e.y + 1.5
+          .addScaledVector(fwd, 2.2)
+          .addScaledVector(side, 0.8)
+        pos.y = e.y + 1.3
         const lookAt = e.clone()
         lookAt.y += 1.0
         return { pos, lookAt }
       }
 
-      case 'attackAction': {
-        // Side angle capturing the strike — offset from midpoint biased toward enemy
-        const strikePoint = p.clone().lerp(e, 0.7)
-        const pos = strikePoint.clone()
-          .addScaledVector(side, 4)
-        pos.y = strikePoint.y + 1.8
-        const lookAt = strikePoint.clone()
-        lookAt.y += 0.9
+      // ----------------------------------------------------------------
+      // ENEMY ACTION SHOTS
+      // ----------------------------------------------------------------
+      case 'enemyFocus': {
+        // Low-angle dramatic framing on the enemy — reinforces threat.
+        // Camera below and in front, looking up.
+        const pos = e.clone()
+          .addScaledVector(fwd, 2.5)
+          .addScaledVector(side, -1.0)
+        pos.y = e.y + 0.4 // very low angle
+        const lookAt = e.clone()
+        lookAt.y += 1.3
+        return { pos, lookAt }
+      }
+
+      case 'playerReaction':
+      case 'playerCloseUp': {
+        // Player receiving hit — front-on medium, mirrored from targetReaction
+        const pos = p.clone()
+          .addScaledVector(fwd, -2.2)
+          .addScaledVector(side, -0.8)
+        pos.y = p.y + 1.3
+        const lookAt = p.clone()
+        lookAt.y += 1.0
+        return { pos, lookAt }
+      }
+
+      // ----------------------------------------------------------------
+      // SPECIAL EVENT SHOTS
+      // ----------------------------------------------------------------
+      case 'deathHold': {
+        // Wider deliberate frame on the dying enemy — gives the death
+        // animation room to play out.
+        const pos = e.clone()
+          .addScaledVector(fwd, 3.5)
+          .addScaledVector(side, 2.0)
+        pos.y = e.y + 2.0
+        const lookAt = e.clone()
+        lookAt.y += 0.6
+        return { pos, lookAt }
+      }
+
+      case 'wideAction': {
+        // Broad frame for magic / area-of-effect — keeps all targets
+        // visible with room for the visual spectacle.
+        const pos = mid.clone()
+          .addScaledVector(side, 7)
+        pos.y = mid.y + 4.0
+        const lookAt = mid.clone()
+        lookAt.y += 1.0
         return { pos, lookAt }
       }
 
       case 'overShoulder': {
-        // 1.5u behind + 0.8u to side of player, 1.8u up — looking at enemy
+        // Behind player looking at enemy — transition / utility shot
         const pos = p.clone()
           .addScaledVector(fwd, -1.5)
           .addScaledVector(side, 0.8)
@@ -366,8 +502,7 @@ export class BattleCameraController {
       }
 
       default: {
-        // Fallback to establishing
-        return this.computeShotPosAndLookAt('establishing')
+        return this.computeShotPosAndLookAt('menuIdle')
       }
     }
   }

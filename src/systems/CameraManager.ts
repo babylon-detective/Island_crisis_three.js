@@ -136,6 +136,7 @@ export class CameraManager {
   private tpCurrentPos: THREE.Vector3 = new THREE.Vector3()
   private tpCurrentLookAt: THREE.Vector3 = new THREE.Vector3()
   private tpInitialised: boolean = false
+  private touchLookActive: boolean = false
 
   // Player spotlight
   private playerSpotlight: THREE.SpotLight | null = null
@@ -309,25 +310,37 @@ export class CameraManager {
   }
 
   private setupEventListeners(): void {
+    const isTouchDevice = 'ontouchstart' in window
+
     // Mouse movement for third-person camera orbit
     this.container.addEventListener('mousemove', this.onMouseMove.bind(this))
 
-    // Pointer lock for third-person camera
-    this.container.addEventListener('click', () => {
-      if (this.currentMode === 'thirdperson') {
-        this.container.requestPointerLock().catch(() => {})
-      }
+    // Reset manual mouse tracking on every new pointer interaction so that
+    // the first subsequent mousemove recalibrates instead of computing a
+    // stale delta (fixes touch-screen camera rotation bug).
+    this.container.addEventListener('pointerdown', () => {
+      this.lastMouseX = null
+      this.lastMouseY = null
     })
 
-    document.addEventListener('pointerlockchange', this.onPointerLockChange.bind(this))
-
-    // Auto-request pointer lock if starting in thirdperson mode
-    if (this.currentMode === 'thirdperson') {
-      setTimeout(() => {
-        if (this.currentMode === 'thirdperson' && document.pointerLockElement !== this.container) {
+    // Pointer lock for third-person camera (desktop only — mobile doesn't support it)
+    if (!isTouchDevice) {
+      this.container.addEventListener('click', () => {
+        if (this.currentMode === 'thirdperson') {
           this.container.requestPointerLock().catch(() => {})
         }
-      }, 100)
+      })
+
+      document.addEventListener('pointerlockchange', this.onPointerLockChange.bind(this))
+
+      // Auto-request pointer lock if starting in thirdperson mode
+      if (this.currentMode === 'thirdperson') {
+        setTimeout(() => {
+          if (this.currentMode === 'thirdperson' && document.pointerLockElement !== this.container) {
+            this.container.requestPointerLock().catch(() => {})
+          }
+        }, 100)
+      }
     }
 
     window.addEventListener('resize', this.handleResize.bind(this))
@@ -403,8 +416,8 @@ export class CameraManager {
     // Enable/disable controls
     this.orbitControls.enabled = (mode === 'freeview')
 
-    // Handle pointer lock
-    if (mode === 'thirdperson' && requestPointerLock) {
+    // Handle pointer lock (desktop only)
+    if (mode === 'thirdperson' && requestPointerLock && !('ontouchstart' in window)) {
       if (document.pointerLockElement !== this.container) {
         this.container.requestPointerLock().catch(() => {})
       }
@@ -466,6 +479,11 @@ export class CameraManager {
   // ============================================================================
 
   private onMouseMoveThirdPerson(event: MouseEvent): void {
+    // Skip mouse-driven rotation while touch is actively controlling the camera.
+    // The touch path (PlayerController → updatePlayerCameraFromGamepad) handles
+    // this instead; letting stale mousemove deltas through here would fight it.
+    if (this.touchLookActive) return
+
     let movementX = 0
     let movementY = 0
 
@@ -482,6 +500,13 @@ export class CameraManager {
       movementY = event.clientY - this.lastMouseY
       this.lastMouseX = event.clientX
       this.lastMouseY = event.clientY
+
+      // Discard obviously stale deltas (e.g. from a compatibility mousemove
+      // that references a position from a previous, distant touch session).
+      const MAX_SANE_DELTA = 60
+      if (Math.abs(movementX) > MAX_SANE_DELTA || Math.abs(movementY) > MAX_SANE_DELTA) {
+        return
+      }
     }
 
     const sens = this.config.thirdPerson.sensitivity
@@ -661,6 +686,19 @@ export class CameraManager {
 
   public setPlayerPosition(position: THREE.Vector3): void {
     this.playerPosition.copy(position)
+  }
+
+  /**
+   * Signal whether touch-based camera look is active.
+   * When active, onMouseMoveThirdPerson is suppressed to prevent stale
+   * compatibility-mouse-event deltas from fighting the touch camera path.
+   */
+  public setTouchLookActive(active: boolean): void {
+    this.touchLookActive = active
+    if (active) {
+      this.lastMouseX = null
+      this.lastMouseY = null
+    }
   }
 
   public getPlayerPosition(): THREE.Vector3 {
@@ -912,7 +950,7 @@ export class CameraManager {
 
   /**
    * Enter battle camera mode.
-   * White-flash transition → 3-second opening cinematic → establishing shot.
+   * White-flash transition → opening cinematic → menu idle (¾ isometric).
    * Positions should already be staged to 8 units apart by BattleSystem.
    */
   public enterBattleMode(playerPosition: THREE.Vector3, npcPosition: THREE.Vector3): void {
@@ -930,9 +968,9 @@ export class CameraManager {
       this.setActiveCamera('battle', false)
       this.battleCameraController.start()
 
-      // Play the opening cinematic (3 seconds)
+      // Play the opening cinematic → settles on ¾ isometric menu idle
       this.battleCameraController.playOpening(() => {
-        console.log('📷 Battle opening cinematic complete — establishing shot active')
+        console.log('📷 Battle opening cinematic complete — menu idle active')
       })
 
       console.log(

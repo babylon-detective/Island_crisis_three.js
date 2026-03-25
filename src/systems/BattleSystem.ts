@@ -59,6 +59,9 @@ export class BattleSystem {
   /** True while an attack camera sequence is playing (blocks input). */
   private attackSequencePlaying = false
   private stagedPlayerStartPosition: THREE.Vector3 | null = null
+  /** Counts rapid taps during a blocked sequence — skip after threshold. */
+  private skipTapCount = 0
+  private readonly skipTapThreshold = 3
 
   private boundKeyDown: ((e: KeyboardEvent) => void) | null = null
 
@@ -326,12 +329,26 @@ export class BattleSystem {
     }
 
     if (actionId !== 'escape' && this.isCommandInputBlocked()) {
+      // Count rapid taps — skip the animation sequence after threshold
+      this.skipTapCount++
+      if (this.skipTapCount >= this.skipTapThreshold) {
+        this.skipBattleSequence()
+        traceInputCommand({
+          source,
+          target: 'battle',
+          command: actionId,
+          result: 'executed',
+          details: { skipped: true, taps: this.skipTapCount }
+        })
+        this.skipTapCount = 0
+        return true
+      }
       traceInputCommand({
         source,
         target: 'battle',
         command: actionId,
         result: 'blocked',
-        details: { attackSequencePlaying: this.attackSequencePlaying, battleCameraBusy: this.isBattleCameraBusy(), phase: this.phase }
+        details: { attackSequencePlaying: this.attackSequencePlaying, battleCameraBusy: this.isBattleCameraBusy(), phase: this.phase, skipTapCount: this.skipTapCount }
       })
       return true
     }
@@ -428,6 +445,7 @@ export class BattleSystem {
     }
 
     this.attackSequencePlaying = true
+    this.skipTapCount = 0
 
     // Compute the strike position: 0.8 units from enemy, along player→enemy axis
     const fwd = this.battleEnemyPos.clone().sub(this.battlePlayerPos)
@@ -438,42 +456,46 @@ export class BattleSystem {
 
     const originalPlayerPos = this.battlePlayerPos.clone()
 
-    // Camera choreography sequence
+    // Cinematic attack sequence — hard cuts, manga-panel rhythm:
+    // 1. attackerFocus  — low-angle on player, wind-up / attack anim
+    // 2. strikeImpact   — tight shot at impact point, player teleports to strike range
+    // 3. targetReaction  — cut to enemy receiving hit, damage applied
+    // 4. menuIdle (or deathHold if enemy dies) — return to battlefield view
     const sequence: BattleCameraShot[] = [
       {
-        type: 'playerCloseUp',
-        duration: 0.3,
-        onComplete: () => {
-          // Teleport player to strike range
-          this.playerController!.setPosition(strikePos)
-          this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
+        type: 'attackerFocus',
+        duration: 0.35,
+        onStart: () => {
+          // Play player attack animation at standing position
+          try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.15) } catch (_) {}
         },
       },
       {
-        type: 'attackAction',
-        duration: 0.5,
+        type: 'strikeImpact',
+        duration: 0.25,
         onStart: () => {
-          // Play attack animation
-          try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.18) } catch (_) {}
+          // Teleport player to strike range as the hit lands
+          this.playerController!.setPosition(strikePos)
+          this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
         },
         onComplete: () => {
-          // Apply damage
+          // Apply damage at the moment of impact
           this.performAttackDamage(npc)
-          // Teleport player back to standing position
+          // Return player to standing position
           this.playerController!.setPosition(originalPlayerPos)
           this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
         },
       },
       {
-        type: 'enemyCloseUp',
-        duration: 0.5,
+        type: this.enemyHP <= 0 ? 'deathHold' : 'targetReaction',
+        duration: this.enemyHP <= 0 ? 0.6 : 0.35,
         onComplete: () => {
           this.attackSequencePlaying = false
           if (this.phase === 'ended') {
-            // Enemy was defeated — stay on enemy close-up, overlay already shows result
+            // Enemy was defeated — hold on deathHold, overlay shows result
             return
           }
-          // Enemy counter-attacks
+          // Enemy counter-attacks with its own camera sequence
           this.resolveEnemyTurnWithCamera(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
         },
       },
@@ -486,8 +508,23 @@ export class BattleSystem {
     return this.cameraManager?.getBattleCameraController().busy ?? false
   }
 
+  private isOpeningCinematicPlaying(): boolean {
+    return this.cameraManager?.getBattleCameraController().openingPlaying ?? false
+  }
+
   private isCommandInputBlocked(): boolean {
+    if (this.isOpeningCinematicPlaying()) return true
     return this.attackSequencePlaying && this.isBattleCameraBusy()
+  }
+
+  /** Skip all pending battle camera sequences, firing callbacks instantly. */
+  private skipBattleSequence(): void {
+    // Skip opening cinematic if active
+    const ctrl = this.cameraManager?.getBattleCameraController()
+    if (ctrl) {
+      ctrl.skipSequence()
+    }
+    this.attackSequencePlaying = false
   }
 
   private reconcileInputLock(): void {
@@ -531,7 +568,12 @@ export class BattleSystem {
     }
 
     this.guardActive = true
-    this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
+    // Use camera choreography for the enemy counterattack when available
+    if (this.cameraManager?.isInBattleMode()) {
+      this.resolveEnemyTurnWithCamera(`You brace for ${npc.id}'s counterattack.`)
+    } else {
+      this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
+    }
   }
 
   private performItemAction(): void {
@@ -564,8 +606,10 @@ export class BattleSystem {
   }
 
   /**
-   * Enemy turn with camera choreography:
-   * enemyCloseUp → establishing (attack) → playerCloseUp (reaction) → overShoulder
+   * Enemy turn with camera choreography (shot/reverse-shot structure):
+   * 1. enemyFocus   — dramatic low-angle on enemy, attack anim plays
+   * 2. playerReaction — cut to player receiving hit, damage applied
+   * 3. menuIdle      — return to battlefield overview, unlock input
    */
   private resolveEnemyTurnWithCamera(prefix: string): void {
     const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
@@ -582,22 +626,22 @@ export class BattleSystem {
 
     const sequence: BattleCameraShot[] = [
       {
-        type: 'enemyCloseUp',
-        duration: 0.3,
-      },
-      {
-        type: 'establishing',
-        duration: 0.4,
+        type: 'enemyFocus',
+        duration: 0.35,
         onStart: () => {
-          // Apply damage during the establishing shot
+          // Play NPC attack animation — dramatic low-angle sells the threat
+          try { this.charAnimSystem.crossfadeTo(npc.id, 'attack', 0.15) } catch (_) {}
+        },
+        onComplete: () => {
+          // Apply damage as the enemy's strike lands
           this.playerHP = Math.max(0, this.playerHP - damage)
         },
       },
       {
-        type: 'playerCloseUp',
-        duration: 0.5,
+        type: 'playerReaction',
+        duration: 0.35,
         onStart: () => {
-          // Show damage reaction
+          // Show damage result while camera is on the player
           if (this.playerHP <= 0) {
             this.phase = 'ended'
             this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
@@ -609,9 +653,10 @@ export class BattleSystem {
         },
       },
       {
-        type: 'overShoulder',
-        duration: 0.3,
+        type: 'menuIdle',
+        duration: 0.2,
         onComplete: () => {
+          // Return to battlefield overview — unlock input
           this.attackSequencePlaying = false
         },
       },

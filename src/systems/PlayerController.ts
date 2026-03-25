@@ -532,6 +532,7 @@ export class PlayerController {
       if (zone === 'look' && this.touchState.activeLookTouch === null) {
         this.touchState.activeLookTouch = touch.identifier
         this.touchState.lastLookDelta.set(0, 0)
+        this.cameraManager.setTouchLookActive(true)
       }
 
       // Old-feel gesture: double-tap + hold on the navigate curtain to run.
@@ -587,6 +588,7 @@ export class PlayerController {
 
     this.touchState.activeLookTouch = replacementTouchId
     this.touchState.lastLookDelta.set(0, 0)
+    this.cameraManager.setTouchLookActive(replacementTouchId !== null)
   }
   
   private handleTouchMove(event: TouchEvent): void {
@@ -623,7 +625,9 @@ export class PlayerController {
       touchInfo.y = touch.clientY
 
       if (touchId === this.touchState.activeLookTouch) {
-        this.touchState.lastLookDelta.set(deltaX, deltaY)
+        // Accumulate deltas so sub-frame touchmove events aren't lost
+        this.touchState.lastLookDelta.x += deltaX
+        this.touchState.lastLookDelta.y += deltaY
       }
     }
 
@@ -659,6 +663,7 @@ export class PlayerController {
       if (this.touchState.activeLookTouch === touchId) {
         this.touchState.activeLookTouch = null
         this.touchState.lastLookDelta.set(0, 0)
+        this.cameraManager.setTouchLookActive(false)
       }
       
       this.touchState.activeTouches.delete(touchId)
