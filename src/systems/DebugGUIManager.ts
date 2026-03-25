@@ -320,6 +320,8 @@ export class DebugGUIManager {
       sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
       sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
       sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
+      sub.add(params, 'lookFwdOffset',    -6,   6,  0.05).name('look fwd offset')
+      sub.add(params, 'lookSideOffset',   -6,   6,  0.05).name('look side offset')
       sub.add(params, 'lookHeightOffset',   0,  4,  0.05).name('look height')
       sub.add(params, 'fov',              20, 90,  1).name('FOV')
 
