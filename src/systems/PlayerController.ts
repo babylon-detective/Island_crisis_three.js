@@ -7,6 +7,8 @@ import { ObjectLoader } from './ObjectLoader'
 import type { DialogueManager } from './DialogueSystem'
 import type { BattleSystem } from './BattleSystem'
 import type { GamepadPlayerInput } from './InputSystem'
+import type { NPCSystem } from './NPCSystem'
+import type { ObjectManager } from './ObjectManager'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -149,6 +151,11 @@ export class PlayerController {
   private touchZoneById: Map<number, 'navigate' | 'look'> = new Map()
   private touchCameraVelocity = new THREE.Vector2(0, 0)
   private navigationMarker: THREE.Mesh | null = null
+  // Which entity (NPC or managed object) we're auto-navigating toward, or null for terrain taps
+  private navigationTargetEntity: { type: 'npc'; id: string } | { type: 'object'; id: string } | null = null
+  // External system references for entity-aware tap detection
+  private npcSystem: NPCSystem | null = null
+  private objectManager: ObjectManager | null = null
   
   // Gamepad input
   private gamepadInput: {
@@ -457,7 +464,8 @@ export class PlayerController {
     const keyAttack = this.keyStates.get('KeyK') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyI') || false
-    
+
+
     // (WASD debug logging removed to avoid per-frame console.log overhead)
     
     // Touch movement is tap-to-navigate (handled separately), not virtual joystick.
@@ -698,6 +706,85 @@ export class PlayerController {
 
     this.touchRaycaster.setFromCamera(ndc, camera)
 
+    // ── Priority 1: NPCs (screen-space proximity) ─────────────────────────
+    // NPC models are SkinnedMesh — standard raycasting hits bind-pose geometry
+    // (T-pose), not the visible animated pose. Use screen-space projection instead.
+    if (this.npcSystem) {
+      const TAP_RADIUS_PX = 60 // screen-pixel threshold for a "hit"
+      const scratchVec = new THREE.Vector3()
+      let closestNpcId: string | null = null
+      let closestDistSq = TAP_RADIUS_PX * TAP_RADIUS_PX
+
+      for (const npc of this.npcSystem.getAllNPCs()) {
+        // Project NPC center (feet + half character height) to screen
+        scratchVec.copy(npc.position)
+        scratchVec.y += 0.9 // roughly chest height
+        scratchVec.project(camera)
+
+        // NDC → screen pixels
+        const sx = (scratchVec.x * 0.5 + 0.5) * window.innerWidth
+        const sy = (-scratchVec.y * 0.5 + 0.5) * window.innerHeight
+
+        // Skip NPCs behind the camera
+        if (scratchVec.z > 1) continue
+
+        const dx = sx - screenX
+        const dy = sy - screenY
+        const d2 = dx * dx + dy * dy
+        if (d2 < closestDistSq) {
+          closestDistSq = d2
+          closestNpcId = npc.id
+        }
+      }
+
+      if (closestNpcId) {
+        const npc = this.npcSystem.getNPC(closestNpcId)!
+        this.navigationTargetEntity = { type: 'npc', id: closestNpcId }
+        this.navigationTarget = npc.position.clone()
+        this.showNavigationMarker(this.navigationTarget, 0xffcc00) // gold for NPCs
+        traceInputCommand({ source: 'touch', target: 'player', command: 'navigate-tap-npc', result: 'executed', details: { npcId: closestNpcId } })
+        return
+      }
+    }
+
+    // ── Priority 2: special scene objects ────────────────────────────────
+    if (this.objectManager) {
+      const SKIP_TYPES = new Set(['land', 'ocean'])
+      const objMeshes: THREE.Object3D[] = []
+      const meshToObjId = new Map<string, string>() // mesh uuid → object id
+      for (const obj of this.objectManager.getAllObjects()) {
+        if (SKIP_TYPES.has(obj.type)) continue
+        obj.mesh.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            objMeshes.push(child)
+            meshToObjId.set(child.uuid, obj.id)
+          }
+        })
+        // Also include the root if it IS a Mesh
+        if (obj.mesh instanceof THREE.Mesh && !meshToObjId.has(obj.mesh.uuid)) {
+          objMeshes.push(obj.mesh)
+          meshToObjId.set(obj.mesh.uuid, obj.id)
+        }
+      }
+      if (objMeshes.length > 0) {
+        const objHits = this.touchRaycaster.intersectObjects(objMeshes, false)
+        if (objHits.length > 0) {
+          const objId = meshToObjId.get(objHits[0].object.uuid)
+          if (objId) {
+            const managed = this.objectManager.getObject(objId)!
+            const pos = managed.mesh.getWorldPosition(new THREE.Vector3())
+            pos.y = this.collisionSystem.getGroundHeight(pos.x, pos.z)
+            this.navigationTargetEntity = { type: 'object', id: objId }
+            this.navigationTarget = pos
+            this.showNavigationMarker(pos, 0xcc44ff) // purple for special objects
+            traceInputCommand({ source: 'touch', target: 'player', command: 'navigate-tap-object', result: 'executed', details: { objId } })
+            return
+          }
+        }
+      }
+    }
+
+    // ── Priority 3: land surface ──────────────────────────────────────────
     const landMeshes: THREE.Object3D[] = []
     this.scene.traverse((obj) => {
       if (!(obj instanceof THREE.Mesh)) return
@@ -710,8 +797,9 @@ export class PlayerController {
     if (landMeshes.length > 0) {
       const hits = this.touchRaycaster.intersectObjects(landMeshes, true)
       if (hits.length > 0) {
+        this.navigationTargetEntity = null
         this.navigationTarget = hits[0].point.clone()
-        this.showNavigationMarker(this.navigationTarget)
+        this.showNavigationMarker(this.navigationTarget, 0x2ea8ff) // blue for terrain
         traceInputCommand({
           source: 'touch',
           target: 'player',
@@ -727,14 +815,15 @@ export class PlayerController {
       }
     }
 
-    // Fallback: project to a horizontal plane at local ground height.
+    // ── Fallback: horizontal plane at local ground height ─────────────────
     const baseGround = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -baseGround)
     const hit = new THREE.Vector3()
     if (this.touchRaycaster.ray.intersectPlane(plane, hit)) {
       hit.y = this.collisionSystem.getGroundHeight(hit.x, hit.z)
+      this.navigationTargetEntity = null
       this.navigationTarget = hit
-      this.showNavigationMarker(this.navigationTarget)
+      this.showNavigationMarker(this.navigationTarget, 0x2ea8ff)
       traceInputCommand({
         source: 'touch',
         target: 'player',
@@ -749,11 +838,11 @@ export class PlayerController {
     }
   }
 
-  private showNavigationMarker(position: THREE.Vector3): void {
+  private showNavigationMarker(position: THREE.Vector3, color: number = 0x2ea8ff): void {
     if (!this.navigationMarker) {
       const ring = new THREE.RingGeometry(0.24, 0.34, 40)
       const mat = new THREE.MeshBasicMaterial({
-        color: 0x2ea8ff,
+        color,
         transparent: true,
         opacity: 0.92,
         side: THREE.DoubleSide,
@@ -766,6 +855,9 @@ export class PlayerController {
       this.scene.add(this.navigationMarker)
     }
 
+    // Update ring colour when entity type changes.
+    ;(this.navigationMarker.material as THREE.MeshBasicMaterial).color.setHex(color)
+
     this.navigationMarker.position.set(position.x, position.y + 0.03, position.z)
     this.navigationMarker.visible = true
     this.navigationMarker.scale.setScalar(1)
@@ -773,6 +865,15 @@ export class PlayerController {
 
   private updateNavigationMarker(): void {
     if (!this.navigationMarker || !this.navigationMarker.visible) return
+
+    // For NPC targets: keep the ring glued to the NPC's current feet position.
+    if (this.navigationTargetEntity?.type === 'npc' && this.navigationTarget) {
+      this.navigationMarker.position.set(
+        this.navigationTarget.x,
+        this.navigationTarget.y + 0.03,
+        this.navigationTarget.z,
+      )
+    }
 
     const t = performance.now() * 0.004
     const pulse = 1 + Math.sin(t) * 0.08
@@ -906,6 +1007,7 @@ export class PlayerController {
     if ((this.dialogueManager && this.dialogueManager.isDialogueActive()) ||
         (this.battleManager && this.battleManager.isBattleActive())) {
       this.navigationTarget = null
+      this.navigationTargetEntity = null
       if (this.navigationMarker) {
         this.navigationMarker.visible = false
       }
@@ -932,6 +1034,19 @@ export class PlayerController {
     // Manual input cancels tap-to-navigate.
     if (hasManualMovementInput) {
       this.navigationTarget = null
+      this.navigationTargetEntity = null
+    }
+
+    // Refresh NPC navigation target each frame so it tracks the NPC as it wanders.
+    if (this.navigationTargetEntity?.type === 'npc' && this.npcSystem) {
+      const trackedNPC = this.npcSystem.getNPC(this.navigationTargetEntity.id)
+      if (trackedNPC) {
+        this.navigationTarget = trackedNPC.position.clone()
+      } else {
+        // NPC no longer exists (defeated?)
+        this.navigationTarget = null
+        this.navigationTargetEntity = null
+      }
     }
     
     let navigationDistance = Number.POSITIVE_INFINITY
@@ -974,8 +1089,15 @@ export class PlayerController {
         const dist = toTarget.length()
         navigationDistance = dist
 
-        if (dist < 0.30) {
+        // Arrival distance: stand in front of NPCs / objects, touch point for terrain.
+        const arrivalDist =
+          this.navigationTargetEntity?.type === 'npc' ? 2.0
+          : this.navigationTargetEntity?.type === 'object' ? 1.5
+          : 0.30
+
+        if (dist < arrivalDist) {
           this.navigationTarget = null
+          this.navigationTargetEntity = null
           if (this.navigationMarker) this.navigationMarker.visible = false
         } else {
           toTarget.normalize()
@@ -1255,6 +1377,16 @@ export class PlayerController {
 
   public isRunning(): boolean {
     return this.state.isRunning
+  }
+
+  /** Provide NPC system so tap-to-navigate can detect and follow NPCs. */
+  public setNPCSystem(system: NPCSystem): void {
+    this.npcSystem = system
+  }
+
+  /** Provide object manager so tap-to-navigate can detect special scene objects. */
+  public setObjectManager(manager: ObjectManager): void {
+    this.objectManager = manager
   }
 
   /** Late-bind the dialogue manager so the action button becomes contextual. */

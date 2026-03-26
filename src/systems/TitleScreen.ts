@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { SHADERS } from '../shaderImports'
 import { RetroPostProcessingSystem } from './RetroPostProcessingSystem'
+import type { SoundSystem } from './SoundSystem'
 
 // Game Hub URL - change this to your actual deployed hub URL
 const HUB_URL = 'https://www.dreamdealer.dev'
@@ -9,6 +10,7 @@ export interface TitleScreenConfig {
   onStart: () => Promise<void>
   onContinue: () => Promise<void>
   onRevealGameplay?: () => void
+  soundSystem?: SoundSystem
 }
 
 export class TitleScreen {
@@ -120,6 +122,7 @@ export class TitleScreen {
         this.selectedIndex = 0
         this.updateMenuSelection()
         this.playHoverSound()
+        this.startOcean()
       })
     }
     
@@ -131,6 +134,7 @@ export class TitleScreen {
         this.selectedIndex = 1
         this.updateMenuSelection()
         this.playHoverSound()
+        this.startOcean()
       })
       
       // Check if save data exists
@@ -148,12 +152,19 @@ export class TitleScreen {
         this.selectedIndex = 2
         this.updateMenuSelection()
         this.playHoverSound()
+        this.startOcean()
       })
     }
     
+    // Catch any early user interaction that mouseenter might miss
+    // (touch devices, users who click before hovering, autoplay rejection recovery).
+    document.addEventListener('pointerdown', () => this.startOcean(), { once: true })
+    document.addEventListener('touchstart',  () => this.startOcean(), { once: true, passive: true })
+
     // Keyboard navigation
     document.addEventListener('keydown', (e) => {
       if (!this.isActive) return
+      this.startOcean() // first key press starts the ocean loop
       
       if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
         e.preventDefault()
@@ -270,9 +281,17 @@ export class TitleScreen {
     // You can add Web Audio API sound here
   }
 
+  /** Start the ocean ambient loop — SoundSystem handles idempotency internally. */
+  private startOcean(): void {
+    this.config.soundSystem?.startOceanLoop()
+  }
+
   private async handleStart(): Promise<void> {
     if (!this.isActive) return
     this.isActive = false // prevent double-clicks while loading
+    
+    // Fade out ocean as the game loads (2 s matches the loading phase feel).
+    this.config.soundSystem?.stopOceanLoop(2)
     
     console.log('🎮 Starting new game...')
     
@@ -297,6 +316,9 @@ export class TitleScreen {
     }
     this.isActive = false // prevent double-clicks while loading
     
+    // Fade out ocean as the game loads.
+    this.config.soundSystem?.stopOceanLoop(2)
+    
     console.log('🎮 Continuing game...')
     
     // Load the game while the title screen is still visible
@@ -311,6 +333,9 @@ export class TitleScreen {
 
   private handleHub(): void {
     if (!this.isActive) return
+    
+    // Stop ocean matching the 1 s visual fadeout.
+    this.config.soundSystem?.stopOceanLoop(1)
     
     console.log('🎮 Navigating to Game Hub...')
     this.fadeOut(() => {
@@ -391,6 +416,9 @@ export class TitleScreen {
 
   public dispose(): void {
     this.isActive = false
+    
+    // Safety: stop ocean if it is still playing (e.g. rapid dispose path).
+    this.config.soundSystem?.stopOceanLoop(0)
     
     // Stop animation
     if (this.animationId !== null) {

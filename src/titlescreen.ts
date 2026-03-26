@@ -8,12 +8,17 @@
 import './style.css'
 import './titlescreen.css'
 import { TitleScreen } from './systems/TitleScreen'
+import { SoundSystem } from './systems/SoundSystem'
+
+// Shared audio manager — created here so it outlives the TitleScreen instance.
+const soundSystem = new SoundSystem()
 
 // Flag to track if this is a new game or continue
 let isNewGame = true
 
 // Initialize title screen
 const titleScreen = new TitleScreen({
+  soundSystem,
   onStart: async () => {
     isNewGame = true
     await startGame()

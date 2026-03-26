@@ -111,6 +111,7 @@ export class DialogueManager {
 
   // key listener
   private boundKeyDown: ((e: KeyboardEvent) => void) | null = null
+  private pauseChecker: (() => boolean) | null = null
 
   // — built-in dialogue overlay DOM —
   private overlayRoot: HTMLDivElement | null = null
@@ -138,6 +139,12 @@ export class DialogueManager {
   // --------------------------------------------------------------------------
   // SETUP
   // --------------------------------------------------------------------------
+
+  /** Provide a function that returns true when the game is paused.
+   *  handleKey will be a no-op while paused, preventing dialogue from advancing behind the pause overlay. */
+  setPauseChecker(fn: () => boolean): void {
+    this.pauseChecker = fn
+  }
 
   /** Link the camera manager so dialogue can drive camera transitions. */
   setCameraManager(cam: CameraManager): void {
@@ -255,6 +262,7 @@ export class DialogueManager {
 
   private handleKey(e: KeyboardEvent): void {
     if (!this.isActive) return
+    if (this.pauseChecker?.()) return
 
     // During active dialogue: I/K, W/S, or arrows move the highlighted choice.
     if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyI') {

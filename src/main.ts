@@ -33,6 +33,8 @@ import { NPCSystem } from './systems/NPCSystem'
 import { NPCAISystem } from './systems/NPCAISystem'
 import { DialogueManager } from './systems/DialogueSystem'
 import { BattleSystem } from './systems/BattleSystem'
+import { MenuSystem } from './systems/MenuSystem'
+import { SoundSystem } from './systems/SoundSystem'
 import { SHADERS, ShaderPath } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
@@ -901,6 +903,8 @@ class IntegratedThreeJSApp {
   private npcAISystem: NPCAISystem | null = null
   private dialogueManager: DialogueManager | null = null
   private battleSystem: BattleSystem | null = null
+  private menuSystem: MenuSystem | null = null
+  private soundSystem: SoundSystem = new SoundSystem()
 
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
@@ -913,11 +917,13 @@ class IntegratedThreeJSApp {
     attack: HTMLButtonElement | null
     escape: HTMLButtonElement | null
     start: HTMLButtonElement | null
+    menu: HTMLButtonElement | null
   } = {
     confirm: null,
     attack: null,
     escape: null,
     start: null,  // IC pause button (upper-left)
+    menu: null,   // Menu Event button (upper-right)
   }
   
   // Lighting references for dynamic control
@@ -1057,6 +1063,12 @@ class IntegratedThreeJSApp {
         traceInputCommand({ source: 'gamepad', target: 'main', command: 'menu/pause', result: 'executed' })
         console.log('🎮 Menu/Pause button pressed (gamepad)')
         this.togglePause()
+      }
+
+      // Handle select button — Menu Event
+      if (input.select && !modalActive && this.menuSystem) {
+        traceInputCommand({ source: 'gamepad', target: 'main', command: 'menu-event', result: 'executed' })
+        this.menuSystem.toggle()
       }
     })
     this.inputSystem.addHandler(this.gamepadHandler)
@@ -1221,6 +1233,10 @@ class IntegratedThreeJSApp {
       )
       this.npcAISystem.initAll()
 
+      // Give PlayerController awareness of NPCs and scene objects for tap-to-navigate.
+      this.playerController.setNPCSystem(this.npcSystem)
+      this.playerController.setObjectManager(this.objectManager)
+
       // Dialogue manager
       this.dialogueManager = new DialogueManager(
         this.npcSystem,
@@ -1229,6 +1245,7 @@ class IntegratedThreeJSApp {
       )
       this.dialogueManager.setCameraManager(this.cameraManager)
       this.dialogueManager.setInputMode(this.activeInputMode)
+      this.dialogueManager.setPauseChecker(() => this.pauseManager.getPaused())
       this.dialogueManager.enable()
 
       this.battleSystem = new BattleSystem(
@@ -1239,8 +1256,12 @@ class IntegratedThreeJSApp {
       this.battleSystem.setCameraManager(this.cameraManager)
       this.battleSystem.setDialogueManager(this.dialogueManager)
       this.battleSystem.setPlayerController(this.playerController)
+      this.battleSystem.setSoundSystem(this.soundSystem)
       this.battleSystem.setInputMode(this.activeInputMode)
       this.battleSystem.enable()
+
+      // Menu Event system — always constructed alongside NPC systems
+      this.menuSystem = new MenuSystem(this.scene, this.cameraManager, this.playerController)
 
       window.addEventListener('dialogue-to-battle', (event: Event) => {
         const customEvent = event as CustomEvent<{ npcId: string }>
@@ -2423,6 +2444,46 @@ class IntegratedThreeJSApp {
     })
     this.mobileButtons.start = startBtn
 
+    // Menu Event button ≡ (upper-right) — opens character stat screen
+    const existingMenuBtn = document.getElementById('mobile-menu-btn')
+    if (existingMenuBtn) existingMenuBtn.remove()
+    const menuBtn = document.createElement('button')
+    menuBtn.id = 'mobile-menu-btn'
+    menuBtn.textContent = '≡'
+    menuBtn.style.cssText = `
+      position: fixed;
+      top: ${scaleSize(14)}px;
+      right: ${scaleSize(14)}px;
+      width: ${scaleSize(40)}px;
+      height: ${scaleSize(40)}px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.35);
+      color: rgba(255,255,255,0.7);
+      font-size: ${scaleSize(20)}px;
+      z-index: 12000;
+      pointer-events: auto;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      line-height: 1;
+    `
+    document.body.appendChild(menuBtn)
+    bindPress(menuBtn, () => {
+      menuBtn.style.background = 'rgba(180,170,255,0.2)'
+      if (this.menuSystem) {
+        traceInputCommand({ source: 'touch', target: 'main', command: 'menu-event', result: 'executed' })
+        this.menuSystem.toggle()
+      }
+    }, () => {
+      menuBtn.style.background = 'rgba(0,0,0,0.35)'
+    })
+    this.mobileButtons.menu = menuBtn
+
     this.refreshMobileControlState()
   }
 
@@ -2932,6 +2993,31 @@ class IntegratedThreeJSApp {
             console.log(`🧍 Pose: ${poseName}`)
           }
           break
+        case 'enter':
+          // Return/Enter toggles pause when no modal is active and the overlay is not already open
+          // (when overlay IS open, PauseOverlay's own keydown handler handles Enter)
+          if (
+            !this.pauseOverlay.isVisible() &&
+            !this.dialogueManager?.isDialogueActive() &&
+            !this.battleSystem?.isBattleActive()
+          ) {
+            event.preventDefault()
+            this.togglePause()
+          }
+          break
+        case 'm':
+          // M key — toggle Menu Event state
+          if (
+            !this.pauseOverlay.isVisible() &&
+            !this.dialogueManager?.isDialogueActive() &&
+            !this.battleSystem?.isBattleActive() &&
+            this.menuSystem
+          ) {
+            event.preventDefault()
+            traceInputCommand({ source: 'keyboard', target: 'main', command: 'menu-event', result: 'executed' })
+            this.menuSystem.toggle()
+          }
+          break
       }
     })
   }
@@ -3355,7 +3441,11 @@ class IntegratedThreeJSApp {
       this.cameraManager.update(deltaTime)
       
       // Update player controller (physics, movement, collision)
-      this.playerController.update(deltaTime)
+      // Suspended during Menu Event — avatar stays frozen in place
+      const inMenu = this.menuSystem?.isMenuActive() ?? false
+      if (!inMenu) {
+        this.playerController.update(deltaTime)
+      }
 
       // Update dominant light selection for the character shader
       this.updateCharacterLighting()
@@ -3385,17 +3475,21 @@ class IntegratedThreeJSApp {
         const inDialogue = this.dialogueManager?.isDialogueActive() ?? false
         const inBattle = this.battleSystem?.isBattleActive() ?? false
         // Update AI first so animation state reads the current movement on the same frame.
-        if (this.npcAISystem && !inDialogue && !inBattle) {
+        // AI is also suppressed during the Menu Event state.
+        if (this.npcAISystem && !inDialogue && !inBattle && !inMenu) {
           this.npcAISystem.setPlayerPosition(this.playerController.getPosition())
           this.npcAISystem.update(deltaTime)
         }
         // Keep NPC animation mixers running (for talking anim) but freeze AI movement
         if (this.npcSystem) this.npcSystem.update(deltaTime)
-        if (this.dialogueManager && !inBattle) {
+        if (this.dialogueManager && !inBattle && !inMenu) {
           this.dialogueManager.update(this.playerController.getPosition())
         }
-        if (this.battleSystem) {
+        if (this.battleSystem && !inMenu) {
           this.battleSystem.update(this.playerController.getPosition())
+        }
+        if (this.menuSystem) {
+          this.menuSystem.update(deltaTime)
         }
         this.refreshMobileControlState()
       } catch (e) {
@@ -3590,6 +3684,12 @@ class IntegratedThreeJSApp {
     if (this.mobileButtons.start) {
       this.mobileButtons.start.style.display = touchUiVisible ? 'block' : 'none'
       this.mobileButtons.start.title = 'Pause'
+    }
+
+    // Menu Event button — always visible on touch devices
+    if (this.mobileButtons.menu) {
+      this.mobileButtons.menu.style.display = touchUiVisible ? 'flex' : 'none'
+      this.mobileButtons.menu.title = 'Menu'
     }
 
     // Legacy A/B/ESC buttons are removed; ensure they stay hidden

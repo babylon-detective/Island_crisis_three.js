@@ -73,6 +73,8 @@ export class PauseOverlay {
   }
 
   private createOverlay(): void {
+    const isMobile = ('ontouchstart' in window) || window.innerWidth < 768;
+
     this.container = document.createElement('div');
     this.container.id = 'pause-overlay';
     this.container.style.cssText = `
@@ -84,8 +86,9 @@ export class PauseOverlay {
       background: rgba(0, 0, 0, 0.75);
       display: flex;
       flex-direction: column;
-      justify-content: center;
+      justify-content: ${isMobile ? 'flex-start' : 'center'};
       align-items: center;
+      ${isMobile ? 'padding-top: 18vh;' : ''}
       z-index: 10000;
       font-family: 'Press Start 2P', 'Courier New', monospace;
     `;
@@ -115,17 +118,6 @@ export class PauseOverlay {
     // Render options
     this.renderOptions(optionsContainer);
 
-    // Controls hint
-    const hint = document.createElement('div');
-    hint.textContent = 'W/S or ↑/↓ to select • Enter to confirm • Enter/Start to resume';
-    hint.style.cssText = `
-      color: #888;
-      font-size: 12px;
-      margin-top: 48px;
-      text-align: center;
-    `;
-    this.container.appendChild(hint);
-
     document.body.appendChild(this.container);
   }
 
@@ -142,11 +134,7 @@ export class PauseOverlay {
         font-size: 24px;
         padding: 12px 32px;
         text-shadow: ${isSelected ? '2px 2px 0 #000' : 'none'};
-        background: ${isSelected ? 'rgba(255, 204, 0, 0.2)' : 'transparent'};
-        border: ${isSelected ? '2px solid #ffcc00' : '2px solid transparent'};
-        border-radius: 4px;
         cursor: pointer;
-        transition: all 0.1s ease;
         text-align: center;
         min-width: 200px;
       `;

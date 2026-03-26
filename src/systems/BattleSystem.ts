@@ -8,6 +8,7 @@ import type { PlayerController } from './PlayerController'
 import type { DialogueManager } from './DialogueSystem'
 import { logger, LogModule } from './Logger'
 import { traceInputCommand, type InputTraceSource } from './InputTrace'
+import type { SoundSystem } from './SoundSystem'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -26,6 +27,7 @@ export class BattleSystem {
   private cameraManager: CameraManager | null = null
   private playerController: PlayerController | null = null
   private dialogueManager: DialogueManager | null = null
+  private soundSystem: SoundSystem | null = null
 
   private isActive = false
   private activeNpcId: string | null = null
@@ -103,6 +105,10 @@ export class BattleSystem {
 
   setDialogueManager(dialogueManager: DialogueManager): void {
     this.dialogueManager = dialogueManager
+  }
+
+  setSoundSystem(soundSystem: SoundSystem): void {
+    this.soundSystem = soundSystem
   }
 
   suppressHostileAutoTrigger(durationMs: number = this.postDialogueAutoTriggerGraceMs): void {
@@ -420,6 +426,7 @@ export class BattleSystem {
 
     this.renderBattleOverlay()
     logger.info(LogModule.SYSTEM, `Battle started with NPC "${npcId}" (${trigger})`)
+    this.soundSystem?.startBattleTheme_01()
     return true
   }
 
@@ -687,6 +694,7 @@ export class BattleSystem {
     this.playerController?.clearForcedFacingTarget()
     this.hideBattleOverlay()
     console.log(`⚔️ Battle end: npc=${resolvedNpcId ?? 'none'}, applyCooldown=${applyCooldown}, cameraModeBeforeExit=${this.cameraManager?.getCurrentMode() ?? 'none'}`)
+    this.soundSystem?.stopBattleTheme_01()
     this.cameraManager?.exitBattleMode()
   }
 

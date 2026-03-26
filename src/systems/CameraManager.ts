@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { BattleCameraController } from './BattleCameraController'
 import type { BattleShotType, BattleCameraShot } from './BattleCameraController'
 
-export type CameraMode = 'thirdperson' | 'dialogue' | 'battle'
+export type CameraMode = 'thirdperson' | 'dialogue' | 'battle' | 'menu'
 type InternalCameraMode = CameraMode | 'freeview'
 
 export type { BattleShotType, BattleCameraShot }
@@ -127,6 +127,7 @@ export class CameraManager {
   private thirdPersonCamera!: THREE.PerspectiveCamera
   private dialogueCamera!: THREE.PerspectiveCamera
   private battleCamera!: THREE.PerspectiveCamera
+  private menuCamera!: THREE.PerspectiveCamera
   private currentCamera!: THREE.Camera
   private currentMode: InternalCameraMode
 
@@ -279,6 +280,10 @@ export class CameraManager {
     this.battleCamera = new THREE.PerspectiveCamera(46, aspect, 0.1, 1000)
     this.battleCamera.name = 'BattleCamera'
 
+    // Menu Camera (static character-screen showcase camera)
+    this.menuCamera = new THREE.PerspectiveCamera(50, aspect, 0.1, 1000)
+    this.menuCamera.name = 'MenuCamera'
+
     // Set initial camera
     this.currentCamera = this.getCameraForMode(this.currentMode)
 
@@ -291,6 +296,7 @@ export class CameraManager {
       case 'thirdperson': return this.thirdPersonCamera
       case 'dialogue': return this.dialogueCamera
       case 'battle': return this.battleCamera
+      case 'menu': return this.menuCamera
       case 'freeview': return this.freeViewCamera
     }
   }
@@ -408,7 +414,7 @@ export class CameraManager {
 
   private setActiveCamera(mode: InternalCameraMode, requestPointerLock: boolean = false): void {
     this.currentMode = mode
-    if (mode !== 'dialogue' && mode !== 'battle') {
+    if (mode !== 'dialogue' && mode !== 'battle' && mode !== 'menu') {
       this.gameplayMode = mode
     }
     this.currentCamera = this.getCameraForMode(mode)
@@ -611,6 +617,8 @@ export class CameraManager {
     } else if (this.currentMode === 'battle') {
       // Battle camera controller drives the camera
       this.battleCameraController.update(deltaTime)
+    } else if (this.currentMode === 'menu') {
+      // Static — position locked in enterMenuMode
     }
   }
 
@@ -1016,6 +1024,43 @@ export class CameraManager {
         `enemy=(${npcPosition.x.toFixed(2)}, ${npcPosition.y.toFixed(2)}, ${npcPosition.z.toFixed(2)})`,
       )
     }, 'enter-battle')
+  }
+
+  // ============================================================================
+  // MENU CAMERA
+  // ============================================================================
+
+  /**
+   * Enter menu camera mode.
+   * The camera is placed in front of the player (direction they face),
+   * elevated slightly, looking back at the avatar's chest — classic RPG
+   * character-screen framing.
+   */
+  public enterMenuMode(playerPosition: THREE.Vector3, playerYaw: number): void {
+    this.priorMode =
+      this.currentMode === 'dialogue' || this.currentMode === 'battle' || this.currentMode === 'menu'
+        ? this.gameplayMode
+        : this.currentMode
+
+    const playerForward = new THREE.Vector3(Math.sin(playerYaw), 0, Math.cos(playerYaw))
+    const camPos = playerPosition.clone()
+      .addScaledVector(playerForward, 6.5)   // stepped back
+      .add(new THREE.Vector3(0, 0.8, 0))     // lower — shows more of the body
+    const lookAt = playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))
+
+    this.menuCamera.position.copy(camPos)
+    this.menuCamera.lookAt(lookAt)
+    this.setActiveCamera('menu', false)
+    console.log(`📷 Menu camera activated: prior=${this.priorMode}`)
+  }
+
+  /** Return from menu camera to the gameplay camera. */
+  public exitMenuMode(): void {
+    if (this.currentMode !== 'menu') return
+    const resumeMode = this.getResumeMode()
+    this.switchCamera(resumeMode as CameraMode, true)
+    this.requestModalRecovery('exit-menu')
+    console.log(`📷 Menu camera exited: resumed=${resumeMode}`)
   }
 
   /**
