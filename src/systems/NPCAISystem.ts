@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { NPCSystem, NPCInstance } from './NPCSystem'
+import { NPCSystem, NPCInstance, NPCClass } from './NPCSystem'
 import { CollisionSystem } from './CollisionSystem'
 import { CharacterAnimationSystem } from './CharacterAnimationSystem'
 import { logger, LogModule } from './Logger'
@@ -8,7 +8,7 @@ import { logger, LogModule } from './Logger'
 // NPC AI — lightweight behaviour layer
 // ============================================================================
 
-export type AIBehaviour = 'idle' | 'wander' | 'goto' | 'socialize' | 'follow' | 'flee'
+export type AIBehaviour = 'idle' | 'wander' | 'goto' | 'socialize' | 'follow' | 'flee' | 'group-wander'
 
 export interface AIConfig {
   thinkInterval: number
@@ -43,6 +43,12 @@ interface AIState {
   socialTimer: number
   socialAnimStarted: boolean
   playerNearby: boolean
+  /** Non-null for every NPC that belongs to a formation group */
+  groupId?: string
+  /** Set only on followers; the leader has no groupLeaderId */
+  groupLeaderId?: string
+  /** World-space offset from the leader that this follower maintains */
+  formationOffset?: THREE.Vector3
 }
 
 // ============================================================================
@@ -108,6 +114,12 @@ export class NPCAISystem {
   // ---- think ---------------------------------------------------------------
 
   private think(npc: NPCInstance, ai: AIState): void {
+    // Group followers always stay in group-wander — don't apply solo logic
+    if (ai.groupLeaderId) {
+      ai.behaviour = 'group-wander'
+      return
+    }
+
     ai.playerNearby = npc.position.distanceTo(this.playerPos) < this.cfg.playerAwarenessRange
 
     if (npc.npcClass === 'red') {
@@ -160,6 +172,7 @@ export class NPCAISystem {
       case 'socialize':     this.doSocialize(npc, ai, dt); break
       case 'follow':        if (!ai.waypoint) ai.waypoint = new THREE.Vector3(); ai.waypoint.copy(this.playerPos); this.doMove(npc, ai, dt); break
       case 'flee':          this.doFlee(npc, ai, dt); break
+      case 'group-wander':  this.doGroupFollow(npc, ai, dt); break
     }
   }
 
@@ -200,6 +213,31 @@ export class NPCAISystem {
       ai.socialAnimStarted = true
       try { this.charAnimSystem.crossfadeTo(npc.id, 'talking', 0.4) } catch (_) {}
     }
+  }
+
+  private doGroupFollow(npc: NPCInstance, ai: AIState, dt: number): void {
+    if (!ai.groupLeaderId || !ai.formationOffset) { ai.behaviour = 'idle'; return }
+    const leader = this.npcSystem.getNPC(ai.groupLeaderId)
+    if (!leader) { ai.behaviour = 'idle'; return }
+
+    // World-space target = leader position + fixed formation offset
+    const target = this._waypointScratch.copy(leader.position).add(ai.formationOffset)
+    const dir = this._tmp.copy(target).sub(npc.position)
+    dir.y = 0
+    const dist = dir.length()
+    if (dist < this.cfg.arrivalThreshold) {
+      npc.velocity.set(0, 0, 0); npc.animParams.speed = 0; npc.state = 'idle'
+      return
+    }
+    dir.normalize()
+    npc.velocity.copy(dir).multiplyScalar(this.cfg.walkSpeed)
+    npc.position.x += npc.velocity.x * dt
+    npc.position.z += npc.velocity.z * dt
+    const gH = this.collisionSystem.getGroundHeight(npc.position.x, npc.position.z)
+    if (gH > -Infinity) npc.position.y = gH
+    npc.rotation = Math.atan2(dir.x, dir.z)
+    npc.animParams.speed = this.cfg.walkSpeed
+    npc.state = 'walking'
   }
 
   private doFlee(npc: NPCInstance, ai: AIState, dt: number): void {
@@ -265,6 +303,137 @@ export class NPCAISystem {
   resetToSpawn(npcId: string): void {
     const ai = this.states.get(npcId); const npc = this.npcSystem.getNPC(npcId)
     if (ai && npc) { ai.behaviour = 'idle'; ai.waypoint = null; npc.position.copy(ai.spawnPos) }
+  }
+
+  // ---- cluster formation ----------------------------------------------------
+
+  /** Radius around trigger NPC to scan for cluster candidates. */
+  private readonly clusterRadius = 12
+
+  /**
+   * Gather nearby NPCs into a cluster around the trigger NPC.
+   * NPCs of the same class join; others flee.
+   * Returns the IDs of NPCs that joined (trigger NPC is always first).
+   */
+  formCluster(triggerNpcId: string, mode: 'battle' | 'dialogue'): string[] {
+    const triggerNpc = this.npcSystem.getNPC(triggerNpcId)
+    if (!triggerNpc) return [triggerNpcId]
+
+    const nearby = this.npcSystem.getNPCsInRadius(triggerNpc.position, this.clusterRadius)
+      .filter(n => n.id !== triggerNpcId)
+      .filter(n => !this.npcSystem.isDefeated(n.id))
+      .filter(n => !this.npcSystem.isInteractionOnCooldown(n.id))
+
+    const joined: string[] = [triggerNpcId]
+
+    for (const npc of nearby) {
+      const ai = this.states.get(npc.id)
+      if (!ai || ai.behaviour === 'flee') continue
+
+      // Same class as trigger → joins the cluster; different class → flees
+      if (npc.npcClass === triggerNpc.npcClass) {
+        joined.push(npc.id)
+        ai.behaviour = 'idle'
+        ai.waypoint = null
+        npc.velocity.set(0, 0, 0)
+        npc.animParams.speed = 0
+        npc.state = 'idle'
+      } else {
+        this.fleeFromPlayer(npc.id)
+      }
+    }
+
+    logger.info(LogModule.SYSTEM, `Cluster formed (${mode}): ${joined.length} NPCs joined, trigger=${triggerNpcId}`)
+    return joined
+  }
+
+  /**
+   * Release all NPCs in a cluster back to idle AI behaviour.
+   */
+  releaseCluster(npcIds: string[]): void {
+    for (const id of npcIds) {
+      this.disengageFromPlayer(id)
+    }
+  }
+
+  // ---- formation groups ----------------------------------------------------
+
+  /**
+   * Spawn `count` NPCs of `npcClass` around `center` and wire them as a
+   * cohesive formation unit.  The first NPC becomes the group leader and
+   * wanders freely; the rest are followers that continuously track
+   * leaderPosition + their fixed formation offset.
+   *
+   * @param groupId   A unique string identifier (e.g. 'unit-red')
+   * @param npcClass  'red' | 'green' | 'blue'
+   * @param center    World-space centre for the group
+   * @param count     Number of NPCs (including leader)
+   * @param spread    Radius within which followers spawn around the leader
+   * @returns IDs of all spawned NPCs (leader first)
+   */
+  async spawnFormationGroup(
+    groupId: string,
+    npcClass: NPCClass,
+    center: THREE.Vector3,
+    count: number,
+    spread: number,
+  ): Promise<string[]> {
+    const ids: string[] = []
+    const positions: THREE.Vector3[] = []
+
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2
+      const r = i === 0 ? 0 : spread * (0.5 + Math.random() * 0.5)
+      const x = center.x + Math.cos(angle) * r
+      const z = center.z + Math.sin(angle) * r
+      const y = this.collisionSystem.getGroundHeight(x, z)
+      const pos = new THREE.Vector3(x, y > -Infinity ? y : center.y, z)
+      const id = `${groupId}-${i}`
+      await this.npcSystem.spawn({ id, npcClass, position: pos, rotation: Math.random() * Math.PI * 2 })
+      ids.push(id)
+      positions.push(pos)
+    }
+
+    const leaderId = ids[0]
+    const leaderPos = positions[0]
+
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]
+      const pos = positions[i]
+
+      if (i === 0) {
+        // Leader — normal wander AI
+        this.states.set(id, {
+          behaviour: 'idle',
+          thinkTimer: Math.random() * this.cfg.thinkInterval,
+          spawnPos: pos.clone(),
+          waypoint: null,
+          socialPartner: null,
+          socialTimer: 0,
+          socialAnimStarted: false,
+          playerNearby: false,
+          groupId,
+        })
+      } else {
+        // Follower — permanently tracks leader + formation offset
+        this.states.set(id, {
+          behaviour: 'group-wander',
+          thinkTimer: Math.random() * this.cfg.thinkInterval,
+          spawnPos: pos.clone(),
+          waypoint: null,
+          socialPartner: null,
+          socialTimer: 0,
+          socialAnimStarted: false,
+          playerNearby: false,
+          groupId,
+          groupLeaderId: leaderId,
+          formationOffset: pos.clone().sub(leaderPos),
+        })
+      }
+    }
+
+    logger.info(LogModule.SYSTEM, `Formation group '${groupId}': ${count} ${npcClass} NPCs spawned`)
+    return ids
   }
 
   // ---- queries -------------------------------------------------------------

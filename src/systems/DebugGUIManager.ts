@@ -50,6 +50,7 @@ export class DebugGUIManager {
       this.setupLightControls()
       this.setupCameraControls()
       this.setupPlayerControls()
+      this.setupDialogueCameraControls()
       this.setupBattleCameraControls()
     } catch (error) {
       logger.error(LogModule.SYSTEM, 'Error setting up debug controls:', error)
@@ -102,7 +103,13 @@ export class DebugGUIManager {
       .onChange(() => {
         if (sky.updateSkyUniforms) sky.updateSkyUniforms()
       })
-    
+
+    this.folders.sky.add({
+      printConfig: () => {
+        console.log('☀️ [Sky Config]', JSON.parse(JSON.stringify(skyConfig)))
+      }
+    }, 'printConfig').name('📋 Print config to console')
+
     this.folders.sky.close()
   }
 
@@ -150,7 +157,20 @@ export class DebugGUIManager {
       .onChange((value: number) => {
         spotlight.color.setHex(value)
       })
-    
+
+    this.folders.light.add({
+      printConfig: () => {
+        console.log('💡 [Spotlight Config]', {
+          intensity: spotlight.intensity,
+          distance: spotlight.distance,
+          angle: spotlight.angle,
+          penumbra: spotlight.penumbra,
+          decay: spotlight.decay,
+          color: '#' + spotlight.color.getHexString(),
+        })
+      }
+    }, 'printConfig').name('📋 Print config to console')
+
     this.folders.light.close()
   }
 
@@ -218,7 +238,23 @@ export class DebugGUIManager {
           (this.systems.camera as THREE.PerspectiveCamera).updateProjectionMatrix()
         })
     }
-    
+
+    this.folders.camera.add({
+      printConfig: () => {
+        const fov = this.systems.camera instanceof THREE.PerspectiveCamera
+          ? (this.systems.camera as THREE.PerspectiveCamera).fov
+          : undefined
+        console.log('📷 [Camera Config]', {
+          mode: cameraManager.currentMode,
+          followDistance: config.followDistance,
+          followHeight: config.followHeight,
+          rotationSpeed: config.rotationSpeed,
+          smoothing: config.smoothing,
+          fov,
+        })
+      }
+    }, 'printConfig').name('📋 Print config to console')
+
     this.folders.camera.close()
   }
 
@@ -282,8 +318,44 @@ export class DebugGUIManager {
       // Update position display periodically
       setInterval(updatePos, 100)
     }
-    
+
+    this.folders.player.add({
+      printConfig: () => {
+        console.log('🎮 [Player Config]', JSON.parse(JSON.stringify(config)))
+      }
+    }, 'printConfig').name('📋 Print config to console')
+
     this.folders.player.close()
+  }
+
+  // ============================================================================
+  // DIALOGUE CAMERA TUNING
+  // ============================================================================
+
+  /**
+   * Live-tweakable dialogue camera parameters.
+   *
+   * Sliders for frontDist, bodyCenter and FOV.  Changes take effect on the
+   * NEXT dialogue entry.  Click "Print Config" to copy values into CameraManager.
+   */
+  private setupDialogueCameraControls(): void {
+    const cam = this.systems.cameraManager
+    if (!cam || !cam.dialogueCameraParams) return
+
+    const folder = this.gui!.addFolder('\uD83D\uDCFD\uFE0F Dialogue Camera')
+    const params = cam.dialogueCameraParams
+
+    folder.add(params, 'frontDist', 1, 10, 0.1).name('Front Distance')
+    folder.add(params, 'bodyCenter', 0, 3, 0.05).name('Body Center Y')
+    folder.add(params, 'fov', 20, 90, 1).name('FOV')
+
+    folder.add({
+      printConfig: () => {
+        console.log('\uD83D\uDCFD\uFE0F [Dialogue Camera Config]', JSON.parse(JSON.stringify(params)))
+      },
+    }, 'printConfig').name('\uD83D\uDCCB Print config to console')
+
+    folder.close()
   }
 
   // ============================================================================

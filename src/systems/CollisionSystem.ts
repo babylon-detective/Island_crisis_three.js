@@ -197,6 +197,19 @@ export class CollisionSystem {
   }
 
   /**
+   * Append a single static mesh to the existing land-mesh list.
+   * Use this when you want to add platform/structure meshes after the
+   * terrain has already been registered via registerLandMeshes().
+   */
+  public addLandMesh(mesh: THREE.Mesh, priority: number = 3): void {
+    const boundingBox = new THREE.Box3().setFromObject(mesh)
+    this.landMeshes.push({ mesh, boundingBox, priority })
+    this.landMeshObjects.push(mesh)
+    this.groundHeightCache.clear()
+    logger.debug(LogModule.COLLISION, `Added land mesh: ${mesh.userData.id ?? '(unnamed)'} at (${mesh.position.x.toFixed(1)}, ${mesh.position.y.toFixed(1)}, ${mesh.position.z.toFixed(1)})`)
+  }
+
+  /**
    * Refresh land meshes - update bounding boxes and clear cache
    * Call this when land meshes are modified (position, scale, etc.)
    */

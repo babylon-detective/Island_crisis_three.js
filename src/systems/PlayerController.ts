@@ -9,6 +9,7 @@ import type { BattleSystem } from './BattleSystem'
 import type { GamepadPlayerInput } from './InputSystem'
 import type { NPCSystem } from './NPCSystem'
 import type { ObjectManager } from './ObjectManager'
+import type { ClimbSystem } from './ClimbSystem'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -47,6 +48,7 @@ export interface PlayerInput {
   left: boolean
   right: boolean
   jump: boolean
+  confirm: boolean  // J key — contextual confirm (talk / select) without jumping
   attack: boolean
   run: boolean
   camera: boolean // 'C' key for camera mode switching
@@ -104,6 +106,11 @@ export class PlayerController {
   // Guard to prevent repeated action triggers while button is held
   private actionConsumedThisPress: boolean = false
   private attackConsumedThisPress: boolean = false
+  private climbConsumedThisPress: boolean = false
+  // Climb system (optional — set after construction)
+  private climbSystem: ClimbSystem | null = null
+  // Climb hint text shown near the top of screen
+  private climbHintEl: HTMLDivElement | null = null
   // Mobile virtual action press state
   private virtualJumpPressed: boolean = false
   private virtualAttackPressed: boolean = false
@@ -226,6 +233,7 @@ export class PlayerController {
       left: false,
       right: false,
       jump: false,
+      confirm: false,
       attack: false,
       run: false,
       camera: false
@@ -436,9 +444,21 @@ export class PlayerController {
   // ============================================================================
 
   private handleKeyDown(event: KeyboardEvent): void {
+    // Reclaim keyboard focus from any debug GUI element (lil-gui number inputs /
+    // folder buttons steal focus after being clicked, intercepting game keys).
+    const ae = document.activeElement
+    if (ae instanceof HTMLElement && ae.closest('.lil-gui')) {
+      ae.blur()
+    }
+
     // Prevent default for game keys
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyI', 'KeyJ', 'KeyK', 'KeyL', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
       event.preventDefault()
+    }
+
+    // L key — attempt ledge climb
+    if (event.code === 'KeyL' && !this.climbConsumedThisPress) {
+      this.tryClimb()
     }
     
     this.keyStates.set(event.code, true)
@@ -460,10 +480,15 @@ export class PlayerController {
     const keyBackward = this.keyStates.get('KeyS') || false
     const keyLeft = this.keyStates.get('KeyA') || false
     const keyRight = this.keyStates.get('KeyD') || false
-    const keyJump = (this.keyStates.get('KeyJ') || this.keyStates.get('Enter') || this.keyStates.get('NumpadEnter') || false)
+    const keyConfirm = this.keyStates.get('KeyJ') || false
     const keyAttack = this.keyStates.get('KeyK') || false
     const keyRun = (this.keyStates.get('ShiftLeft') || this.keyStates.get('ShiftRight')) || false
     const keyCamera = this.keyStates.get('KeyI') || false
+
+    // Release climb guard when L is no longer held
+    if (!this.keyStates.get('KeyL')) {
+      this.climbConsumedThisPress = false
+    }
 
 
     // (WASD debug logging removed to avoid per-frame console.log overhead)
@@ -486,7 +511,8 @@ export class PlayerController {
     this.input.left = keyLeft || touchLeft || gamepadLeft
     this.input.right = keyRight || touchRight || gamepadRight
     const touchRun = this.touchState.runTouch !== null && this.touchState.activeTouches.has(this.touchState.runTouch)
-    this.input.jump = keyJump || this.gamepadInput.jump || this.virtualJumpPressed
+    this.input.jump = false // jump is triggered automatically at ledges only
+    this.input.confirm = keyConfirm || this.gamepadInput.jump || this.virtualJumpPressed
     this.input.attack = keyAttack || this.gamepadInput.action || this.virtualAttackPressed
     this.input.run = keyRun || this.gamepadInput.run || touchRun
     this.input.camera = keyCamera || this.gamepadInput.cameraMode
@@ -949,7 +975,7 @@ export class PlayerController {
 
   private updateMovement(deltaTime: number): void {
     // ---- Contextual confirm button (battle / dialogue) ----
-    const confirmPressed = this.input.jump
+    const confirmPressed = this.input.jump || this.input.confirm
     if (confirmPressed && !this.actionConsumedThisPress) {
       const source = this.getConfirmInputSource()
       let consumed = false
@@ -1152,6 +1178,24 @@ export class PlayerController {
       // }
     }
     
+    // Auto-jump at ledges — fires when the player is running and the ground
+    // drops away ahead of them (no key press required).
+    if (this.state.isRunning && this.state.onGround && this.state.canJump) {
+      const hSpeed = Math.sqrt(this.state.velocity.x ** 2 + this.state.velocity.z ** 2)
+      if (hSpeed > 0.1) {
+        const lookAheadDist = 0.9
+        const lookAheadX = this.state.position.x + (this.state.velocity.x / hSpeed) * lookAheadDist
+        const lookAheadZ = this.state.position.z + (this.state.velocity.z / hSpeed) * lookAheadDist
+        const currentGroundH = this.collisionSystem.getGroundHeight(this.state.position.x, this.state.position.z)
+        const aheadGroundH = this.collisionSystem.getGroundHeight(lookAheadX, lookAheadZ)
+        if (currentGroundH > -Infinity && aheadGroundH < currentGroundH - 1.0) {
+          this.state.velocity.y = this.config.jumpForce
+          this.state.canJump = false
+          this.state.onGround = false
+        }
+      }
+    }
+
     // Reset jump flag when on ground
     if (this.state.onGround) {
       this.state.canJump = true
@@ -1226,7 +1270,19 @@ export class PlayerController {
 
   private updateVisuals(): void {
     if (!this.mesh) return // Guard against uninitialized mesh
-    
+
+    // Climb hint — show when standing near a climbable ledge
+    if (this.climbHintEl && this.climbSystem && this.state.onGround) {
+      const yaw = this.mesh.rotation.y
+      const facingDir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw))
+      const feetY = this.state.position.y - this.config.height * 0.5
+      const playerFeet = new THREE.Vector3(this.state.position.x, feetY, this.state.position.z)
+      const canClimb = this.climbSystem.checkClimbable(playerFeet, facingDir, this.config.radius, this.config.height)
+      this.climbHintEl.style.display = canClimb ? 'block' : 'none'
+    } else if (this.climbHintEl) {
+      this.climbHintEl.style.display = 'none'
+    }
+
     // Update mesh position
     // state.position = capsule center. Place mesh origin at capsuleBottom.
     // UAL animations are authored with feet at y=0 relative to skeleton root,
@@ -1327,6 +1383,19 @@ export class PlayerController {
   // PUBLIC METHODS
   // ============================================================================
 
+  /**
+   * Clear all held key states and reset derived input flags.
+   * Call this after dismissing any modal overlay (pause, menu, etc.) to
+   * prevent the key that closed the overlay from also triggering a jump or
+   * attack on the first movement frame.
+   */
+  public flushKeys(): void {
+    this.keyStates.clear()
+    this.virtualJumpPressed = false
+    this.virtualAttackPressed = false
+    this.updateInputState()
+  }
+
   public setPosition(position: THREE.Vector3): void {
     this.state.position.copy(position)
     this.state.velocity.set(0, 0, 0)
@@ -1363,6 +1432,10 @@ export class PlayerController {
     return this.mesh
   }
 
+  public getFacingYaw(): number {
+    return this.mesh.rotation.y
+  }
+
   public getCollisionVolume(): CollisionVolume {
     return this.collisionVolume
   }
@@ -1396,6 +1469,62 @@ export class PlayerController {
 
   public setBattleManager(battleManager: BattleSystem): void {
     this.battleManager = battleManager
+  }
+
+  /** Provide the ClimbSystem so the player can vault/climb platforms with L. */
+  public setClimbSystem(system: ClimbSystem): void {
+    this.climbSystem = system
+    this.buildClimbHintUI()
+  }
+
+  private buildClimbHintUI(): void {
+    if (this.climbHintEl) return
+    const el = document.createElement('div')
+    el.id = 'climb-hint'
+    el.style.cssText =
+      'position:fixed;top:16px;left:50%;transform:translateX(-50%);' +
+      'color:#ffe0a0;font-family:"Courier New",monospace;font-size:14px;letter-spacing:2px;' +
+      'text-shadow:0 2px 8px rgba(0,0,0,0.9);pointer-events:none;z-index:9900;display:none;'
+    el.textContent = '[ L ] CLIMB'
+    document.body.appendChild(el)
+    this.climbHintEl = el
+  }
+
+  private tryClimb(): void {
+    if (!this.climbSystem) return
+    if (!this.state.onGround) return
+
+    // Derive facing direction from mesh yaw
+    const yaw = this.mesh?.rotation.y ?? 0
+    const facingDir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw))
+
+    const feetY = this.state.position.y - this.config.height * 0.5
+    const playerFeet = new THREE.Vector3(
+      this.state.position.x,
+      feetY,
+      this.state.position.z,
+    )
+
+    const climbInfo = this.climbSystem.checkClimbable(
+      playerFeet,
+      facingDir,
+      this.config.radius,
+      this.config.height,
+    )
+    if (!climbInfo) return
+
+    const impulse = this.climbSystem.getClimbImpulse(
+      playerFeet,
+      climbInfo,
+      this.config.gravity,
+      3.5,
+    )
+    this.state.velocity.x = impulse.x
+    this.state.velocity.y = impulse.y
+    this.state.velocity.z = impulse.z
+    this.state.onGround = false
+    this.state.canJump = false
+    this.climbConsumedThisPress = true
   }
 
   public setForcedFacingTarget(target: THREE.Vector3): void {

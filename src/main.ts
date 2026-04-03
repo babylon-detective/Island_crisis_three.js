@@ -34,8 +34,11 @@ import { NPCAISystem } from './systems/NPCAISystem'
 import { DialogueManager } from './systems/DialogueSystem'
 import { BattleSystem } from './systems/BattleSystem'
 import { MenuSystem } from './systems/MenuSystem'
+import { ItemSystem } from './systems/ItemSystem'
+import { InventoryDisplay } from './systems/InventoryDisplay'
 import { SoundSystem } from './systems/SoundSystem'
-import { SHADERS, ShaderPath } from './shaderImports'
+import { ClimbSystem } from './systems/ClimbSystem'
+import { SHADERS, ShaderPath, LIGHTING_VERTEX_CHUNK, LIGHTING_FRAGMENT_CHUNK } from './shaderImports'
 
 // TSL (Three Shader Language) - works with both WebGL and WebGPU!
 // import { 
@@ -806,6 +809,7 @@ interface DebugState {
   battleCameraGui: GUI | null
   debugGUIManager: DebugGUIManager | null
   helpers: THREE.Object3D[]
+  freezeSun: boolean
 }
 
 // ============================================================================
@@ -904,7 +908,10 @@ class IntegratedThreeJSApp {
   private dialogueManager: DialogueManager | null = null
   private battleSystem: BattleSystem | null = null
   private menuSystem: MenuSystem | null = null
+  private itemSystem: ItemSystem = new ItemSystem()
+  private inventoryDisplay: InventoryDisplay | null = null
   private soundSystem: SoundSystem = new SoundSystem()
+  private climbSystem: ClimbSystem | null = null
 
   // Pause system
   private pauseManager: PauseManager = new PauseManager()
@@ -967,7 +974,8 @@ class IntegratedThreeJSApp {
     lightingGui: null,
     battleCameraGui: null,
     debugGUIManager: null,
-    helpers: []
+    helpers: [],
+    freezeSun: false,
   }
 
   constructor(
@@ -1031,7 +1039,13 @@ class IntegratedThreeJSApp {
     
     // Set up pause overlay hide callback
     this.pauseOverlay.onHide(() => {
+      // If the inventory display is open, it owns the pause state — don't unpause here.
+      // InventoryDisplay.close() will call setPaused(false) when the inventory exits.
+      if (this.inventoryDisplay?.isInventoryActive()) return
       this.pauseManager.setPaused(false)
+      // Flush held keys so the key that dismissed the overlay (Enter/Space/Escape)
+      // does not also trigger a jump or attack on the first gameplay frame.
+      this.playerController.flushKeys()
     })
     
     // Initialize Input system
@@ -1069,6 +1083,14 @@ class IntegratedThreeJSApp {
       if (input.select && !modalActive && this.menuSystem) {
         traceInputCommand({ source: 'gamepad', target: 'main', command: 'menu-event', result: 'executed' })
         this.menuSystem.toggle()
+      }
+
+      // Handle Y button — Inventory (when not in battle/dialogue/menu)
+      if (input.itemPressed && !modalActive && !this.menuSystem?.isMenuActive() && this.inventoryDisplay) {
+        if (!this.inventoryDisplay.isInventoryActive()) {
+          traceInputCommand({ source: 'gamepad', target: 'main', command: 'inventory', result: 'executed' })
+          this.inventoryDisplay.toggle()
+        }
       }
     })
     this.inputSystem.addHandler(this.gamepadHandler)
@@ -1233,6 +1255,10 @@ class IntegratedThreeJSApp {
       )
       this.npcAISystem.initAll()
 
+      // Spawn 3 formation squads — each group moves together as a unit
+      await this.npcAISystem.spawnFormationGroup('unit-red',   'red',   new THREE.Vector3(-22, 0, -22), 4, 3)
+      await this.npcAISystem.spawnFormationGroup('unit-green', 'green', new THREE.Vector3( 22, 0, -22), 4, 3)
+      await this.npcAISystem.spawnFormationGroup('unit-blue',  'blue',  new THREE.Vector3(  0, 0,  28), 4, 3)
       // Give PlayerController awareness of NPCs and scene objects for tap-to-navigate.
       this.playerController.setNPCSystem(this.npcSystem)
       this.playerController.setObjectManager(this.objectManager)
@@ -1257,11 +1283,33 @@ class IntegratedThreeJSApp {
       this.battleSystem.setDialogueManager(this.dialogueManager)
       this.battleSystem.setPlayerController(this.playerController)
       this.battleSystem.setSoundSystem(this.soundSystem)
+      this.battleSystem.setItemSystem(this.itemSystem)
       this.battleSystem.setInputMode(this.activeInputMode)
+      this.battleSystem.setPauseCallback(() => this.togglePause())
       this.battleSystem.enable()
 
       // Menu Event system — always constructed alongside NPC systems
       this.menuSystem = new MenuSystem(this.scene, this.cameraManager, this.playerController)
+
+      // Inventory display — circular 3-D item browser
+      this.inventoryDisplay = new InventoryDisplay(
+        this.scene,
+        this.itemSystem,
+        this.cameraManager,
+        this.playerController,
+        this.pauseManager,
+      )
+      this.inventoryDisplay.setInputMode(this.activeInputMode)
+
+      // Wire inventory display into battle system for item browsing during combat
+      this.battleSystem.setInventoryDisplay(this.inventoryDisplay)
+
+      // Give the player some starter items for testing
+      this.itemSystem.addItem('potion', 3)
+      this.itemSystem.addItem('ether', 1)
+      this.itemSystem.addItem('antidote', 2)
+      this.itemSystem.addItem('iron_sword', 1)
+      this.itemSystem.addItem('old_key', 1)
 
       window.addEventListener('dialogue-to-battle', (event: Event) => {
         const customEvent = event as CustomEvent<{ npcId: string }>
@@ -1629,8 +1677,10 @@ class IntegratedThreeJSApp {
     // Create stats
     this.debugState.stats = new Stats()
     this.debugState.stats.dom.style.position = 'absolute'
-    this.debugState.stats.dom.style.top = '0px'
-    this.debugState.stats.dom.style.left = '0px'
+    this.debugState.stats.dom.style.bottom = '0px'
+    this.debugState.stats.dom.style.right = '0px'
+    this.debugState.stats.dom.style.top = ''
+    this.debugState.stats.dom.style.left = ''
     this.container.appendChild(this.debugState.stats.dom)
     
     // Create legacy GUI for backward compatibility
@@ -1638,9 +1688,11 @@ class IntegratedThreeJSApp {
     this.debugState.gui.domElement.style.position = 'absolute'
     this.debugState.gui.domElement.style.top = '0px'
     this.debugState.gui.domElement.style.right = '0px'
+    this.debugState.gui.domElement.style.zIndex = '15000'
     this.container.appendChild(this.debugState.gui.domElement)
     
     // Note: DebugGUIManager and ParameterGUI removed - using legacy GUI only
+    this.debugState.gui.close()
     
     // Add character shader controls (deferred — waits for player mesh to load)
     this.playerController.ready.then(() => this.setupCharacterShaderGUI())
@@ -1832,7 +1884,7 @@ class IntegratedThreeJSApp {
     lightFolder.add(params, 'light2Intensity', 0, 3, 0.01).name('Light 2 Intensity').onChange((v: number) => setUniform('uLight2Intensity', v))
     lightFolder.close()
 
-    folder.open()
+    folder.close()
     console.log(`🎨 Character shader GUI created (${shaderMaterials.length} material(s))`)
   }
 
@@ -1850,6 +1902,7 @@ class IntegratedThreeJSApp {
     gui.domElement.style.position = 'absolute'
     gui.domElement.style.top = '0px'
     gui.domElement.style.right = '490px' // 3rd column to the left
+    gui.domElement.style.zIndex = '15000'
     this.container.appendChild(gui.domElement)
     this.debugState.lightingGui = gui
 
@@ -1868,37 +1921,30 @@ class IntegratedThreeJSApp {
       .onChange((v: string) => this.ambientLight.color.set(v))
     ambFolder.add(ambientParams, 'intensity', 0, 2, 0.01).name('Intensity')
       .onChange((v: number) => { this.ambientLight.intensity = v })
-    ambFolder.open()
+    ambFolder.close()
 
-    // --- Key Light ---
-    const kl = this.keyLight
-    const keyParams = {
-      color: '#' + kl.color.getHexString(),
-      intensity: kl.intensity,
-      posX: kl.position.x,
-      posY: kl.position.y,
-      posZ: kl.position.z,
-      castShadow: kl.castShadow,
-      shadowRadius: kl.shadow.radius,
-      shadowBias: kl.shadow.bias,
+    // --- Sun / Key Light (drives the sky system + shader uniforms together) ---
+    const sunParams = {
+      elevation: this.skyConfig.elevation,
+      azimuth:   this.skyConfig.azimuth,
+      freezeSun: this.debugState.freezeSun,
+      castShadow: this.keyLight.castShadow,
+      shadowRadius: this.keyLight.shadow.radius,
+      shadowBias: this.keyLight.shadow.bias,
     }
-    const keyFolder = world.addFolder('☀️ Key Light')
-    keyFolder.addColor(keyParams, 'color').name('Color')
-      .onChange((v: string) => kl.color.set(v))
-    keyFolder.add(keyParams, 'intensity', 0, 5, 0.01).name('Intensity')
-      .onChange((v: number) => { kl.intensity = v })
-    keyFolder.add(keyParams, 'posX', -100, 100, 0.5).name('Pos X')
-      .onChange((v: number) => { kl.position.x = v })
-    keyFolder.add(keyParams, 'posY', 0, 100, 0.5).name('Pos Y')
-      .onChange((v: number) => { kl.position.y = v })
-    keyFolder.add(keyParams, 'posZ', -100, 100, 0.5).name('Pos Z')
-      .onChange((v: number) => { kl.position.z = v })
-    keyFolder.add(keyParams, 'castShadow').name('Cast Shadow')
-      .onChange((v: boolean) => { kl.castShadow = v })
-    keyFolder.add(keyParams, 'shadowRadius', 0, 10, 0.1).name('Shadow Radius')
-      .onChange((v: number) => { kl.shadow.radius = v })
-    keyFolder.add(keyParams, 'shadowBias', -0.01, 0.01, 0.0001).name('Shadow Bias')
-      .onChange((v: number) => { kl.shadow.bias = v })
+    const keyFolder = world.addFolder('☀️ Sun / Key Light')
+    keyFolder.add(sunParams, 'freezeSun').name('❄️ Freeze Sun')
+      .onChange((v: boolean) => { this.debugState.freezeSun = v })
+    keyFolder.add(sunParams, 'elevation', -10, 90, 0.5).name('Elevation (°)')
+      .onChange((v: number) => { this.skyConfig.elevation = v; this.updateSunPosition() })
+    keyFolder.add(sunParams, 'azimuth', 0, 360, 1).name('Azimuth (°)')
+      .onChange((v: number) => { this.skyConfig.azimuth = v; this.updateSunPosition() })
+    keyFolder.add(sunParams, 'castShadow').name('Cast Shadow')
+      .onChange((v: boolean) => { this.keyLight.castShadow = v })
+    keyFolder.add(sunParams, 'shadowRadius', 0, 10, 0.1).name('Shadow Radius')
+      .onChange((v: number) => { this.keyLight.shadow.radius = v })
+    keyFolder.add(sunParams, 'shadowBias', -0.01, 0.01, 0.0001).name('Shadow Bias')
+      .onChange((v: number) => { this.keyLight.shadow.bias = v })
     keyFolder.close()
 
     // --- Fill Light ---
@@ -1944,7 +1990,7 @@ class IntegratedThreeJSApp {
     }
     postFxFolder.close()
 
-    world.open()
+    world.close()
 
     // ----------------------------------------------------------------
     // LOCAL LIGHTING
@@ -1956,16 +2002,21 @@ class IntegratedThreeJSApp {
     if (spotlight) {
       const RAD2DEG = 180 / Math.PI
       const DEG2RAD = Math.PI / 180
+      // Read from config so sliders reflect the values that actually drive behaviour.
+      // updatePlayerSpotlight() overrides spotlight.position and spotlight.intensity
+      // every frame from config, so we must write back to config, not the object.
+      const spotConfig = this.cameraManager.getConfig().spotlight
+      let savedIntensity = spotConfig.intensity  // kept in sync so visible toggle can restore it
+
       const spotParams = {
         color: '#' + spotlight.color.getHexString(),
-        intensity: spotlight.intensity,
+        intensity: spotConfig.intensity,
         angle: spotlight.angle * RAD2DEG,
         penumbra: spotlight.penumbra,
         decay: spotlight.decay,
         distance: spotlight.distance,
-        posX: spotlight.position.x,
-        posY: spotlight.position.y,
-        posZ: spotlight.position.z,
+        height: spotConfig.height,    // vertical distance above player (drives position)
+        offset: spotConfig.offset,    // camera-forward offset (drives position)
         castShadow: spotlight.castShadow,
         shadowNear: spotlight.shadow.camera.near,
         shadowFar: spotlight.shadow.camera.far,
@@ -1973,39 +2024,69 @@ class IntegratedThreeJSApp {
       }
 
       const spotFolder = local.addFolder('🔦 Player Spotlight')
+      // "Enabled" must zero the config intensity so updatePlayerSpotlight() stops the light
       spotFolder.add(spotParams, 'visible').name('Enabled')
-        .onChange((v: boolean) => { spotlight.visible = v })
+        .onChange((v: boolean) => {
+          const cfg = this.cameraManager.getConfig().spotlight
+          if (v) {
+            this.cameraManager.updateConfig({ spotlight: { ...cfg, intensity: savedIntensity } })
+          } else {
+            savedIntensity = cfg.intensity
+            this.cameraManager.updateConfig({ spotlight: { ...cfg, intensity: 0 } })
+          }
+        })
       spotFolder.addColor(spotParams, 'color').name('Color')
-        .onChange((v: string) => spotlight.color.set(v))
+        .onChange((v: string) => {
+          spotlight.color.set(v)
+          this.landSystem?.setSpotlightColor(spotlight.color)
+        })
+      // Intensity must go through config because updatePlayerSpotlight() reads
+      // config.spotlight.intensity each frame and overwrites spotlight.intensity
       spotFolder.add(spotParams, 'intensity', 0, 20, 0.1).name('Intensity')
-        .onChange((v: number) => { spotlight.intensity = v })
+        .onChange((v: number) => {
+          savedIntensity = v
+          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, intensity: v } })
+          this.landSystem?.setSpotlightIntensity(v)
+        })
       spotFolder.add(spotParams, 'angle', 1, 90, 0.5).name('Cone Angle (°)')
-        .onChange((v: number) => { spotlight.angle = v * DEG2RAD })
+        .onChange((v: number) => {
+          spotlight.angle = v * DEG2RAD
+          this.landSystem?.setSpotlightAngle(v * DEG2RAD)
+        })
       spotFolder.add(spotParams, 'penumbra', 0, 1, 0.01).name('Penumbra')
-        .onChange((v: number) => { spotlight.penumbra = v })
+        .onChange((v: number) => {
+          spotlight.penumbra = v
+          this.landSystem?.setSpotlightPenumbra(v)
+        })
       spotFolder.add(spotParams, 'decay', 0, 5, 0.1).name('Decay')
         .onChange((v: number) => { spotlight.decay = v })
       spotFolder.add(spotParams, 'distance', 0, 200, 1).name('Distance')
-        .onChange((v: number) => { spotlight.distance = v })
-      spotFolder.add(spotParams, 'posX', -50, 50, 0.5).name('Offset X')
-        .onChange((v: number) => { spotlight.position.x = v })
-      spotFolder.add(spotParams, 'posY', 0, 100, 0.5).name('Height')
-        .onChange((v: number) => { spotlight.position.y = v })
-      spotFolder.add(spotParams, 'posZ', -50, 50, 0.5).name('Offset Z')
-        .onChange((v: number) => { spotlight.position.z = v })
+        .onChange((v: number) => {
+          spotlight.distance = v
+          this.landSystem?.setSpotlightDistance(v)
+        })
+      // Height/Offset drive position inside updatePlayerSpotlight() each frame
+      spotFolder.add(spotParams, 'height', 0, 100, 0.5).name('Height Above Player')
+        .onChange((v: number) => {
+          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, height: v } })
+        })
+      spotFolder.add(spotParams, 'offset', -20, 20, 0.5).name('Camera Offset')
+        .onChange((v: number) => {
+          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, offset: v } })
+        })
       spotFolder.add(spotParams, 'castShadow').name('Cast Shadow')
         .onChange((v: boolean) => { spotlight.castShadow = v })
       spotFolder.add(spotParams, 'shadowNear', 0.1, 50, 0.1).name('Shadow Near')
         .onChange((v: number) => { spotlight.shadow.camera.near = v; spotlight.shadow.camera.updateProjectionMatrix() })
       spotFolder.add(spotParams, 'shadowFar', 10, 500, 1).name('Shadow Far')
         .onChange((v: number) => { spotlight.shadow.camera.far = v; spotlight.shadow.camera.updateProjectionMatrix() })
-      spotFolder.open()
+      spotFolder.close()
     } else {
       local.add({ note: 'Spotlight disabled' }, 'note').name('Status').disable()
     }
 
-    local.open()
-    gui.open()
+    local.close()
+    gui.close()
     console.log('💡 Lighting GUI created')
   }
 
@@ -2024,6 +2105,7 @@ class IntegratedThreeJSApp {
     gui.domElement.style.position = 'absolute'
     gui.domElement.style.top = '0px'
     gui.domElement.style.right = '245px' // offset to the left of the Controls panel (~245px)
+    gui.domElement.style.zIndex = '15000'
     this.container.appendChild(gui.domElement)
     this.debugState.gameplayGui = gui
 
@@ -2035,6 +2117,7 @@ class IntegratedThreeJSApp {
       jumpForce:  config.jumpForce,
       gravity:    config.gravity,
       friction:   config.friction,
+      airResistance: config.airResistance,
     }
 
     const movement = gui.addFolder('🏃 Movement')
@@ -2042,7 +2125,7 @@ class IntegratedThreeJSApp {
       .onChange((v: number) => this.playerController.updateConfig({ walkSpeed: v }))
     movement.add(params, 'runSpeed', 1, 20, 0.5).name('Run Speed')
       .onChange((v: number) => this.playerController.updateConfig({ runSpeed: v }))
-    movement.open()
+    movement.close()
 
     const physics = gui.addFolder('⚡ Physics')
     physics.add(params, 'jumpForce', 1, 30, 0.5).name('Jump Force')
@@ -2051,9 +2134,11 @@ class IntegratedThreeJSApp {
       .onChange((v: number) => this.playerController.updateConfig({ gravity: v }))
     physics.add(params, 'friction', 0, 1, 0.01).name('Friction')
       .onChange((v: number) => this.playerController.updateConfig({ friction: v }))
-    physics.open()
+    physics.add(params, 'airResistance', 0.8, 1, 0.001).name('Air Resistance')
+      .onChange((v: number) => this.playerController.updateConfig({ airResistance: v }))
+    physics.close()
 
-    gui.open()
+    gui.close()
     console.log('🎮 Gameplay GUI created')
   }
 
@@ -2067,6 +2152,7 @@ class IntegratedThreeJSApp {
     gui.domElement.style.position = 'absolute'
     gui.domElement.style.top = '0px'
     gui.domElement.style.right = '735px' // 4th column, left of Lighting panel
+    gui.domElement.style.zIndex = '15000'
     this.container.appendChild(gui.domElement)
     this.debugState.battleCameraGui = gui
 
@@ -2172,7 +2258,14 @@ class IntegratedThreeJSApp {
       // Link land system to camera manager for spotlight updates
       this.cameraManager.setLandSystem(this.landSystem)
     }
-    
+
+    // Build climbable platform structure and wire ClimbSystem to player
+    progress('Building climb platforms...')
+    await this.buildClimbPlatforms()
+    if (this.climbSystem) {
+      this.playerController.setClimbSystem(this.climbSystem)
+    }
+
     // Set up camera switching controls
     this.setupCameraSwitching()
     
@@ -2484,6 +2577,54 @@ class IntegratedThreeJSApp {
     })
     this.mobileButtons.menu = menuBtn
 
+    // Inventory button 🎒 (upper-right, below menu)
+    const existingInvBtn = document.getElementById('mobile-inventory-btn')
+    if (existingInvBtn) existingInvBtn.remove()
+    const invBtn = document.createElement('button')
+    invBtn.id = 'mobile-inventory-btn'
+    invBtn.textContent = '🎒'
+    invBtn.style.cssText = `
+      position: fixed;
+      top: ${scaleSize(60)}px;
+      right: ${scaleSize(14)}px;
+      width: ${scaleSize(40)}px;
+      height: ${scaleSize(40)}px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.35);
+      color: rgba(255,255,255,0.7);
+      font-size: ${scaleSize(18)}px;
+      z-index: 12000;
+      pointer-events: auto;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      line-height: 1;
+    `
+    document.body.appendChild(invBtn)
+    bindPress(invBtn, () => {
+      invBtn.style.background = 'rgba(255,216,102,0.2)'
+      if (this.inventoryDisplay && !this.battleSystem?.isBattleActive()) {
+        traceInputCommand({ source: 'touch', target: 'main', command: 'inventory', result: 'executed' })
+        if (this.dialogueManager?.isDialogueActive()) {
+          // Open/close vertical ring during dialogue
+          if (this.inventoryDisplay.isInventoryActive()) {
+            this.inventoryDisplay.close()
+          } else {
+            this.inventoryDisplay.open('dialogue')
+          }
+        } else {
+          this.inventoryDisplay.toggle()
+        }
+      }
+    }, () => {
+      invBtn.style.background = 'rgba(0,0,0,0.35)'
+    })
+
     this.refreshMobileControlState()
   }
 
@@ -2539,6 +2680,9 @@ class IntegratedThreeJSApp {
     if (!this.gameplayInputEnabled) {
       return
     }
+    // Don't allow the pause overlay while inventory display is active —
+    // inventory already owns the frozen-world state and must close first.
+    if (this.inventoryDisplay?.isInventoryActive()) return
 
     const now = performance.now()
     if (now - this.lastPauseToggleTime < this.pauseToggleCooldownMs) {
@@ -2947,6 +3091,176 @@ class IntegratedThreeJSApp {
 
   // Legacy animation creation moved to ObjectLoader system
 
+  // ============================================================================
+  // CLIMBABLE PLATFORM STRUCTURE
+  // ============================================================================
+
+  /**
+   * Build a staircase + platform cluster near (33.1, 0.9, -33.6).
+   *
+   * Two cube sizes mirror the player's proportions:
+   *   SMALL (SH = 0.9 m) — top surface at waist height
+   *   LARGE (LH = 1.8 m) — top surface at head height
+   *
+   * Every cube is:
+   *   • Rendered with the land-vertex / land-fragment shader (same visual as terrain)
+   *   • Registered as a land-mesh so the collision system can stand the player on top
+   *   • Registered with ClimbSystem so the L key can trigger a vault / ledge-grab
+   */
+  private async buildClimbPlatforms(): Promise<void> {
+    const landUniforms = this.landSystem?.getLandUniforms()
+
+    // ── Minimal shaders built from the common lighting chunks ─────────────────
+    // Vertex: declares shadow varyings + passes worldPosition/normal to fragment.
+    const vertexShader =
+      LIGHTING_VERTEX_CHUNK + `
+#ifdef USE_SHADOWMAP
+  #if NUM_DIR_LIGHT_SHADOWS > 0
+    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
+  #endif
+  #if NUM_SPOT_LIGHT_SHADOWS > 0
+    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
+  #endif
+#endif
+
+varying vec3 vNormal;
+varying vec3 vWorldPosition;
+
+void main() {
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vWorldPosition = worldPos.xyz;
+  vNormal = normalize(normalMatrix * normal);
+
+  #ifdef USE_SHADOWMAP
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+      vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPos;
+    #endif
+    #if NUM_SPOT_LIGHT_SHADOWS > 0
+      vSpotLightShadowCoord[0] = spotShadowMatrix[0] * worldPos;
+    #endif
+  #endif
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`
+
+    // Fragment: shadow varyings BEFORE the chunk (required), then applyLighting().
+    const fragmentShader =
+      `#ifdef USE_SHADOWMAP
+  #if NUM_DIR_LIGHT_SHADOWS > 0
+    varying vec4 vDirectionalShadowCoord[NUM_DIR_LIGHT_SHADOWS];
+  #endif
+  #if NUM_SPOT_LIGHT_SHADOWS > 0
+    varying vec4 vSpotLightShadowCoord[NUM_SPOT_LIGHT_SHADOWS];
+  #endif
+#endif
+` + LIGHTING_FRAGMENT_CHUNK + `
+
+uniform vec3 uBaseColor;
+varying vec3 vNormal;
+varying vec3 vWorldPosition;
+
+void main() {
+  float shadow = calculateShadows();
+  vec3 col = applyLighting(uBaseColor, vNormal, vWorldPosition, vWorldPosition, shadow);
+  gl_FragColor = vec4(col, 1.0);
+}`
+
+    this.climbSystem = new ClimbSystem()
+
+    // ── Dimensions ────────────────────────────────────────────────────────────
+    const B  = 0.9  // ground Y at this location
+    const SH = 0.9  // small cube height (waist-high)
+    const LH = 1.8  // large cube height (head-high)
+
+    // Each entry: world-space center (cx, cy, cz) + full extents (w, h, d)
+    // cy formula:  base_bottom + height/2
+    const cubes: Array<{ id: string; cx: number; cy: number; cz: number; w: number; h: number; d: number }> = [
+      // ① Small step — first foothold going north, waist-high
+      { id: 'plat-01', cx: 33.1, cy: B + SH / 2,            cz: -31.5, w: 3.2, h: SH, d: 2.2 },
+
+      // ② Large cube — tall step, head-high (use L to vault)
+      { id: 'plat-02', cx: 32.0, cy: B + LH / 2,            cz: -29.4, w: 2.8, h: LH, d: 2.5 },
+
+      // ③ Wide landing platform — head-high, broad surface
+      { id: 'plat-03', cx: 34.8, cy: B + LH / 2,            cz: -27.8, w: 4.8, h: LH, d: 3.2 },
+
+      // ④ Small cube ON TOP of landing platform — stacked waist step
+      { id: 'plat-04', cx: 34.8, cy: B + LH + SH / 2,       cz: -26.8, w: 2.4, h: SH, d: 2.0 },
+
+      // ⑤ East approach — small ground step
+      { id: 'plat-05', cx: 36.9, cy: B + SH / 2,            cz: -30.6, w: 2.0, h: SH, d: 2.0 },
+
+      // ⑥ East tower — large cube atop east step (bottom = B+SH)
+      { id: 'plat-06', cx: 36.9, cy: B + SH + LH / 2,       cz: -29.6, w: 2.0, h: LH, d: 2.0 },
+
+      // ⑦ Western approach step — small, ground level
+      { id: 'plat-07', cx: 30.2, cy: B + SH / 2,            cz: -30.6, w: 2.2, h: SH, d: 2.2 },
+
+      // ⑧ Isolated jump pad — small, further north
+      { id: 'plat-08', cx: 31.8, cy: B + SH / 2,            cz: -25.8, w: 1.8, h: SH, d: 1.8 },
+    ]
+
+    const meshes: THREE.Mesh[] = []
+
+    for (const c of cubes) {
+      // ── Geometry ────────────────────────────────────────────────────────────
+      const geo = new THREE.BoxGeometry(c.w, c.h, c.d, 4, 4, 4)
+
+      // ── Material — common lighting shader ───────────────────────────────────
+      const uniforms: { [key: string]: { value: any } } = {
+        ...THREE.UniformsLib.lights,
+        // Sun — shared reference with terrain (auto-updates with scene)
+        uSunDirection:       landUniforms?.uSunDirection        ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
+        uSunColor:           landUniforms?.uSunColor            ?? { value: new THREE.Color(1, 1, 0.9) },
+        uSunIntensity:       landUniforms?.uSunIntensity        ?? { value: 1.0 },
+        // Spotlight — shared reference
+        uSpotlightPosition:  landUniforms?.uSpotlightPosition   ?? { value: new THREE.Vector3(0, 30, 0) },
+        uSpotlightDirection: landUniforms?.uSpotlightDirection  ?? { value: new THREE.Vector3(0, -1, 0) },
+        uSpotlightColor:     landUniforms?.uSpotlightColor      ?? { value: new THREE.Color(1, 1, 1) },
+        uSpotlightIntensity: landUniforms?.uSpotlightIntensity  ?? { value: 0.0 },
+        uSpotlightAngle:     landUniforms?.uSpotlightAngle      ?? { value: Math.PI / 8 },
+        uSpotlightPenumbra:  landUniforms?.uSpotlightPenumbra   ?? { value: 0.3 },
+        uSpotlightDistance:  landUniforms?.uSpotlightDistance   ?? { value: 80 },
+        // Per-cube base colour — muted stone/earth tone
+        uBaseColor: { value: new THREE.Color(0x6b5e4e) },
+      }
+
+      const mat = new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader,
+        uniforms,
+        lights: true,
+      })
+
+      // ── Mesh ────────────────────────────────────────────────────────────────
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.set(c.cx, c.cy, c.cz)
+      mesh.castShadow    = true
+      mesh.receiveShadow = true
+      mesh.userData = { id: c.id, type: 'land', landType: 'box' }
+      this.scene.add(mesh)
+
+      // ── Collision (land-mesh for ground detection + wall raycasts) ──────────
+      this.collisionSystem.addLandMesh(mesh)
+
+      // ── ClimbSystem (AABB for ledge-grab detection) ─────────────────────────
+      this.climbSystem.addBox(
+        c.id,
+        new THREE.Vector3(c.cx, c.cy, c.cz),
+        new THREE.Vector3(c.w, c.h, c.d),
+      )
+
+      meshes.push(mesh)
+    }
+
+    // Also register with camera collision so the camera doesn't clip through
+    if (meshes.length > 0) {
+      this.cameraManager.addCollisionMeshes(meshes as THREE.Object3D[])
+    }
+
+    console.log(`🧱 Built ${cubes.length} climb platform cubes near (33.1, 0.9, -33.6)`)
+  }
+
 
 
   private setupEventListeners(): void {
@@ -2994,13 +3308,9 @@ class IntegratedThreeJSApp {
           }
           break
         case 'enter':
-          // Return/Enter toggles pause when no modal is active and the overlay is not already open
-          // (when overlay IS open, PauseOverlay's own keydown handler handles Enter)
-          if (
-            !this.pauseOverlay.isVisible() &&
-            !this.dialogueManager?.isDialogueActive() &&
-            !this.battleSystem?.isBattleActive()
-          ) {
+          // Return/Enter always toggles pause — works during dialogue, battle, navigation, or any future event.
+          // PauseOverlay's own keydown handler handles Enter while the overlay is already open (with stopPropagation).
+          if (!this.pauseOverlay.isVisible()) {
             event.preventDefault()
             this.togglePause()
           }
@@ -3016,6 +3326,28 @@ class IntegratedThreeJSApp {
             event.preventDefault()
             traceInputCommand({ source: 'keyboard', target: 'main', command: 'menu-event', result: 'executed' })
             this.menuSystem.toggle()
+          }
+          break
+        case 'i':
+          // I key — toggle Inventory (navigation mode); open/close during dialogue (dialogue mode)
+          if (
+            !this.pauseOverlay.isVisible() &&
+            !this.battleSystem?.isBattleActive() &&
+            !this.menuSystem?.isMenuActive() &&
+            this.inventoryDisplay
+          ) {
+            event.preventDefault()
+            traceInputCommand({ source: 'keyboard', target: 'main', command: 'inventory', result: 'executed' })
+            if (this.dialogueManager?.isDialogueActive()) {
+              // Open vertical inventory ring during dialogue without unpausing the world
+              if (this.inventoryDisplay.isInventoryActive()) {
+                this.inventoryDisplay.close()
+              } else {
+                this.inventoryDisplay.open('dialogue')
+              }
+            } else {
+              this.inventoryDisplay.toggle()
+            }
           }
           break
       }
@@ -3425,11 +3757,18 @@ class IntegratedThreeJSApp {
       
       // Skip game updates when paused (but still render)
       if (this.pauseManager.getPaused()) {
-        // Still render the scene even when paused
+        // When inventory is open, keep spinning items and updating camera
+        if (this.inventoryDisplay?.isInventoryActive()) {
+          this.inventoryDisplay.update(deltaTime)
+          this.cameraManager.update(deltaTime)
+        }
+        // Still render the scene even when paused — use the CameraManager's active camera
+        // so the view doesn't jump to the stale init-time PerspectiveCamera
+        const pauseCamera = this.cameraManager.getCamera()
         if (this.retroPostProcessing) {
-          this.retroPostProcessing.render()
+          this.retroPostProcessing.render(pauseCamera)
         } else {
-          this.renderer.render(this.scene, this.camera)
+          this.renderer.render(this.scene, pauseCamera)
         }
         return
       }
@@ -3491,6 +3830,9 @@ class IntegratedThreeJSApp {
         if (this.menuSystem) {
           this.menuSystem.update(deltaTime)
         }
+        if (this.inventoryDisplay?.isInventoryActive()) {
+          this.inventoryDisplay.update(deltaTime)
+        }
         this.refreshMobileControlState()
       } catch (e) {
         // Prevent NPC errors from freezing the game loop
@@ -3533,7 +3875,8 @@ class IntegratedThreeJSApp {
       }
 
       // Update sky system for automatic day/night cycle (throttled — sun moves very slowly)
-      if (this.sky && this.frameCount % 10 === 0) {
+      // Skipped while the Lighting GUI has the sun frozen (debugState.freezeSun).
+      if (this.sky && this.frameCount % 10 === 0 && !this.debugState.freezeSun) {
         // Animate sun elevation for day/night cycle (slow rotation)
         const cycleSpeed = 0.0001 // Very slow for realistic effect
         this.skyConfig.elevation = Math.sin(currentTime * cycleSpeed) * 45 + 15 // -30 to 60 degrees
@@ -3620,7 +3963,8 @@ class IntegratedThreeJSApp {
       input.confirmPressed ||
       input.actionPressed ||
       input.itemPressed ||
-      input.navigateY !== 0
+      input.navigateY !== 0 ||
+      input.navigateX !== 0
     )
   }
 
@@ -3639,15 +3983,27 @@ class IntegratedThreeJSApp {
       actionPressed: false,
       itemPressed: false,
       navigateY: 0,
+      navigateX: 0,
     }
   }
 
   private handleModalGamepadInput(input: GamepadPlayerInput): boolean {
     let consumed = false
 
+    // Inventory display (pauses world, so check first)
+    if (this.inventoryDisplay?.isInventoryActive()) {
+      if (input.navigateY > 0) consumed = this.inventoryDisplay.handleNavigateInput(-1) || consumed
+      if (input.navigateY < 0) consumed = this.inventoryDisplay.handleNavigateInput(1) || consumed
+      if (input.confirmPressed) consumed = this.inventoryDisplay.handleConfirmInput() || consumed
+      if (input.cancel || input.itemPressed) consumed = this.inventoryDisplay.handleCancelInput() || consumed
+      return consumed
+    }
+
     if (this.battleSystem?.isBattleActive()) {
       if (input.navigateY > 0) consumed = this.battleSystem.handleNavigateInput(-1, 'gamepad') || consumed
       if (input.navigateY < 0) consumed = this.battleSystem.handleNavigateInput(1, 'gamepad') || consumed
+      if (input.navigateX > 0) consumed = this.battleSystem.handleClusterNavigate(1, 'gamepad') || consumed
+      if (input.navigateX < 0) consumed = this.battleSystem.handleClusterNavigate(-1, 'gamepad') || consumed
       if (input.actionPressed) consumed = this.battleSystem.handleDirectActionInput('attack', 'gamepad') || consumed
       if (input.confirmPressed) consumed = this.battleSystem.handleDirectActionInput('guard', 'gamepad') || consumed
       if (input.itemPressed) consumed = this.battleSystem.handleDirectActionInput('item', 'gamepad') || consumed
@@ -3658,6 +4014,8 @@ class IntegratedThreeJSApp {
     if (this.dialogueManager?.isDialogueActive()) {
       if (input.navigateY > 0) consumed = this.dialogueManager.handleNavigateInput(-1, 'gamepad') || consumed
       if (input.navigateY < 0) consumed = this.dialogueManager.handleNavigateInput(1, 'gamepad') || consumed
+      if (input.navigateX > 0) consumed = this.dialogueManager.handleClusterNavigate(1, 'gamepad') || consumed
+      if (input.navigateX < 0) consumed = this.dialogueManager.handleClusterNavigate(-1, 'gamepad') || consumed
       if (input.confirmPressed) consumed = this.dialogueManager.handleConfirmInput('gamepad') || consumed
       if (input.cancel) consumed = this.dialogueManager.handleCancelInput('gamepad') || consumed
       return consumed
@@ -3672,6 +4030,7 @@ class IntegratedThreeJSApp {
     this.activeInputMode = mode
     this.dialogueManager?.setInputMode(mode)
     this.battleSystem?.setInputMode(mode)
+    this.inventoryDisplay?.setInputMode(mode)
     this.refreshMobileControlState()
   }
 

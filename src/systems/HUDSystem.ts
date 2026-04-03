@@ -222,6 +222,7 @@ export class HUDSystem {
       .hud-container.hidden {
         opacity: 0;
         pointer-events: none;
+        display: none;
       }
 
       .hud-panel {

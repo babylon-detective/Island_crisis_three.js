@@ -62,3 +62,7 @@ export const SHADERS = {
 } as const
 
 export type ShaderPath = keyof typeof SHADERS
+
+/** Pre-processed common lighting chunks (includes already resolved by Vite). */
+export const LIGHTING_VERTEX_CHUNK   = lightingVertexChunk
+export const LIGHTING_FRAGMENT_CHUNK = lightingFragmentChunk

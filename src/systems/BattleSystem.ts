@@ -9,6 +9,8 @@ import type { DialogueManager } from './DialogueSystem'
 import { logger, LogModule } from './Logger'
 import { traceInputCommand, type InputTraceSource } from './InputTrace'
 import type { SoundSystem } from './SoundSystem'
+import type { ItemSystem } from './ItemSystem'
+import type { InventoryDisplay } from './InventoryDisplay'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -28,6 +30,8 @@ export class BattleSystem {
   private playerController: PlayerController | null = null
   private dialogueManager: DialogueManager | null = null
   private soundSystem: SoundSystem | null = null
+  private itemSystem: ItemSystem | null = null
+  private inventoryDisplay: InventoryDisplay | null = null
 
   private isActive = false
   private activeNpcId: string | null = null
@@ -41,6 +45,15 @@ export class BattleSystem {
   private readonly maxPlayerHP = 30
   private readonly maxEnemyHP = 18
   private statusText = 'Choose an action.'
+
+  // ── Cluster (multi-NPC) support ──
+  private clusterNpcIds: string[] = []
+  private selectedClusterIndex = 0
+  private clusterPositions: Map<string, THREE.Vector3> = new Map()
+  private clusterOriginalPositions: Map<string, THREE.Vector3> = new Map()
+  private clusterHPs: Map<string, number> = new Map()
+  /** Horizontal spacing between cluster NPCs in battle staging (world units). */
+  private readonly clusterSpacing = 2.5
 
   private readonly interactionRange = 3.5
   private readonly hostileAutoTriggerRange = 1.85
@@ -66,8 +79,10 @@ export class BattleSystem {
   private readonly skipTapThreshold = 3
 
   private boundKeyDown: ((e: KeyboardEvent) => void) | null = null
+  private onPauseRequest: (() => void) | null = null
 
   private overlayRoot: HTMLDivElement | null = null
+  private overlayTopBox: HTMLDivElement | null = null
   private overlayPrompt: HTMLDivElement | null = null
   private overlayPanel: HTMLDivElement | null = null
   private overlayTitle: HTMLDivElement | null = null
@@ -109,6 +124,18 @@ export class BattleSystem {
 
   setSoundSystem(soundSystem: SoundSystem): void {
     this.soundSystem = soundSystem
+  }
+
+  setItemSystem(itemSystem: ItemSystem): void {
+    this.itemSystem = itemSystem
+  }
+
+  setInventoryDisplay(inventoryDisplay: InventoryDisplay): void {
+    this.inventoryDisplay = inventoryDisplay
+  }
+
+  setPauseCallback(fn: () => void): void {
+    this.onPauseRequest = fn
   }
 
   suppressHostileAutoTrigger(durationMs: number = this.postDialogueAutoTriggerGraceMs): void {
@@ -403,12 +430,24 @@ export class BattleSystem {
     const npc = this.npcSystem.getNPC(npcId)
     if (!npc || !this.playerController) return false
 
+    // ── Form cluster: nearby same-class NPCs join, others flee ──
+    this.clusterNpcIds = this.aiSystem.formCluster(npcId, 'battle')
+    this.selectedClusterIndex = 0
+    this.clusterPositions.clear()
+    this.clusterOriginalPositions.clear()
+    this.clusterHPs.clear()
+    for (const id of this.clusterNpcIds) {
+      const n = this.npcSystem.getNPC(id)
+      if (n) this.clusterOriginalPositions.set(id, n.position.clone())
+      this.clusterHPs.set(id, this.maxEnemyHP)
+    }
+
     this.isActive = true
     this.activeNpcId = npcId
     this.phase = 'player-turn'
     this.highlightedActionIndex = 0
     this.playerHP = this.maxPlayerHP
-    this.enemyHP = this.maxEnemyHP
+    this.enemyHP = this.clusterHPs.get(npcId) ?? this.maxEnemyHP
     this.guardActive = false
     this.statusText = trigger === 'enemy'
       ? `${npc.id} closes in and forces a battle.`
@@ -416,16 +455,16 @@ export class BattleSystem {
 
     this.dialogueManager?.hideInteractionPrompt()
     this.clearPromptState()
-    this.stageBattlePositions(npc)
+    this.stageClusterBattlePositions()
     this.syncBattleFacing()
 
     if (this.cameraManager && this.battlePlayerPos && this.battleEnemyPos) {
-      console.log(`⚔️ Battle start: npc=${npcId}, trigger=${trigger}, cameraModeBefore=${this.cameraManager.getCurrentMode()}`)
+      console.log(`⚔️ Battle start: npc=${npcId}, trigger=${trigger}, cluster=${this.clusterNpcIds.length}, cameraModeBefore=${this.cameraManager.getCurrentMode()}`)
       this.cameraManager.enterBattleMode(this.battlePlayerPos, this.battleEnemyPos)
     }
 
     this.renderBattleOverlay()
-    logger.info(LogModule.SYSTEM, `Battle started with NPC "${npcId}" (${trigger})`)
+    logger.info(LogModule.SYSTEM, `Battle started with NPC "${npcId}" (${trigger}), cluster size ${this.clusterNpcIds.length}`)
     this.soundSystem?.startBattleTheme_01()
     return true
   }
@@ -463,43 +502,69 @@ export class BattleSystem {
 
     const originalPlayerPos = this.battlePlayerPos.clone()
 
-    // Cinematic attack sequence — hard cuts, manga-panel rhythm:
-    // 1. attackerFocus  — low-angle on player, wind-up / attack anim
-    // 2. strikeImpact   — tight shot at impact point, player teleports to strike range
-    // 3. targetReaction  — cut to enemy receiving hit, damage applied
-    // 4. menuIdle (or deathHold if enemy dies) — return to battlefield view
+    // ── Cinematic attack sequence ───────────────────────────────────────────
+    //
+    // Stage 1  overShoulder   — camera behind player looking at enemy;
+    //                           player starts walk animation toward the NPC.
+    // Stage 2  strikeImpact   — camera at the impact zone; player teleported
+    //                           to strike range, attack animation fires.
+    // Stage 3  targetReaction — cut to enemy receiving hit, damage applied.
+    //          (or deathHold if the enemy is defeated)
+    // Stage 4  menuIdle       — return to wide battlefield view; player
+    //                           restored to standing position, idle anim.
+    //
     const sequence: BattleCameraShot[] = [
       {
-        type: 'attackerFocus',
-        duration: 0.35,
+        type: 'overShoulder',
+        duration: 0.45,
         onStart: () => {
-          // Play player attack animation at standing position
-          try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.15) } catch (_) {}
+          // Player begins walking toward the enemy (visual anticipation)
+          try { this.charAnimSystem.crossfadeTo('player', 'run', 0.1) } catch (_) {}
         },
       },
       {
         type: 'strikeImpact',
-        duration: 0.25,
+        duration: 0.35,
         onStart: () => {
-          // Teleport player to strike range as the hit lands
+          // Teleport player to strike range and play attack animation
           this.playerController!.setPosition(strikePos)
           this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
+          try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.08) } catch (_) {}
         },
         onComplete: () => {
           // Apply damage at the moment of impact
           this.performAttackDamage(npc)
-          // Return player to standing position
-          this.playerController!.setPosition(originalPlayerPos)
-          this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
         },
       },
       {
-        type: this.enemyHP <= 0 ? 'deathHold' : 'targetReaction',
-        duration: this.enemyHP <= 0 ? 0.6 : 0.35,
+        // Camera type is resolved at runtime inside onStart because damage is
+        // not applied until strikeImpact.onComplete (the previous shot).
+        type: 'targetReaction',
+        duration: 0.65,
+        onStart: () => {
+          if (this.npcSystem.isDefeated(npc.id)) {
+            // Switch to the wider death-hold angle and play the fall animation
+            this.cameraManager!.getBattleCameraController().cutTo('deathHold')
+            try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
+          } else {
+            // Brief recoil — NPC staggers then returns to idle
+            try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
+          }
+        },
+      },
+      {
+        type: 'menuIdle',
+        duration: 0.3,
+        onStart: () => {
+          // Restore player to standing position and idle animation
+          this.playerController!.setPosition(originalPlayerPos)
+          this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
+          try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
+        },
         onComplete: () => {
           this.attackSequencePlaying = false
           if (this.phase === 'ended') {
-            // Enemy was defeated — hold on deathHold, overlay shows result
+            // Enemy was defeated — overlay shows result
             return
           }
           // Enemy counter-attacks with its own camera sequence
@@ -552,13 +617,33 @@ export class BattleSystem {
   private performAttackDamage(npc: NPCInstance): void {
     const damage = 5 + Math.floor(Math.random() * 5)
     this.lastDamageDealt = damage
-    this.enemyHP = Math.max(0, this.enemyHP - damage)
+    const hp = Math.max(0, (this.clusterHPs.get(npc.id) ?? this.enemyHP) - damage)
+    this.clusterHPs.set(npc.id, hp)
+    this.enemyHP = hp
 
     if (this.enemyHP <= 0) {
       this.npcSystem.defeatNPC(npc.id)
       this.aiSystem.disengageFromPlayer(npc.id)
-      this.phase = 'ended'
-      this.statusText = `You hit ${npc.id} for ${damage}. ${npc.id} is defeated.`
+
+      // Remove defeated NPC from cluster
+      const idx = this.clusterNpcIds.indexOf(npc.id)
+      if (idx !== -1) this.clusterNpcIds.splice(idx, 1)
+      this.clusterHPs.delete(npc.id)
+
+      if (this.clusterNpcIds.length === 0) {
+        // All NPCs in cluster defeated — battle ends
+        this.phase = 'ended'
+        this.statusText = `You hit ${npc.id} for ${damage}. All enemies defeated!`
+        this.renderBattleOverlay()
+        return
+      }
+
+      // Auto-select next NPC in the cluster
+      this.selectedClusterIndex = Math.min(this.selectedClusterIndex, this.clusterNpcIds.length - 1)
+      this.activeNpcId = this.clusterNpcIds[this.selectedClusterIndex]
+      this.enemyHP = this.clusterHPs.get(this.activeNpcId!) ?? this.maxEnemyHP
+      this.updateBattleTarget()
+      this.statusText = `You hit ${npc.id} for ${damage}. ${npc.id} is defeated. Targeting ${this.activeNpcId}.`
       this.renderBattleOverlay()
       return
     }
@@ -584,8 +669,58 @@ export class BattleSystem {
   }
 
   private performItemAction(): void {
-    this.statusText = 'Items are not available yet.'
+    if (!this.itemSystem) {
+      this.statusText = 'Items are not available yet.'
+      this.renderBattleOverlay()
+      return
+    }
+    const inventory = this.itemSystem.getInventory()
+    const usable = inventory.filter(s =>
+      s.item.usableIn === 'any' || s.item.usableIn === 'battle'
+    )
+    if (usable.length === 0) {
+      this.statusText = 'No usable items.'
+      this.renderBattleOverlay()
+      return
+    }
+
+    // Open the full inventory display in battle mode
+    if (this.inventoryDisplay) {
+      this.statusText = 'Browsing items…'
+      this.renderBattleOverlay()
+      this.inventoryDisplay.open('battle', () => {
+        // Callback: inventory closed — check if an item was consumed
+        // and give the enemy a turn
+        this.statusText = 'Choose an action.'
+        this.renderBattleOverlay()
+        // If an item was used, enemy retaliates
+        const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
+        if (npc) {
+          setTimeout(() => this.resolveEnemyTurn(`${npc.id} retaliates!`), 400)
+        }
+      })
+      return
+    }
+
+    // Fallback: auto-use first item if no inventory display
+    const slot = usable[0]
+    const effects = this.itemSystem.useItem(slot.item.id, 'battle')
+    if (!effects) {
+      this.statusText = `Can't use ${slot.item.name} right now.`
+      this.renderBattleOverlay()
+      return
+    }
+    for (const fx of effects) {
+      if (fx.stat === 'hp') {
+        this.playerHP = Math.min(this.playerHP + fx.value, this.maxPlayerHP)
+      }
+    }
+    this.statusText = `Used ${slot.item.icon} ${slot.item.name}!`
     this.renderBattleOverlay()
+    const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
+    if (npc) {
+      setTimeout(() => this.resolveEnemyTurn(`${npc.id} retaliates!`), 700)
+    }
   }
 
   private resolveEnemyTurn(prefix: string): void {
@@ -690,7 +825,14 @@ export class BattleSystem {
     this.attackSequencePlaying = false
     this.battlePlayerPos = null
     this.battleEnemyPos = null
+    this.restoreClusterPositions()
     this.restorePlayerPositionAfterBattle()
+    this.aiSystem.releaseCluster(this.clusterNpcIds)
+    this.clusterNpcIds = []
+    this.selectedClusterIndex = 0
+    this.clusterPositions.clear()
+    this.clusterOriginalPositions.clear()
+    this.clusterHPs.clear()
     this.playerController?.clearForcedFacingTarget()
     this.hideBattleOverlay()
     console.log(`⚔️ Battle end: npc=${resolvedNpcId ?? 'none'}, applyCooldown=${applyCooldown}, cameraModeBeforeExit=${this.cameraManager?.getCurrentMode() ?? 'none'}`)
@@ -703,51 +845,128 @@ export class BattleSystem {
     const npc = this.npcSystem.getNPC(this.activeNpcId)
     if (!npc) return
 
-    const playerPos = this.playerController.getPosition()
-    this.playerController.setForcedFacingTarget(npc.position)
+    // Use the staged cluster position for facing (not live NPC pos which may have been restored)
+    const targetPos = this.clusterPositions.get(this.activeNpcId) ?? npc.position
+    this.playerController.setForcedFacingTarget(targetPos)
 
-    const toPlayer = playerPos.clone().sub(npc.position)
+    const playerPos = this.playerController.getPosition()
+    const toPlayer = playerPos.clone().sub(targetPos)
     toPlayer.y = 0
     if (toPlayer.lengthSq() > 0.0001) {
       npc.rotation = Math.atan2(toPlayer.x, toPlayer.z)
     }
   }
 
-  private stageBattlePositions(npc: NPCInstance): void {
+  // ── Cluster staging ──────────────────────────────────────────────────────
+
+  private stageClusterBattlePositions(): void {
     if (!this.playerController || this.stagedPlayerStartPosition) return
 
+    const primaryNpc = this.npcSystem.getNPC(this.clusterNpcIds[0])
+    if (!primaryNpc) return
+
     const currentPlayerPos = this.playerController.getPosition()
-    const toNpc = npc.position.clone().sub(currentPlayerPos)
+    const toNpc = primaryNpc.position.clone().sub(currentPlayerPos)
     toNpc.y = 0
+    if (toNpc.lengthSq() < 0.0001) toNpc.set(0, 0, 1)
+    else toNpc.normalize()
 
-    if (toNpc.lengthSq() < 0.0001) {
-      toNpc.set(0, 0, 1)
-    } else {
-      toNpc.normalize()
-    }
-
-    // Place combatants exactly battleStandingDistance apart, centered on the midpoint
-    // between the current player position and NPC.
-    const midpoint = currentPlayerPos.clone().lerp(npc.position, 0.5)
+    const midpoint = currentPlayerPos.clone().lerp(primaryNpc.position, 0.5)
     midpoint.y = currentPlayerPos.y
 
     const halfDist = this.battleStandingDistance / 2
     const playerBattlePos = midpoint.clone().addScaledVector(toNpc, -halfDist)
     playerBattlePos.y = currentPlayerPos.y
-    const enemyBattlePos = midpoint.clone().addScaledVector(toNpc, halfDist)
-    enemyBattlePos.y = npc.position.y
 
     this.stagedPlayerStartPosition = currentPlayerPos.clone()
     this.battlePlayerPos = playerBattlePos.clone()
-    this.battleEnemyPos = enemyBattlePos.clone()
     this.playerController.setPosition(playerBattlePos)
 
+    // Arrange cluster NPCs in an arc perpendicular to the player→enemy axis
+    const right = new THREE.Vector3(-toNpc.z, 0, toNpc.x)
+    const centerIndex = (this.clusterNpcIds.length - 1) / 2
+
+    for (let i = 0; i < this.clusterNpcIds.length; i++) {
+      const npc = this.npcSystem.getNPC(this.clusterNpcIds[i])
+      if (!npc) continue
+
+      const offset = (i - centerIndex) * this.clusterSpacing
+      const enemyPos = midpoint.clone()
+        .addScaledVector(toNpc, halfDist)
+        .addScaledVector(right, offset)
+      enemyPos.y = npc.position.y
+
+      npc.position.copy(enemyPos)
+      npc.model.position.copy(enemyPos)
+      this.clusterPositions.set(this.clusterNpcIds[i], enemyPos.clone())
+    }
+
+    // Set camera enemy target to the selected NPC
+    const selectedId = this.clusterNpcIds[this.selectedClusterIndex]
+    this.battleEnemyPos = this.clusterPositions.get(selectedId) ?? null
+
     console.log(
-      `⚔️ Battle staging (${this.battleStandingDistance}u apart): player moved from ` +
-      `(${currentPlayerPos.x.toFixed(2)}, ${currentPlayerPos.y.toFixed(2)}, ${currentPlayerPos.z.toFixed(2)}) ` +
-      `to (${playerBattlePos.x.toFixed(2)}, ${playerBattlePos.y.toFixed(2)}, ${playerBattlePos.z.toFixed(2)}) | ` +
-      `enemy at (${enemyBattlePos.x.toFixed(2)}, ${enemyBattlePos.y.toFixed(2)}, ${enemyBattlePos.z.toFixed(2)})`
+      `⚔️ Cluster staging (${this.clusterNpcIds.length} NPCs, ${this.battleStandingDistance}u apart): ` +
+      `player at (${playerBattlePos.x.toFixed(2)}, ${playerBattlePos.y.toFixed(2)}, ${playerBattlePos.z.toFixed(2)})`
     )
+  }
+
+  /** Restore all cluster NPCs to their original (pre-battle) positions. */
+  private restoreClusterPositions(): void {
+    for (const [id, origPos] of this.clusterOriginalPositions) {
+      const npc = this.npcSystem.getNPC(id)
+      if (npc && !this.npcSystem.isDefeated(id)) {
+        npc.position.copy(origPos)
+        npc.model.position.copy(origPos)
+      }
+    }
+  }
+
+  /** Switch the active battle target to the currently selected cluster NPC. */
+  private updateBattleTarget(): void {
+    const selectedId = this.clusterNpcIds[this.selectedClusterIndex]
+    if (!selectedId) return
+
+    this.activeNpcId = selectedId
+    this.enemyHP = this.clusterHPs.get(selectedId) ?? this.maxEnemyHP
+    this.battleEnemyPos = this.clusterPositions.get(selectedId) ?? null
+
+    // Update camera and player facing
+    if (this.battlePlayerPos && this.battleEnemyPos && this.cameraManager) {
+      this.cameraManager.updateBattlePositions(this.battlePlayerPos, this.battleEnemyPos)
+    }
+    this.syncBattleFacing()
+  }
+
+  /**
+   * Cycle the cluster NPC selection (left/right).
+   * Returns true if input was consumed.
+   */
+  public handleClusterNavigate(dir: number, source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive || this.clusterNpcIds.length <= 1) {
+      traceInputCommand({ source, target: 'battle', command: dir > 0 ? 'cluster-right' : 'cluster-left', result: 'ignored' })
+      return false
+    }
+    if (this.isCommandInputBlocked()) {
+      traceInputCommand({ source, target: 'battle', command: dir > 0 ? 'cluster-right' : 'cluster-left', result: 'blocked' })
+      return true
+    }
+    this.selectedClusterIndex =
+      (this.selectedClusterIndex + dir + this.clusterNpcIds.length) % this.clusterNpcIds.length
+    this.updateBattleTarget()
+    this.renderBattleOverlay()
+    traceInputCommand({
+      source, target: 'battle',
+      command: dir > 0 ? 'cluster-right' : 'cluster-left',
+      result: 'consumed',
+      details: { selectedNpc: this.activeNpcId, index: this.selectedClusterIndex, total: this.clusterNpcIds.length }
+    })
+    return true
+  }
+
+  /** How many NPCs are in the current battle cluster. */
+  public getClusterSize(): number {
+    return this.clusterNpcIds.length
   }
 
   private restorePlayerPositionAfterBattle(): void {
@@ -764,12 +983,16 @@ export class BattleSystem {
   private handleKey(e: KeyboardEvent): void {
     if (!this.isActive) return
 
+    // When the inventory display is open during battle, let it handle all input
+    if (this.inventoryDisplay?.isInventoryActive()) return
+
     if (this.phase === 'ended') {
-      if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'KeyJ' || e.code === 'KeyL') {
+      if (e.code === 'Escape' || e.code === 'KeyJ' || e.code === 'KeyL') {
         e.preventDefault()
         traceInputCommand({ source: 'keyboard', target: 'battle', command: 'continue', result: 'executed', details: { phase: this.phase } })
         this.leaveBattle(true)
       }
+      // Enter/Return falls through to the global keydown handler (triggers pause)
       return
     }
 
@@ -793,9 +1016,22 @@ export class BattleSystem {
       return
     }
 
+    // Left/right: cycle cluster NPC selection
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      this.handleClusterNavigate(-1, 'keyboard')
+      return
+    }
+
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      this.handleClusterNavigate(1, 'keyboard')
+      return
+    }
+
     if (e.code === 'Enter' || e.code === 'NumpadEnter') {
       e.preventDefault()
-      this.handleConfirmInput('keyboard')
+      this.onPauseRequest?.()
       return
     }
 
@@ -825,17 +1061,25 @@ export class BattleSystem {
   }
 
   private renderBattleOverlay(): void {
-    if (!this.overlayRoot || !this.overlayPanel) return
+    if (!this.overlayRoot || !this.overlayPanel || !this.overlayTopBox) return
 
     this.applyOverlayLayout()
 
     this.overlayRoot.style.display = 'block'
+    this.overlayTopBox.style.display = 'block'
     this.overlayPanel.style.display = 'block'
     if (this.overlayPrompt) this.overlayPrompt.style.display = 'none'
 
     const npc = this.activeNpcId ? this.npcSystem.getNPC(this.activeNpcId) : null
     if (this.overlayTitle) {
-      this.overlayTitle.textContent = npc ? `Battle: ${npc.id}` : 'Battle'
+      if (this.clusterNpcIds.length > 1) {
+        const navHint = this.inputMode === 'touch' ? '' : this.inputMode === 'gamepad' ? ' (◀ D-Pad ▶)' : ' (◀ A/D ▶)'
+        this.overlayTitle.textContent = npc
+          ? `Battle: ◀ ${npc.id} ▶  [${this.selectedClusterIndex + 1}/${this.clusterNpcIds.length}]${navHint}`
+          : 'Battle'
+      } else {
+        this.overlayTitle.textContent = npc ? `Battle: ${npc.id}` : 'Battle'
+      }
     }
 
     if (this.overlayHP) {
@@ -844,6 +1088,36 @@ export class BattleSystem {
 
     if (this.overlayStatus) {
       this.overlayStatus.textContent = this.statusText
+    }
+
+    // Mobile cluster NPC navigation buttons — placed in top box
+    if (this.clusterNpcIds.length > 1 && this.inputMode === 'touch' && this.overlayTopBox) {
+      let clusterNav = document.getElementById('battle-cluster-nav') as HTMLDivElement | null
+      if (!clusterNav) {
+        clusterNav = document.createElement('div')
+        clusterNav.id = 'battle-cluster-nav'
+        clusterNav.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;margin-top:10px;pointer-events:auto;'
+        this.overlayTopBox.appendChild(clusterNav)
+      }
+      clusterNav.innerHTML = ''
+      const npcName = this.activeNpcId ?? '?'
+      const makeTouchBtn = (label: string, handler: () => void) => {
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.textContent = label
+        btn.style.cssText = 'color:#ffd866;background:rgba(0,0,0,0.4);border:1px solid #ffd866;border-radius:6px;padding:10px 18px;font-size:20px;min-width:48px;min-height:44px;pointer-events:auto;touch-action:manipulation;cursor:pointer;'
+        btn.addEventListener('touchend', (ev) => { ev.preventDefault(); ev.stopPropagation(); handler() }, { passive: false })
+        return btn
+      }
+      clusterNav.appendChild(makeTouchBtn('◀', () => this.handleClusterNavigate(-1, 'touch')))
+      const label = document.createElement('span')
+      label.textContent = `${npcName}  [${this.selectedClusterIndex + 1}/${this.clusterNpcIds.length}]`
+      label.style.cssText = 'color:#ffd866;font-size:16px;letter-spacing:1px;'
+      clusterNav.appendChild(label)
+      clusterNav.appendChild(makeTouchBtn('▶', () => this.handleClusterNavigate(1, 'touch')))
+    } else {
+      const clusterNav = document.getElementById('battle-cluster-nav')
+      if (clusterNav) clusterNav.remove()
     }
 
     if (!this.overlayChoices) return
@@ -873,7 +1147,7 @@ export class BattleSystem {
       item.type = 'button'
       const itemColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
       item.textContent = this.getActionDisplayText(action, index)
-      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '12px 10px' : '4px 0'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;background:transparent;border:none;outline:none;text-align:left;width:100%;appearance:none;-webkit-appearance:none;`
+      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '12px 18px' : '6px 14px'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s,border-color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;background:transparent;border:1px solid ${itemColor};border-radius:4px;outline:none;text-align:left;width:100%;appearance:none;-webkit-appearance:none;box-sizing:border-box;`
       let lastActivateTime = 0
       const activate = (event: Event) => {
         event.preventDefault()
@@ -927,7 +1201,9 @@ export class BattleSystem {
       const action = this.menuActions[index]
       if (!action) return
       el.textContent = this.getActionDisplayText(action, index)
-      el.style.color = this.getActionColor(action.id, index === this.highlightedActionIndex)
+      const newColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
+      el.style.color = newColor
+      el.style.borderColor = newColor
     })
   }
 
@@ -978,23 +1254,33 @@ export class BattleSystem {
       'color:#fff2e8;padding:10px 18px;border-radius:8px;font-size:14px;letter-spacing:1px;display:none;'
     this.overlayRoot.appendChild(this.overlayPrompt)
 
+    // Top box — battle title, HP bars, status text (centred at top of viewport)
+    this.overlayTopBox = document.createElement('div')
+    this.overlayTopBox.id = 'battle-top-box'
+    this.overlayTopBox.style.cssText =
+      'position:absolute;top:0;left:0;right:0;' +
+      'background:linear-gradient(to bottom,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);' +
+      'padding:28px 32px 24px;display:none;pointer-events:none;text-align:center;'
+    this.overlayRoot.appendChild(this.overlayTopBox)
+
+    this.overlayTitle = document.createElement('div')
+    this.overlayTitle.style.cssText = 'color:#ff8f6b;font-size:18px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;'
+    this.overlayTopBox.appendChild(this.overlayTitle)
+
+    this.overlayHP = document.createElement('div')
+    this.overlayHP.style.cssText = 'color:#ffd9c7;font-size:14px;letter-spacing:1px;margin-bottom:10px;'
+    this.overlayTopBox.appendChild(this.overlayHP)
+
+    this.overlayStatus = document.createElement('div')
+    this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin:0 auto;'
+    this.overlayTopBox.appendChild(this.overlayStatus)
+
+    // Bottom panel — action choices only
     this.overlayPanel = document.createElement('div')
     this.overlayPanel.style.cssText =
       'position:absolute;bottom:0;left:0;right:0;padding:28px 32px 34px;display:none;pointer-events:auto;' +
       'background:linear-gradient(to top,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);'
     this.overlayRoot.appendChild(this.overlayPanel)
-
-    this.overlayTitle = document.createElement('div')
-    this.overlayTitle.style.cssText = 'color:#ff8f6b;font-size:18px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;'
-    this.overlayPanel.appendChild(this.overlayTitle)
-
-    this.overlayHP = document.createElement('div')
-    this.overlayHP.style.cssText = 'color:#ffd9c7;font-size:14px;letter-spacing:1px;margin-bottom:10px;'
-    this.overlayPanel.appendChild(this.overlayHP)
-
-    this.overlayStatus = document.createElement('div')
-    this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin-bottom:16px;'
-    this.overlayPanel.appendChild(this.overlayStatus)
 
     this.overlayChoices = document.createElement('div')
     this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-width:360px;'
@@ -1031,7 +1317,7 @@ export class BattleSystem {
       case 'gamepad':
         return '[Press A to return to gameplay]'
       default:
-        return '[Press K / Return to return to gameplay]'
+        return '[Press J to return to gameplay]'
     }
   }
 
@@ -1053,7 +1339,7 @@ export class BattleSystem {
   }
 
   private applyOverlayLayout(): void {
-    if (!this.overlayPrompt || !this.overlayPanel || !this.overlayStatus || !this.overlayChoices) return
+    if (!this.overlayPrompt || !this.overlayPanel || !this.overlayTopBox || !this.overlayStatus || !this.overlayChoices) return
 
     const promptColor = this.getPromptAccentColor()
 
@@ -1065,12 +1351,17 @@ export class BattleSystem {
         'text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:auto;cursor:pointer;' +
         'max-width:calc(50vw - 28px);line-height:1.1;white-space:normal;touch-action:manipulation;'
 
+      this.overlayTopBox.style.cssText =
+        'position:absolute;top:0;left:0;right:0;' +
+        'background:linear-gradient(to bottom,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);' +
+        'padding:env(safe-area-inset-top,12px) 20px 20px;display:none;pointer-events:none;text-align:center;'
+
       this.overlayPanel.style.cssText =
         'position:absolute;left:16px;right:16px;bottom:calc(48px + env(safe-area-inset-bottom, 0px));' +
         'padding:0;display:none;pointer-events:auto;background:transparent;'
 
       this.overlayStatus.style.cssText =
-        'color:#fff7f1;font-size:18px;line-height:1.45;max-width:none;margin-bottom:16px;text-shadow:0 0 16px rgba(0,0,0,0.92);'
+        'color:#fff7f1;font-size:18px;line-height:1.45;max-width:none;text-shadow:0 0 16px rgba(0,0,0,0.92);margin:0 auto;'
 
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
     } else {
@@ -1079,11 +1370,16 @@ export class BattleSystem {
         `color:${promptColor};font-size:18px;letter-spacing:2px;display:none;text-align:left;` +
         'background:transparent;border:none;padding:0;text-shadow:0 2px 18px rgba(0,0,0,0.95);pointer-events:none;white-space:nowrap;'
 
+      this.overlayTopBox.style.cssText =
+        'position:absolute;top:0;left:0;right:0;' +
+        'background:linear-gradient(to bottom,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);' +
+        'padding:28px 32px 24px;display:none;pointer-events:none;text-align:center;'
+
       this.overlayPanel.style.cssText =
         'position:absolute;bottom:0;left:0;right:0;padding:28px 32px 34px;display:none;pointer-events:auto;' +
         'background:linear-gradient(to top,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);'
 
-      this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin-bottom:16px;'
+      this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin:0 auto;'
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-width:360px;'
     }
   }
@@ -1129,6 +1425,7 @@ export class BattleSystem {
   }
 
   private hideBattleOverlay(): void {
+    if (this.overlayTopBox) this.overlayTopBox.style.display = 'none'
     if (this.overlayPanel) this.overlayPanel.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
   }

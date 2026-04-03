@@ -347,6 +347,13 @@ export class SoundSystem {
     const snareSeq    = this.battleSnareSeq
     const hihatSeq    = this.battleHihatSeq
 
+    // Stop sequences immediately so their callbacks can no longer fire on nulled synths.
+    try { bassSeq?.stop()   } catch { /* */ }
+    try { leadSeq?.stop()   } catch { /* */ }
+    try { kickSeq?.stop()   } catch { /* */ }
+    try { snareSeq?.stop()  } catch { /* */ }
+    try { hihatSeq?.stop()  } catch { /* */ }
+
     this.battleMasterVol  = null
     this.battleBass       = null; this.battleBassFilter  = null; this.battleBassVol  = null
     this.battleLead       = null; this.battleLeadVol     = null
@@ -364,12 +371,12 @@ export class SoundSystem {
     const delay = fadeDuration > 0 ? (fadeDuration + 0.2) * 1000 : 0
 
     setTimeout(() => {
-      // Stop sequences first (prevents callbacks firing after disposal).
-      try { bassSeq?.stop();  bassSeq?.dispose()  } catch { /* */ }
-      try { leadSeq?.stop();  leadSeq?.dispose()  } catch { /* */ }
-      try { kickSeq?.stop();  kickSeq?.dispose()  } catch { /* */ }
-      try { snareSeq?.stop(); snareSeq?.dispose() } catch { /* */ }
-      try { hihatSeq?.stop(); hihatSeq?.dispose() } catch { /* */ }
+      // Dispose sequences (already stopped above).
+      try { bassSeq?.dispose()  } catch { /* */ }
+      try { leadSeq?.dispose()  } catch { /* */ }
+      try { kickSeq?.dispose()  } catch { /* */ }
+      try { snareSeq?.dispose() } catch { /* */ }
+      try { hihatSeq?.dispose() } catch { /* */ }
 
       _Tone?.getTransport().stop()
       _Tone?.getTransport().cancel()

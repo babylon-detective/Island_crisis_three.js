@@ -158,6 +158,13 @@ export class CameraManager {
   private priorMode: InternalCameraMode = 'thirdperson'
   private dialogueTargetPos: THREE.Vector3 = new THREE.Vector3()
   private dialogueTargetLookAt: THREE.Vector3 = new THREE.Vector3()
+
+  /** Tunable dialogue camera parameters (exposed via Debug GUI). */
+  public dialogueCameraParams = {
+    frontDist: 3.5,
+    bodyCenter: 0.9,
+    fov: 50,
+  }
   private dialogueFadeOverlay: HTMLDivElement | null = null
   private dialogueFading: boolean = false
   private pendingFadeRequest: { halfDuration: number; onMidFade: () => void; label: string } | null = null
@@ -947,8 +954,7 @@ export class CameraManager {
     console.log(`📷 Dialogue enter requested: current=${this.currentMode}, prior=${this.priorMode}, gameplay=${this.gameplayMode}`)
 
     const npcForward = new THREE.Vector3(Math.sin(npcRotation), 0, Math.cos(npcRotation))
-    const bodyCenter = 0.9
-    const frontDist = 3.5
+    const { bodyCenter, frontDist, fov } = this.dialogueCameraParams
 
     this.dialogueTargetPos
       .copy(npcPosition)
@@ -962,6 +968,8 @@ export class CameraManager {
       0.3,
       () => {
         this.setPlayerMeshRenderSuppressed('dialogue', true)
+        this.dialogueCamera.fov = fov
+        this.dialogueCamera.updateProjectionMatrix()
         this.dialogueCamera.position.copy(this.dialogueTargetPos)
         this.dialogueCamera.lookAt(this.dialogueTargetLookAt)
         this.switchCamera('dialogue', true)
@@ -973,7 +981,10 @@ export class CameraManager {
   }
 
   public exitDialogueMode(): void {
-    if (this.currentMode !== 'dialogue') return
+    // Allow exit if currently in dialogue OR if a dialogue-enter fade is still
+    // in progress (user confirmed very fast before the fade mid-point fired).
+    // The exit fade will be queued and run after the enter fade completes.
+    if (this.currentMode !== 'dialogue' && !this.isFading()) return
     const resumeMode = this.getResumeMode()
     console.log(`📷 Dialogue exit requested: current=${this.currentMode}, prior=${this.priorMode}, resume=${resumeMode}`)
     this.fadeTransition(
@@ -987,6 +998,31 @@ export class CameraManager {
       'exit-dialogue',
       '#000',
     )
+  }
+
+  /**
+   * Smoothly update the dialogue camera target to face a different NPC
+   * without triggering a full fade transition. Used when cycling through
+   * a cluster of NPCs during dialogue.
+   */
+  public updateDialogueTarget(npcPosition: THREE.Vector3, npcRotation: number): void {
+    if (this.currentMode !== 'dialogue') return
+
+    const npcForward = new THREE.Vector3(Math.sin(npcRotation), 0, Math.cos(npcRotation))
+    const { bodyCenter, frontDist, fov } = this.dialogueCameraParams
+
+    this.dialogueTargetPos
+      .copy(npcPosition)
+      .addScaledVector(npcForward, frontDist)
+    this.dialogueTargetPos.y = npcPosition.y + bodyCenter
+
+    this.dialogueTargetLookAt.copy(npcPosition)
+    this.dialogueTargetLookAt.y += bodyCenter
+
+    this.dialogueCamera.fov = fov
+    this.dialogueCamera.updateProjectionMatrix()
+    this.dialogueCamera.position.copy(this.dialogueTargetPos)
+    this.dialogueCamera.lookAt(this.dialogueTargetLookAt)
   }
 
   // ============================================================================
@@ -1038,7 +1074,7 @@ export class CameraManager {
    */
   public enterMenuMode(playerPosition: THREE.Vector3, playerYaw: number): void {
     this.priorMode =
-      this.currentMode === 'dialogue' || this.currentMode === 'battle' || this.currentMode === 'menu'
+      this.currentMode === 'menu'
         ? this.gameplayMode
         : this.currentMode
 

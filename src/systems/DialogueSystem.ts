@@ -116,6 +116,7 @@ export class DialogueManager {
   // — built-in dialogue overlay DOM —
   private overlayRoot: HTMLDivElement | null = null
   private overlayBox: HTMLDivElement | null = null
+  private overlayTopBox: HTMLDivElement | null = null
   private overlayPrompt: HTMLDivElement | null = null
   private overlaySpeaker: HTMLDivElement | null = null
   private overlayText: HTMLDivElement | null = null
@@ -124,6 +125,10 @@ export class DialogueManager {
   private highlightedChoiceIndex: number = 0
   private inputMode: ActiveInputMode = 'keyboard'
   private pendingBattleNpcId: string | null = null
+
+  // ── Cluster (multi-NPC) support ──
+  private clusterNpcIds: string[] = []
+  private selectedClusterIndex = 0
 
   constructor(
     npcSystem: NPCSystem,
@@ -264,21 +269,34 @@ export class DialogueManager {
     if (!this.isActive) return
     if (this.pauseChecker?.()) return
 
-    // During active dialogue: I/K, W/S, or arrows move the highlighted choice.
-    if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyI') {
+    // During active dialogue: W/S or arrows move the highlighted choice.
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault()
       this.handleNavigateInput(-1, 'keyboard')
       return
     }
-    if (e.code === 'ArrowDown' || e.code === 'KeyS' || e.code === 'KeyK') {
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') {
       e.preventDefault()
       this.handleNavigateInput(1, 'keyboard')
       return
     }
 
-    if (e.code === 'KeyJ' || e.code === 'Enter' || e.code === 'NumpadEnter') {
+    if (e.code === 'KeyJ') {
       e.preventDefault()
       this.handleConfirmInput('keyboard')
+      return
+    }
+
+    // Left/right: cycle cluster NPC selection
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      e.preventDefault()
+      this.handleClusterNavigate(-1, 'keyboard')
+      return
+    }
+
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      e.preventDefault()
+      this.handleClusterNavigate(1, 'keyboard')
       return
     }
 
@@ -314,10 +332,14 @@ export class DialogueManager {
       const el = items[i] as HTMLElement
       const tag = this.currentVisibleChoices[i]?.tag
       if (i === this.highlightedChoiceIndex) {
-        el.style.color = this.getChoiceColor(tag, true)
+        const color = this.getChoiceColor(tag, true)
+        el.style.color = color
+        el.style.borderColor = color
         el.textContent = el.textContent?.replace(/^\d+\./, `▶ ${i + 1}.`) ?? ''
       } else {
-        el.style.color = this.getChoiceColor(tag, false)
+        const color = this.getChoiceColor(tag, false)
+        el.style.color = color
+        el.style.borderColor = color
         el.textContent = el.textContent?.replace(/^▶ /, '') ?? ''
       }
     }
@@ -360,6 +382,12 @@ export class DialogueManager {
     this.activeNpcId = npcId
     this.activeTree = tree
     this.isActive = true
+
+    // ── Form cluster: nearby same-class NPCs join, others flee ──
+    this.clusterNpcIds = this.aiSystem.formCluster(npcId, 'dialogue')
+      .filter(id => this.npcDialogueMap.has(id)) // only include NPCs with dialogue trees
+    if (!this.clusterNpcIds.includes(npcId)) this.clusterNpcIds.unshift(npcId)
+    this.selectedClusterIndex = 0
 
     this.uiCallbacks?.hidePrompt()
     this.hidePromptOverlay()
@@ -476,6 +504,13 @@ export class DialogueManager {
       // Set interaction cooldown to prevent immediate re-trigger (critical on mobile)
       this.npcSystem.setInteractionCooldown(npcId, 2000)
     }
+
+    // Release cluster NPCs back to AI
+    if (this.clusterNpcIds.length > 0) {
+      this.aiSystem.releaseCluster(this.clusterNpcIds)
+    }
+    this.clusterNpcIds = []
+    this.selectedClusterIndex = 0
 
     this.currentVisibleChoices = []
     this.uiCallbacks?.hideDialogue()
@@ -641,6 +676,59 @@ export class DialogueManager {
     return true
   }
 
+  /**
+   * Cycle the cluster NPC selection (left/right) during dialogue.
+   * Switches the active NPC and restarts their dialogue tree.
+   * Returns true if input was consumed.
+   */
+  public handleClusterNavigate(dir: number, source: InputTraceSource = 'system'): boolean {
+    if (!this.isActive || this.clusterNpcIds.length <= 1) {
+      traceInputCommand({ source, target: 'dialogue', command: dir > 0 ? 'cluster-right' : 'cluster-left', result: 'ignored' })
+      return false
+    }
+    this.selectedClusterIndex =
+      (this.selectedClusterIndex + dir + this.clusterNpcIds.length) % this.clusterNpcIds.length
+    const newNpcId = this.clusterNpcIds[this.selectedClusterIndex]
+
+    // Return previous NPC to idle
+    if (this.activeNpcId) {
+      try { this.charAnimSystem.crossfadeTo(this.activeNpcId, 'idle', 0.3) } catch (_) {}
+    }
+
+    // Switch to the new NPC's dialogue tree
+    const treeId = this.npcDialogueMap.get(newNpcId)
+    const tree = treeId ? this.trees.get(treeId) : undefined
+    if (!tree) {
+      traceInputCommand({ source, target: 'dialogue', command: dir > 0 ? 'cluster-right' : 'cluster-left', result: 'ignored', details: { reason: 'no-tree' } })
+      return true
+    }
+
+    this.activeNpcId = newNpcId
+    this.activeTree = tree
+    this.aiSystem.playAnimation(newNpcId, 'talking', false)
+
+    // Update camera to face the new NPC (smooth update, no fade)
+    const npc = this.npcSystem.getNPC(newNpcId)
+    if (npc && this.cameraManager) {
+      this.cameraManager.updateDialogueTarget(npc.position, npc.rotation)
+    }
+
+    this.goToNode(tree.startNodeId)
+
+    traceInputCommand({
+      source, target: 'dialogue',
+      command: dir > 0 ? 'cluster-right' : 'cluster-left',
+      result: 'consumed',
+      details: { selectedNpc: newNpcId, index: this.selectedClusterIndex, total: this.clusterNpcIds.length }
+    })
+    return true
+  }
+
+  /** How many NPCs are in the current dialogue cluster. */
+  public getClusterSize(): number {
+    return this.clusterNpcIds.length
+  }
+
   // --------------------------------------------------------------------------
   // TREE BUILDER HELPERS — convenient for programmatic tree construction
   // --------------------------------------------------------------------------
@@ -686,32 +774,42 @@ export class DialogueManager {
       'font-size:14px;letter-spacing:1px;white-space:nowrap;display:none;pointer-events:none;'
     this.overlayRoot.appendChild(this.overlayPrompt)
 
-    // Dialogue box wrapper (bottom of screen)
-    const dialogueBox = document.createElement('div')
-    dialogueBox.style.cssText =
-      'position:absolute;bottom:0;left:0;right:0;' +
-      'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
-      'padding:24px 32px 32px;display:none;pointer-events:auto;'
-    dialogueBox.id = 'dialogue-box'
-    this.overlayBox = dialogueBox
-    this.overlayRoot.appendChild(dialogueBox)
+    // Top box — NPC speaker name + spoken text (centred at top of viewport)
+    const topBox = document.createElement('div')
+    topBox.id = 'dialogue-top-box'
+    topBox.style.cssText =
+      'position:absolute;top:0;left:0;right:0;' +
+      'background:linear-gradient(to bottom,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+      'padding:28px 32px 24px;display:none;pointer-events:none;text-align:center;'
+    this.overlayTopBox = topBox
+    this.overlayRoot.appendChild(topBox)
 
     // Speaker name
     this.overlaySpeaker = document.createElement('div')
     this.overlaySpeaker.style.cssText =
       'color:#ffd866;font-size:16px;font-weight:bold;margin-bottom:8px;text-transform:uppercase;letter-spacing:2px;'
-    dialogueBox.appendChild(this.overlaySpeaker)
+    topBox.appendChild(this.overlaySpeaker)
 
     // NPC text
     this.overlayText = document.createElement('div')
     this.overlayText.style.cssText =
-      'color:#eee;font-size:18px;line-height:1.5;margin-bottom:16px;max-width:700px;'
-    dialogueBox.appendChild(this.overlayText)
+      'color:#eee;font-size:18px;line-height:1.5;max-width:700px;margin:0 auto;'
+    topBox.appendChild(this.overlayText)
+
+    // Bottom box — player choices only
+    const choicesBox = document.createElement('div')
+    choicesBox.id = 'dialogue-box'
+    choicesBox.style.cssText =
+      'position:absolute;bottom:0;left:0;right:0;' +
+      'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+      'padding:24px 32px 32px;display:none;pointer-events:auto;'
+    this.overlayBox = choicesBox
+    this.overlayRoot.appendChild(choicesBox)
 
     // Choices list
     this.overlayChoices = document.createElement('div')
     this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
-    dialogueBox.appendChild(this.overlayChoices)
+    choicesBox.appendChild(this.overlayChoices)
 
     document.body.appendChild(this.overlayRoot)
     this.applyOverlayLayout()
@@ -739,7 +837,7 @@ export class DialogueManager {
       case 'gamepad':
         return '[Press A to continue]'
       default:
-        return '[Press K / Return to continue]'
+        return '[Press J to continue]'
     }
   }
 
@@ -758,7 +856,7 @@ export class DialogueManager {
   }
 
   private applyOverlayLayout(): void {
-    if (!this.overlayRoot || !this.overlayPrompt || !this.overlayBox || !this.overlayText || !this.overlayChoices) return
+    if (!this.overlayRoot || !this.overlayPrompt || !this.overlayBox || !this.overlayTopBox || !this.overlayText || !this.overlayChoices) return
 
     const promptColor = this.getPromptAccentColor()
 
@@ -770,12 +868,17 @@ export class DialogueManager {
         'border:none;padding:10px 18px;cursor:pointer;touch-action:manipulation;' +
         'max-width:calc(50vw - 28px);line-height:1.1;white-space:normal;'
 
+      this.overlayTopBox.style.cssText =
+        'position:absolute;top:0;left:0;right:0;' +
+        'background:linear-gradient(to bottom,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+        'padding:env(safe-area-inset-top,12px) 20px 20px;display:none;pointer-events:none;text-align:center;'
+
       this.overlayBox.style.cssText =
         'position:absolute;left:16px;right:16px;bottom:calc(48px + env(safe-area-inset-bottom, 0px));' +
         'display:none;pointer-events:auto;background:transparent;padding:0;'
 
       this.overlayText.style.cssText =
-        'color:#eefcff;font-size:18px;line-height:1.5;margin-bottom:14px;max-width:none;text-shadow:0 0 16px rgba(0,0,0,0.92);'
+        'color:#eefcff;font-size:18px;line-height:1.5;max-width:none;text-shadow:0 0 16px rgba(0,0,0,0.92);margin:0 auto;'
 
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
     } else {
@@ -784,13 +887,18 @@ export class DialogueManager {
         `color:${promptColor};font-size:18px;letter-spacing:2px;white-space:nowrap;display:none;pointer-events:none;` +
         'text-align:right;text-shadow:0 2px 18px rgba(0,0,0,0.95);background:transparent;border:none;padding:0;'
 
+      this.overlayTopBox.style.cssText =
+        'position:absolute;top:0;left:0;right:0;' +
+        'background:linear-gradient(to bottom,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
+        'padding:28px 32px 24px;display:none;pointer-events:none;text-align:center;'
+
       this.overlayBox.style.cssText =
         'position:absolute;bottom:0;left:0;right:0;' +
         'background:linear-gradient(to top,rgba(0,0,0,0.82),rgba(0,0,0,0.45) 90%,transparent);' +
         'padding:24px 32px 32px;display:none;pointer-events:auto;'
 
       this.overlayText.style.cssText =
-        'color:#eee;font-size:18px;line-height:1.5;margin-bottom:16px;max-width:700px;'
+        'color:#eee;font-size:18px;line-height:1.5;max-width:700px;margin:0 auto;'
 
       this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
     }
@@ -854,9 +962,49 @@ export class DialogueManager {
     if (!this.overlayRoot) return
     this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
+    if (this.overlayTopBox) this.overlayTopBox.style.display = 'block'
     if (this.overlayBox) this.overlayBox.style.display = 'block'
-    if (this.overlaySpeaker) this.overlaySpeaker.textContent = speaker
+    if (this.overlaySpeaker) {
+      if (this.clusterNpcIds.length > 1) {
+        const navHint = this.inputMode === 'touch' ? '' : this.inputMode === 'gamepad' ? ' (◀ D-Pad ▶)' : ' (◀ A/D ▶)'
+        this.overlaySpeaker.textContent = `◀ ${speaker} ▶  [${this.selectedClusterIndex + 1}/${this.clusterNpcIds.length}]${navHint}`
+      } else {
+        this.overlaySpeaker.textContent = speaker
+      }
+    }
     if (this.overlayText) this.overlayText.textContent = text
+
+    // Mobile cluster NPC navigation buttons
+    if (this.overlayTopBox) {
+      let clusterNav = document.getElementById('dialogue-cluster-nav') as HTMLDivElement | null
+      if (this.clusterNpcIds.length > 1 && this.inputMode === 'touch') {
+        if (!clusterNav) {
+          clusterNav = document.createElement('div')
+          clusterNav.id = 'dialogue-cluster-nav'
+          clusterNav.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;margin-top:10px;pointer-events:auto;'
+          this.overlayTopBox.appendChild(clusterNav)
+        }
+        clusterNav.innerHTML = ''
+        const makeTouchBtn = (label: string, handler: () => void) => {
+          const btn = document.createElement('button')
+          btn.type = 'button'
+          btn.textContent = label
+          btn.style.cssText = 'color:#ffd866;background:rgba(0,0,0,0.4);border:1px solid #ffd866;border-radius:6px;padding:10px 18px;font-size:20px;min-width:48px;min-height:44px;pointer-events:auto;touch-action:manipulation;cursor:pointer;'
+          btn.addEventListener('touchend', (ev) => { ev.preventDefault(); ev.stopPropagation(); handler() }, { passive: false })
+          return btn
+        }
+        clusterNav.appendChild(makeTouchBtn('◀', () => this.handleClusterNavigate(-1, 'touch')))
+        const label = document.createElement('span')
+        label.textContent = `${speaker}  [${this.selectedClusterIndex + 1}/${this.clusterNpcIds.length}]`
+        label.style.cssText = 'color:#ffd866;font-size:14px;letter-spacing:1px;'
+        clusterNav.appendChild(label)
+        clusterNav.appendChild(makeTouchBtn('▶', () => this.handleClusterNavigate(1, 'touch')))
+        clusterNav.style.display = 'flex'
+      } else if (clusterNav) {
+        clusterNav.remove()
+      }
+    }
+
     if (this.overlayChoices) {
       this.overlayChoices.innerHTML = ''
       for (const c of choices) {
@@ -865,13 +1013,15 @@ export class DialogueManager {
         const btn = document.createElement('div')
         btn.textContent = `${isHighlighted ? '▶ ' : ''}${c.index + 1}. ${c.text}`
         btn.style.cssText =
-          `color:${choiceColor};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 4px' : '4px 0'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;`
+          `color:${choiceColor};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 18px' : '6px 14px'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s,border-color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;border:1px solid ${choiceColor};border-radius:4px;background:transparent;box-sizing:border-box;`
         btn.addEventListener('mouseenter', () => {
           this.highlightedChoiceIndex = c.index
           this.updateChoiceHighlight()
         })
         btn.addEventListener('mouseleave', () => {
-          btn.style.color = this.getChoiceColor(c.tag, c.index === this.highlightedChoiceIndex)
+          const c2 = this.getChoiceColor(c.tag, c.index === this.highlightedChoiceIndex)
+          btn.style.color = c2
+          btn.style.borderColor = c2
         })
         btn.addEventListener('pointerdown', (event) => {
           if (this.inputMode === 'touch' || (event as PointerEvent).pointerType === 'touch') {
@@ -917,6 +1067,7 @@ export class DialogueManager {
   }
 
   private hideDialogueOverlay(): void {
+    if (this.overlayTopBox) this.overlayTopBox.style.display = 'none'
     if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
   }

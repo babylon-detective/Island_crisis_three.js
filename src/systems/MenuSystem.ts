@@ -63,7 +63,6 @@ export class MenuSystem {
 
   // Dedicated menu lighting (soft showcase)
   private menuAmbient: THREE.AmbientLight | null = null
-  private menuLight: THREE.PointLight | null = null
 
   // DOM
   private panelRoot: HTMLDivElement | null = null
@@ -80,8 +79,11 @@ export class MenuSystem {
   private touchStartX = 0
 
   // Playtime tracking
-  private sessionStartMs: number = 0
-  private timerInterval: ReturnType<typeof setInterval> | null = null
+  /** Accumulated game-time in milliseconds. Updated via update(deltaTime), so it
+   *  automatically freezes when the game loop's pause guard skips update calls. */
+  private gameTimeMs: number = 0
+  /** Throttle: last value of gameTimeMs (in whole seconds) that was written to the DOM. */
+  private lastDisplayedSec: number = -1
   private timerEl: HTMLDivElement | null = null
 
   // Stats applied at open time (can be updated between opens)
@@ -151,21 +153,14 @@ export class MenuSystem {
     this.savedBackground = this.scene.background as THREE.Color | THREE.Texture | null
     this.scene.background = new THREE.Color(0x000000)
 
-    // -- Soft showcase lighting for the isolated player avatar --
-    this.menuAmbient = new THREE.AmbientLight(0x404060, 0.7)
+    // -- Soft ambient lighting for the isolated player avatar --
+    // No scene PointLight — the character shader has its own lighting uniforms.
+    // A bright PointLight here causes harsh white projection on standard-material parts.
+    this.menuAmbient = new THREE.AmbientLight(0x9090b0, 0.5)
     this.scene.add(this.menuAmbient)
 
-    // Point light placed behind the camera (in front of the avatar)
-    const playerForward = new THREE.Vector3(Math.sin(playerYaw), 0, Math.cos(playerYaw))
-    const lightPos = playerPos.clone()
-      .addScaledVector(playerForward, 3.5)
-      .add(new THREE.Vector3(0, 3.5, 0))
-    this.menuLight = new THREE.PointLight(0xd4c8ff, 3.0, 18)
-    this.menuLight.position.copy(lightPos)
-    this.scene.add(this.menuLight)
-
     // -- Record session start on first open --
-    if (this.sessionStartMs === 0) this.sessionStartMs = performance.now()
+    // (no-op now — time is accumulated via update(deltaTime) instead)
 
     // -- Position the dedicated menu camera --
     this.cameraManager.enterMenuMode(playerPos, playerYaw)
@@ -198,12 +193,6 @@ export class MenuSystem {
       this.menuAmbient.dispose()
       this.menuAmbient = null
     }
-    if (this.menuLight) {
-      this.scene.remove(this.menuLight)
-      this.menuLight.dispose()
-      this.menuLight = null
-    }
-
     // -- Return to gameplay camera --
     this.cameraManager.exitMenuMode()
 
@@ -224,11 +213,20 @@ export class MenuSystem {
 
   /**
    * Called every frame by the game loop.
-   * The gameplay clock (shader time uniforms) continues unaffected because
-   * they are driven by raw `performance.now()` in main.ts — not by this update.
+   * deltaTime is 0 when the game is paused (the loop returns early before
+   * calling update), so the playtime clock automatically freezes on pause.
    */
-  public update(_deltaTime: number): void {
-    // Reserved for future per-frame animations (stat bars, idle lighting pulses, etc.)
+  public update(deltaTime: number): void {
+    this.gameTimeMs += deltaTime * 1000
+
+    // Update the DOM timer at most once per second to keep things cheap.
+    if (this.timerEl) {
+      const currentSec = Math.floor(this.gameTimeMs / 1000)
+      if (currentSec !== this.lastDisplayedSec) {
+        this.lastDisplayedSec = currentSec
+        this.timerEl.textContent = this.formatPlaytime()
+      }
+    }
   }
 
   public dispose(): void {
@@ -314,9 +312,10 @@ export class MenuSystem {
       const btn = document.createElement('button')
       btn.textContent = label
       btn.style.cssText =
-        'background:none;border:none;color:#ffd866;font-size:20px;cursor:pointer;' +
-        'font-family:"Courier New",monospace;padding:4px 16px;' +
-        'touch-action:manipulation;-webkit-tap-highlight-color:transparent;'
+        'background:none;border:none;color:#ffd866;font-size:24px;cursor:pointer;' +
+        'font-family:"Courier New",monospace;padding:10px 24px;' +
+        'touch-action:manipulation;-webkit-tap-highlight-color:transparent;' +
+        'min-width:56px;min-height:44px;display:flex;align-items:center;justify-content:center;'
       btn.addEventListener('pointerdown', (e) => {
         e.stopPropagation()
         this.navigateCard(delta)
@@ -368,10 +367,7 @@ export class MenuSystem {
       'padding:4px 0 20px;font-variant-numeric:tabular-nums;'
     this.timerEl.textContent = this.formatPlaytime()
     cardPanel.appendChild(this.timerEl)
-
-    this.timerInterval = setInterval(() => {
-      if (this.timerEl) this.timerEl.textContent = this.formatPlaytime()
-    }, 1000)
+    // Timer is updated each frame via update(deltaTime) — no setInterval needed.
 
     root.appendChild(cardPanel)
 
@@ -386,8 +382,8 @@ export class MenuSystem {
 
     // ── Keyboard left/right (active only while menu is open) ────────────────
     this.boundMenuKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft')  { e.preventDefault(); this.navigateCard(-1) }
-      if (e.key === 'ArrowRight') { e.preventDefault(); this.navigateCard(+1) }
+      if (e.key === 'ArrowLeft'  || e.key === 'a' || e.key === 'A') { e.preventDefault(); this.navigateCard(-1) }
+      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { e.preventDefault(); this.navigateCard(+1) }
     }
     document.addEventListener('keydown', this.boundMenuKeyDown)
 
@@ -405,10 +401,6 @@ export class MenuSystem {
     if (this.boundMenuKeyDown) {
       document.removeEventListener('keydown', this.boundMenuKeyDown)
       this.boundMenuKeyDown = null
-    }
-    if (this.timerInterval !== null) {
-      clearInterval(this.timerInterval)
-      this.timerInterval = null
     }
     this.timerEl = null
     if (!this.panelRoot) return
@@ -483,7 +475,7 @@ export class MenuSystem {
   }
 
   private formatPlaytime(): string {
-    const totalSec = Math.floor((performance.now() - this.sessionStartMs) / 1000)
+    const totalSec = Math.floor(this.gameTimeMs / 1000)
     const h = Math.floor(totalSec / 3600)
     const m = Math.floor((totalSec % 3600) / 60)
     const s = totalSec % 60

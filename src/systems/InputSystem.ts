@@ -56,6 +56,7 @@ export interface GamepadPlayerInput {
   actionPressed: boolean
   itemPressed: boolean
   navigateY: number
+  navigateX: number
 }
 
 // Discriminated union for different input events
@@ -344,8 +345,9 @@ class GamepadInputHandler extends BaseInputHandler {
     const select = this.wasButtonPressed('select', gamepad) // Select/Back button for view cycle
     const menu = this.wasButtonPressed('start', gamepad) // Start button for menu/pause
     const navigateY = this.getDiscreteNavigateY(gamepad)
+    const navigateX = this.getDiscreteNavigateX(gamepad)
 
-    if (confirmPressed || actionPressed || itemPressed || cancel || cameraMode || select || menu || navigateY !== 0) {
+    if (confirmPressed || actionPressed || itemPressed || cancel || cameraMode || select || menu || navigateY !== 0 || navigateX !== 0) {
       const commands: string[] = []
       if (confirmPressed) commands.push('confirm')
       if (actionPressed) commands.push('action')
@@ -356,6 +358,8 @@ class GamepadInputHandler extends BaseInputHandler {
       if (menu) commands.push('menu')
       if (navigateY > 0) commands.push('navigate-up')
       if (navigateY < 0) commands.push('navigate-down')
+      if (navigateX > 0) commands.push('navigate-right')
+      if (navigateX < 0) commands.push('navigate-left')
 
       traceInputCommand({
         source: 'gamepad',
@@ -381,7 +385,8 @@ class GamepadInputHandler extends BaseInputHandler {
         confirmPressed,
         actionPressed,
         itemPressed,
-        navigateY
+        navigateY,
+        navigateX
       })
     }
 
@@ -407,6 +412,19 @@ class GamepadInputHandler extends BaseInputHandler {
 
     if (currentY > 0.6 && previousY <= 0.6) return 1
     if (currentY < -0.6 && previousY >= -0.6) return -1
+
+    return 0
+  }
+
+  private getDiscreteNavigateX(currentState: GamepadState): number {
+    if (this.wasButtonPressed('dpadRight', currentState)) return 1
+    if (this.wasButtonPressed('dpadLeft', currentState)) return -1
+
+    const previousX = this.previousState?.axes.leftStickX ?? 0
+    const currentX = currentState.axes.leftStickX
+
+    if (currentX > 0.6 && previousX <= 0.6) return 1
+    if (currentX < -0.6 && previousX >= -0.6) return -1
 
     return 0
   }
