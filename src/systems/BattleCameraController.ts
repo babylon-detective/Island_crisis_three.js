@@ -130,6 +130,18 @@ export class BattleCameraController {
   private shotStartPos: THREE.Vector3 = new THREE.Vector3()
   private shotStartLookAt: THREE.Vector3 = new THREE.Vector3()
 
+  // Standalone tween state (used by BattleAnimSync's cameraTween)
+  private tweenState: {
+    startPos: THREE.Vector3
+    startLookAt: THREE.Vector3
+    targetPos: THREE.Vector3
+    targetLookAt: THREE.Vector3
+    startFov: number
+    targetFov: number
+    duration: number
+    elapsed: number
+  } | null = null
+
   // Opening cinematic state
   private openingActive: boolean = false
   private openingElapsed: number = 0
@@ -224,6 +236,24 @@ export class BattleCameraController {
     this.currentShot = null
   }
 
+  /**
+   * Smooth camera tween to a shot type over `duration` seconds.
+   * Cancels any in-progress tween.
+   */
+  tweenTo(type: BattleShotType, duration: number): void {
+    const { pos, lookAt } = this.computeShotPosAndLookAt(type)
+    this.tweenState = {
+      startPos: this.camera.position.clone(),
+      startLookAt: this.currentLookAt.clone(),
+      targetPos: pos,
+      targetLookAt: lookAt,
+      startFov: this.camera.fov,
+      targetFov: SHOT_PARAMS[type].fov,
+      duration: Math.max(duration, 0.01),
+      elapsed: 0,
+    }
+  }
+
   /** Immediately hard-cut to a shot type (no interpolation). */
   cutTo(type: BattleShotType, fovOverride?: number): void {
     const { pos, lookAt } = this.computeShotPosAndLookAt(type)
@@ -237,6 +267,7 @@ export class BattleCameraController {
     this.currentPos.copy(pos)
     this.currentLookAt.copy(lookAt)
     this.currentShot = null
+    this.tweenState = null  // hard cut cancels any active tween
   }
 
   /**
@@ -279,6 +310,24 @@ export class BattleCameraController {
     // Opening cinematic has priority
     if (this.openingActive) {
       this.updateOpening(deltaTime)
+      return
+    }
+
+    // Standalone tween (driven by BattleAnimSync)
+    if (this.tweenState) {
+      this.tweenState.elapsed += deltaTime
+      const t = Math.min(this.tweenState.elapsed / this.tweenState.duration, 1)
+      const eased = easeOutCubic(t)
+      this.currentPos.lerpVectors(this.tweenState.startPos, this.tweenState.targetPos, eased)
+      this.currentLookAt.lerpVectors(this.tweenState.startLookAt, this.tweenState.targetLookAt, eased)
+      this.camera.position.copy(this.currentPos)
+      this.camera.lookAt(this.currentLookAt)
+      const fov = THREE.MathUtils.lerp(this.tweenState.startFov, this.tweenState.targetFov, eased)
+      if (Math.abs(this.camera.fov - fov) > 0.01) {
+        this.camera.fov = fov
+        this.camera.updateProjectionMatrix()
+      }
+      if (t >= 1) this.tweenState = null
       return
     }
 

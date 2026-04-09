@@ -858,59 +858,218 @@ export class ObjectLoader {
     }
   }
 
-  // Load model objects
+  // Load model objects (background props — level terrain handled by loadLevelModel)
   private static async loadModelObjects(): Promise<void> {
-    const useShader = this.landUniforms !== null
-    const sharedShaderUniforms = this.landUniforms || undefined
-    const modelConfigs: ModelLoadConfig[] = [
-      {
-        id: 'grid-01',
-        modelPath: '/models/environments/grid_01.glb',
-        position: [0, 0, 0],
-        rotation: [0, 0, 0],
-        scale: [1, 1, 1],
-        useCustomShader: useShader,
-        shaderUniforms: sharedShaderUniforms,
-        collisionMode: 'none',
-        onLoaded: (gridModel) => {
-          const boundingBox = new THREE.Box3().setFromObject(gridModel)
-          const size = new THREE.Vector3()
-          boundingBox.getSize(size)
+    // grid-01 and landscape-island replaced by level_01.glb (loaded via loadLevelModel)
+    console.log('✅ Background model objects loaded (level terrain loaded separately)')
+  }
 
-          gridModel.position.set(size.x, 0, size.z)
-          console.log(`📐 Grid positioned at (${size.x.toFixed(2)}, 0, ${size.z.toFixed(2)}) based on dimensions (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
-          console.log(`🎨 Grid using ${useShader ? 'custom shader with land lighting' : 'standard material'}`)
-        }
-      },
-      {
-        id: 'landscape-island',
-        modelPath: '/models/environments/landscape_island.glb',
-        position: [0, 0, 0],
-        rotation: [0, 0, 0],
-        scale: [1, 1, 1],
-        useCustomShader: useShader,
-        shaderUniforms: sharedShaderUniforms,
-        collisionMode: 'none',
-        onLoaded: (islandModel) => {
-          const bbox = new THREE.Box3().setFromObject(islandModel)
-          const size = new THREE.Vector3()
-          bbox.getSize(size)
-          const xPos = 50 + size.x / 2
-          islandModel.position.set(xPos, 0, 0)
-          console.log(`🏝️ Landscape island positioned at (${xPos.toFixed(2)}, 0, 0) — size (${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)})`)
+  /**
+   * Load level_01.glb as the main terrain/environment model.
+   *
+   * • Meshes whose name starts with "COL" or "collision" (case-insensitive)
+   *   are hidden and baked into a HeightmapCollider for O(1) ground queries.
+   * • Materials named "land" get the full land ShaderMaterial (earth texture).
+   * • Materials named "concrete" get a default-light ShaderMaterial.
+   * • Other materials are kept as-is (MeshStandardMaterial).
+   *
+   * Returns { collisionMeshes, visibleMeshes } so the caller can register
+   * them with cameraManager for clipping prevention.
+   */
+  public static async loadLevelModel(): Promise<{
+    collisionMeshes: THREE.Mesh[]
+    visibleMeshes: THREE.Mesh[]
+  }> {
+    const collisionMeshes: THREE.Mesh[] = []
+    const visibleMeshes: THREE.Mesh[] = []
+
+    const model = await this.loadGLTFModel(
+      '/models/environments/level_01.glb',
+      'level-01',
+      [0, 0, 0],
+      [0, 0, 0],
+      [1, 1, 1],
+      false // don't use the default character shader
+    )
+
+    // ── Build shader materials lazily (once per type) ────────────────────────
+    let landMaterial: THREE.ShaderMaterial | null = null
+    let concreteMaterial: THREE.ShaderMaterial | null = null
+
+    const getLandMaterial = async (): Promise<THREE.ShaderMaterial> => {
+      if (landMaterial) return landMaterial
+
+      const shaders = await ShaderLoader.loadShaderPair({
+        vertexPath: 'src/shaders/land-vertex.glsl',
+        fragmentPath: 'src/shaders/land-fragment.glsl',
+      })
+
+      const u = this.landUniforms || {}
+      landMaterial = new THREE.ShaderMaterial({
+        vertexShader: shaders.vertex,
+        fragmentShader: shaders.fragment,
+        uniforms: {
+          ...THREE.UniformsLib.lights,
+          uTime:              u.uTime              ?? { value: 0 },
+          uElevation:         u.uElevation         ?? { value: 8.0 },
+          uRoughness:         u.uRoughness         ?? { value: 1.2 },
+          uScale:             u.uScale             ?? { value: 0.8 },
+          uLandColor:         u.uLandColor         ?? { value: new THREE.Color(0x4a7c59) },
+          uRockColor:         u.uRockColor         ?? { value: new THREE.Color(0x8b7355) },
+          uSandColor:         u.uSandColor         ?? { value: new THREE.Color(0xc2b280) },
+          uMoisture:          u.uMoisture          ?? { value: 0.3 },
+          uIslandRadius:      u.uIslandRadius      ?? { value: 35.0 },
+          uCoastSmoothness:   u.uCoastSmoothness   ?? { value: 8.0 },
+          uSeaLevel:          u.uSeaLevel          ?? { value: -4.0 },
+          // Lighting — shared references
+          uSunDirection:       u.uSunDirection       ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
+          uSunColor:           u.uSunColor           ?? { value: new THREE.Color(1, 1, 0.9) },
+          uSunIntensity:       u.uSunIntensity       ?? { value: 1.0 },
+          uSpotlightPosition:  u.uSpotlightPosition  ?? { value: new THREE.Vector3(0, 30, 0) },
+          uSpotlightDirection: u.uSpotlightDirection ?? { value: new THREE.Vector3(0, -1, 0) },
+          uSpotlightColor:     u.uSpotlightColor     ?? { value: new THREE.Color(1, 1, 1) },
+          uSpotlightIntensity: u.uSpotlightIntensity ?? { value: 0.0 },
+          uSpotlightAngle:     u.uSpotlightAngle     ?? { value: Math.PI / 8 },
+          uSpotlightPenumbra:  u.uSpotlightPenumbra  ?? { value: 0.3 },
+          uSpotlightDistance:  u.uSpotlightDistance  ?? { value: 80 },
+        },
+        lights: true,
+        side: THREE.FrontSide,
+      })
+      return landMaterial
+    }
+
+    const getConcreteMaterial = async (): Promise<THREE.ShaderMaterial> => {
+      if (concreteMaterial) return concreteMaterial
+
+      const shaders = await ShaderLoader.loadShaderPair({
+        vertexPath: 'src/shaders/default-light-vertex.glsl',
+        fragmentPath: 'src/shaders/default-light-fragment.glsl',
+      })
+
+      const u = this.landUniforms || {}
+      concreteMaterial = new THREE.ShaderMaterial({
+        vertexShader: shaders.vertex,
+        fragmentShader: shaders.fragment,
+        uniforms: {
+          ...THREE.UniformsLib.lights,
+          uModelColor:         { value: new THREE.Color(0x9a9590) },
+          // Lighting — shared references
+          uSunDirection:       u.uSunDirection       ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
+          uSunColor:           u.uSunColor           ?? { value: new THREE.Color(1, 1, 0.9) },
+          uSunIntensity:       u.uSunIntensity       ?? { value: 1.0 },
+          uSpotlightPosition:  u.uSpotlightPosition  ?? { value: new THREE.Vector3(0, 30, 0) },
+          uSpotlightDirection: u.uSpotlightDirection ?? { value: new THREE.Vector3(0, -1, 0) },
+          uSpotlightColor:     u.uSpotlightColor     ?? { value: new THREE.Color(1, 1, 1) },
+          uSpotlightIntensity: u.uSpotlightIntensity ?? { value: 0.0 },
+          uSpotlightAngle:     u.uSpotlightAngle     ?? { value: Math.PI / 8 },
+          uSpotlightPenumbra:  u.uSpotlightPenumbra  ?? { value: 0.3 },
+          uSpotlightDistance:  u.uSpotlightDistance  ?? { value: 80 },
+        },
+        lights: true,
+        side: THREE.FrontSide,
+      })
+      return concreteMaterial
+    }
+
+    // ── Classify meshes ──────────────────────────────────────────────────────
+    const meshChildren: THREE.Mesh[] = []
+    model.traverse((child) => {
+      if (child instanceof THREE.Mesh) meshChildren.push(child)
+    })
+
+    for (const mesh of meshChildren) {
+      const name = mesh.name.toLowerCase()
+
+      // ── Collision-only meshes ────────────────────────────────────────────
+      if (name.startsWith('col') || name.startsWith('collision')) {
+        mesh.visible = false
+        mesh.userData = { ...mesh.userData, type: 'land', landType: 'box', id: mesh.name }
+        collisionMeshes.push(mesh)
+        continue
+      }
+
+      // ── Material replacement ─────────────────────────────────────────────
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      const replacedMats: THREE.Material[] = []
+
+      for (const mat of materials) {
+        const matName = mat.name.toLowerCase()
+
+        if (matName === 'land') {
+          replacedMats.push(await getLandMaterial())
+        } else if (matName === 'concrete') {
+          replacedMats.push(await getConcreteMaterial())
+        } else {
+          // Keep original material as MeshStandardMaterial
+          if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
+            replacedMats.push(mat)
+          } else {
+            replacedMats.push(new THREE.MeshStandardMaterial({
+              color: 0x808080,
+              metalness: 0.1,
+              roughness: 0.8,
+            }))
+          }
         }
       }
-    ]
 
-    await Promise.all(modelConfigs.map(async (config) => {
-      try {
-        await this.loadModelSceneObject(config)
-      } catch (error) {
-        console.warn(`⚠️ Failed to load model object ${config.id}:`, error)
+      mesh.material = replacedMats.length === 1 ? replacedMats[0] : replacedMats
+      mesh.castShadow = true
+      mesh.receiveShadow = true
+      visibleMeshes.push(mesh)
+    }
+
+    // ── Bake collision meshes into a heightmap for O(1) ground queries ───────
+    if (collisionMeshes.length > 0 && this.collisionSystem) {
+      // Count triangles for logging
+      let totalTris = 0
+      for (const cm of collisionMeshes) {
+        cm.updateMatrixWorld(true)
+        const geo = cm.geometry
+        if (geo.index) {
+          totalTris += geo.index.count / 3
+        } else {
+          const pos = geo.getAttribute('position')
+          if (pos) totalTris += pos.count / 3
+        }
       }
-    }))
+      console.log(`🗺️ Baking heightmap from ${collisionMeshes.length} collision meshes (${totalTris} triangles)…`)
 
-    console.log('✅ Background model objects loaded')
+      // Temporarily make collision meshes visible so the raycaster can hit them
+      for (const cm of collisionMeshes) cm.visible = true
+
+      // Create a temporary group containing only the collision meshes so
+      // HeightmapCollider doesn't raycast decorative geometry.
+      const collisionGroup = new THREE.Group()
+      collisionGroup.name = 'level-01-collision-bake'
+      const originalParents = collisionMeshes.map(cm => cm.parent)
+      for (const cm of collisionMeshes) collisionGroup.add(cm)
+      this.scene.add(collisionGroup)
+      collisionGroup.updateMatrixWorld(true)
+
+      // Resolution 32 → 32×32 = 1 024 raycasts (sufficient for player movement).
+      // Higher values multiply bake time by the square — keep this low.
+      const heightmap = await HeightmapCollider.fromObject(collisionGroup, 32, 'level-01')
+      this.collisionSystem.registerHeightmap(heightmap)
+
+      // Restore meshes back to their original parent (the GLB model)
+      for (let i = 0; i < collisionMeshes.length; i++) {
+        const parent = originalParents[i]
+        if (parent) parent.add(collisionMeshes[i])
+      }
+      this.scene.remove(collisionGroup)
+
+      // Hide collision meshes again
+      for (const cm of collisionMeshes) cm.visible = false
+    }
+
+    const bbox = new THREE.Box3().setFromObject(model)
+    const size = new THREE.Vector3()
+    bbox.getSize(size)
+    console.log(`🏗️ level_01.glb loaded — ${meshChildren.length} meshes, ${collisionMeshes.length} collision-only, size (${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)})`)
+
+    return { collisionMeshes, visibleMeshes }
   }
 
   // Get default scene configuration

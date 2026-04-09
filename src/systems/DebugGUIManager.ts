@@ -2,6 +2,7 @@ import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js'
 import * as THREE from 'three'
 import { logger, LogModule } from './Logger'
 import { SHOT_PARAMS, type BattleShotType } from './BattleCameraController'
+import type { BattleAnimSync } from './BattleAnimSync'
 
 export interface SystemReferences {
   scene: THREE.Scene
@@ -9,6 +10,7 @@ export interface SystemReferences {
   renderer: THREE.WebGLRenderer
   cameraManager?: any
   playerController?: any
+  battleAnimSync?: BattleAnimSync
   sky?: any
   skyConfig?: any
 }
@@ -379,7 +381,9 @@ export class DebugGUIManager {
 
     const folder = this.gui!.addFolder('\u2694\ufe0f Battle Camera')
 
-    // Canonical shot names only (legacy aliases follow the same objects)
+    // ── Shot parameters (existing) ─────────────────────────────────────
+    const shotsFolder = folder.addFolder('Shot Params')
+
     const shots: BattleShotType[] = [
       'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
       'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
@@ -387,7 +391,7 @@ export class DebugGUIManager {
 
     for (const type of shots) {
       const params = SHOT_PARAMS[type]
-      const sub = folder.addFolder(type)
+      const sub = shotsFolder.addFolder(type)
 
       sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
       sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
@@ -410,10 +414,77 @@ export class DebugGUIManager {
       sub.close()
     }
 
-    const globalActions = {
-      printConfig: () => battleCtrl.printConfig(),
+    shotsFolder.close()
+
+    // ── Animation sync points ──────────────────────────────────────────
+    const animSync = this.systems.battleAnimSync
+    if (animSync) {
+      const syncFolder = folder.addFolder('Anim Sync Points')
+
+      const clips = animSync.getRegisteredClips()
+      for (const clipName of clips) {
+        const clipFolder = syncFolder.addFolder(clipName)
+        const points = animSync.getSyncPoints(clipName)
+
+        for (const point of points) {
+          clipFolder
+            .add(point, 'fraction', 0, 1, 0.01)
+            .name(point.label)
+            .onChange(() => animSync.resortSyncPoints(clipName))
+        }
+        clipFolder.close()
+      }
+
+      syncFolder.close()
     }
-    folder.add(globalActions, 'printConfig').name('\ud83d\udccb Print config to console')
+
+    // ── Live status monitor ────────────────────────────────────────────
+    if (animSync) {
+      const statusFolder = folder.addFolder('Live Status')
+      const statusProxy = {
+        clip: '—',
+        character: '—',
+        mode: '—',
+        fraction: 0,
+        nextEvent: '—',
+        queue: 0,
+      }
+      const clipCtrl   = statusFolder.add(statusProxy, 'clip').name('clip').listen().disable()
+      const charCtrl   = statusFolder.add(statusProxy, 'character').name('character').listen().disable()
+      const modeCtrl   = statusFolder.add(statusProxy, 'mode').name('mode').listen().disable()
+      const fracCtrl   = statusFolder.add(statusProxy, 'fraction', 0, 1).name('progress').listen().disable()
+      const nextCtrl   = statusFolder.add(statusProxy, 'nextEvent').name('next event').listen().disable()
+      const queueCtrl  = statusFolder.add(statusProxy, 'queue', 0, 10, 1).name('queue').listen().disable()
+
+      // Poll at 10 Hz
+      setInterval(() => {
+        const s = animSync.getActiveStatus()
+        statusProxy.clip      = s.clipName ?? '—'
+        statusProxy.character = s.characterId ?? '—'
+        statusProxy.mode      = s.mode ?? '—'
+        statusProxy.fraction  = s.fraction
+        statusProxy.nextEvent = s.nextEvent ?? '—'
+        statusProxy.queue     = s.queueLength
+      }, 100)
+
+      statusFolder.open()
+    }
+
+    // ── Global actions ─────────────────────────────────────────────────
+    const globalActions: Record<string, () => void> = {
+      printShotConfig: () => battleCtrl.printConfig(),
+    }
+    folder.add(globalActions, 'printShotConfig').name('\ud83d\udccb Print shot config')
+
+    if (animSync) {
+      const syncActions: Record<string, () => void> = {
+        printSyncPoints: () => animSync.printSyncPoints(),
+        printAll: () => { battleCtrl.printConfig(); animSync.printSyncPoints() },
+      }
+      folder.add(syncActions, 'printSyncPoints').name('\ud83c\udfac Print sync points')
+      folder.add(syncActions, 'printAll').name('\ud83d\udcbe Print all (shots + sync)')
+    }
+
     folder.close()
   }
 

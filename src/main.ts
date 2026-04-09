@@ -33,6 +33,7 @@ import { NPCSystem } from './systems/NPCSystem'
 import { NPCAISystem } from './systems/NPCAISystem'
 import { DialogueManager } from './systems/DialogueSystem'
 import { BattleSystem } from './systems/BattleSystem'
+import { BattleAnimSync, registerDefaultSyncPoints } from './systems/BattleAnimSync'
 import { MenuSystem } from './systems/MenuSystem'
 import { ItemSystem } from './systems/ItemSystem'
 import { InventoryDisplay } from './systems/InventoryDisplay'
@@ -907,6 +908,7 @@ class IntegratedThreeJSApp {
   private npcAISystem: NPCAISystem | null = null
   private dialogueManager: DialogueManager | null = null
   private battleSystem: BattleSystem | null = null
+  private battleAnimSync: BattleAnimSync | null = null
   private menuSystem: MenuSystem | null = null
   private itemSystem: ItemSystem = new ItemSystem()
   private inventoryDisplay: InventoryDisplay | null = null
@@ -1287,6 +1289,12 @@ class IntegratedThreeJSApp {
       this.battleSystem.setInputMode(this.activeInputMode)
       this.battleSystem.setPauseCallback(() => this.togglePause())
       this.battleSystem.enable()
+
+      // Animation-synced battle camera sequencer
+      this.battleAnimSync = new BattleAnimSync(this.characterAnimationSystem)
+      this.battleAnimSync.setBattleCameraController(this.cameraManager.getBattleCameraController())
+      registerDefaultSyncPoints(this.battleAnimSync)
+      this.battleSystem.setAnimSync(this.battleAnimSync)
 
       // Menu Event system — always constructed alongside NPC systems
       this.menuSystem = new MenuSystem(this.scene, this.cameraManager, this.playerController)
@@ -2156,6 +2164,9 @@ class IntegratedThreeJSApp {
     this.container.appendChild(gui.domElement)
     this.debugState.battleCameraGui = gui
 
+    // ── Shot Parameters ──────────────────────────────────────────────────
+    const shotsFolder = gui.addFolder('Shot Params')
+
     const shots: BattleShotType[] = [
       'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
       'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
@@ -2163,11 +2174,13 @@ class IntegratedThreeJSApp {
 
     for (const type of shots) {
       const params = SHOT_PARAMS[type]
-      const sub = gui.addFolder(type)
+      const sub = shotsFolder.addFolder(type)
 
       sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
       sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
       sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
+      sub.add(params, 'lookFwdOffset',    -6,   6,  0.05).name('look fwd offset')
+      sub.add(params, 'lookSideOffset',   -6,   6,  0.05).name('look side offset')
       sub.add(params, 'lookHeightOffset',   0,  4, 0.05).name('look height')
       sub.add(params, 'fov',               20, 90,   1).name('FOV')
 
@@ -2183,11 +2196,75 @@ class IntegratedThreeJSApp {
       sub.add(actions, 'preview').name('▶ Preview shot')
       sub.close()
     }
+    shotsFolder.close()
 
-    const globalActions = {
-      printConfig: () => battleCtrl.printConfig(),
+    // ── Animation Sync Points ────────────────────────────────────────────
+    const animSync = this.battleAnimSync
+    if (animSync) {
+      const syncFolder = gui.addFolder('Anim Sync Points')
+
+      const clips = animSync.getRegisteredClips()
+      for (const clipName of clips) {
+        const clipFolder = syncFolder.addFolder(clipName)
+        const points = animSync.getSyncPoints(clipName)
+
+        for (const point of points) {
+          clipFolder
+            .add(point, 'fraction', 0, 1, 0.01)
+            .name(point.label)
+            .onChange(() => animSync.resortSyncPoints(clipName))
+        }
+        clipFolder.close()
+      }
+      syncFolder.close()
+
+      // ── Live Status Monitor ────────────────────────────────────────────
+      const statusFolder = gui.addFolder('Live Status')
+      const statusProxy = {
+        clip: '—',
+        character: '—',
+        mode: '—',
+        fraction: 0,
+        nextEvent: '—',
+        queue: 0,
+      }
+      statusFolder.add(statusProxy, 'clip').name('clip').listen().disable()
+      statusFolder.add(statusProxy, 'character').name('character').listen().disable()
+      statusFolder.add(statusProxy, 'mode').name('mode').listen().disable()
+      statusFolder.add(statusProxy, 'fraction', 0, 1).name('progress').listen().disable()
+      statusFolder.add(statusProxy, 'nextEvent').name('next event').listen().disable()
+      statusFolder.add(statusProxy, 'queue', 0, 10, 1).name('queue').listen().disable()
+
+      // Poll at 10 Hz
+      const statusInterval = setInterval(() => {
+        if (!this.debugState.battleCameraGui) { clearInterval(statusInterval); return }
+        const s = animSync.getActiveStatus()
+        statusProxy.clip      = s.clipName ?? '—'
+        statusProxy.character = s.characterId ?? '—'
+        statusProxy.mode      = s.mode ?? '—'
+        statusProxy.fraction  = s.fraction
+        statusProxy.nextEvent = s.nextEvent ?? '—'
+        statusProxy.queue     = s.queueLength
+      }, 100)
+
+      statusFolder.open()
     }
-    gui.add(globalActions, 'printConfig').name('📋 Print config to console')
+
+    // ── Global Actions ───────────────────────────────────────────────────
+    const printActions: Record<string, () => void> = {
+      printShotConfig: () => battleCtrl.printConfig(),
+    }
+    gui.add(printActions, 'printShotConfig').name('📋 Print shot config')
+
+    if (animSync) {
+      const syncActions: Record<string, () => void> = {
+        printSyncPoints: () => animSync.printSyncPoints(),
+        printAll: () => { battleCtrl.printConfig(); animSync.printSyncPoints() },
+      }
+      gui.add(syncActions, 'printSyncPoints').name('🎬 Print sync points')
+      gui.add(syncActions, 'printAll').name('💾 Print all (shots + sync)')
+    }
+
     gui.close()
     console.log('⚔️ Battle Camera GUI created')
   }
@@ -2235,28 +2312,31 @@ class IntegratedThreeJSApp {
     progress('Building ocean...')
     await this.createOceanSystem()
     
-    // Create land system first
+    // Create land system first (provides shared lighting uniforms)
     progress('Building terrain...')
     await this.createLandSystem()
     
-    // CRITICAL FIX: Connect collision system to land system AFTER creation
+    // Connect collision system to land system
     if (this.landSystem) {
       this.landSystem.setCollisionSystem(this.collisionSystem)
-      console.log('🏔️ Collision system connected to land system AFTER creation')
-      
-      // Register land meshes for primitive collision detection
-      // Note: Using imported model geometry directly - no dynamic collision generation
-      const landMeshes = this.landSystem.getLandMeshes()
-      if (landMeshes.length > 0) {
-        this.collisionSystem.registerLandMeshes(landMeshes)
-        console.log(`🏔️ Registered ${landMeshes.length} land meshes for primitive collision detection`)
-
-        // Also register land meshes for third-person camera collision
-        this.cameraManager.setCollisionMeshes(landMeshes)
-      }
       
       // Link land system to camera manager for spotlight updates
       this.cameraManager.setLandSystem(this.landSystem)
+    }
+
+    // Initialize ObjectLoader (needed before loadLevelModel)
+    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem, this.landSystem?.getLandUniforms(), this.collisionSystem)
+
+    // Load level_01.glb — replaces old land primitives + grid_01 + landscape_island
+    // Collision meshes are baked into a HeightmapCollider inside loadLevelModel()
+    // for O(1) ground queries instead of per-frame raycasting.
+    progress('Loading level model...')
+    const { collisionMeshes, visibleMeshes } = await ObjectLoader.loadLevelModel()
+    // Register visible + collision meshes with camera so it doesn't clip through them
+    const allLevelMeshes = [...visibleMeshes, ...collisionMeshes]
+    if (allLevelMeshes.length > 0) {
+      this.cameraManager.setCollisionMeshes(allLevelMeshes)
+      console.log(`📷 Registered ${allLevelMeshes.length} level meshes for camera collision`)
     }
 
     // Build climbable platform structure and wire ClimbSystem to player
@@ -2268,10 +2348,6 @@ class IntegratedThreeJSApp {
 
     // Set up camera switching controls
     this.setupCameraSwitching()
-    
-    // Initialize ObjectLoader with required systems
-    // Initialize ObjectLoader with landUniforms for shader materials
-    ObjectLoader.initialize(this.scene, this.objectManager, this.animationSystem, this.landSystem?.getLandUniforms(), this.collisionSystem)
     
     // Load all objects using the unified ObjectLoader system
     progress('Loading scene objects...')
@@ -3035,52 +3111,11 @@ class IntegratedThreeJSApp {
 
   private async createLandSystem(): Promise<void> {
     try {
-      // Load land shaders
-      const { vertex: landVertexShader, fragment: landFragmentShader } = await ShaderLoader.loadShaderPair({
-        vertexPath: 'src/shaders/land-vertex.glsl',
-        fragmentPath: 'src/shaders/land-fragment.glsl'
-      })
-
-      // Initialize Land System
+      // Initialize Land System (provides shared uniforms for lighting)
       this.landSystem = new LandSystem(this.scene)
 
-      // Create some sample land pieces
-      await this.landSystem.createLandPiece('plane', {
-        vertex: landVertexShader,
-        fragment: landFragmentShader
-      }, {
-        id: 'main-terrain',
-        position: new THREE.Vector3(0, 0, 0),
-        size: 100,
-        segments: 128
-      })
-
-      // Create a hill
-      await this.landSystem.createLandPiece('sphere', {
-        vertex: landVertexShader,
-        fragment: landFragmentShader
-      }, {
-        id: 'hill-1',
-        position: new THREE.Vector3(30, 0, 30),
-        size: 25,
-        segments: 64
-      })
-
-      // Create a rocky outcrop
-      await this.landSystem.createLandPiece('box', {
-        vertex: landVertexShader,
-        fragment: landFragmentShader
-      }, {
-        id: 'rocky-outcrop',
-        position: new THREE.Vector3(-40, 0, 20),
-        size: 20,
-        segments: 32
-      })
-
-      // Note: Land meshes will be registered with collision system in createContent() method
-      // This ensures proper initialization order
-
-      // console.log('🏔️ Land system initialized')
+      // Land primitives removed — terrain now comes from level_01.glb
+      // Uniforms are still used by climb platforms and level model shaders.
 
     } catch (error) {
       // console.error('❌ Failed to create land system:', error)
@@ -3840,6 +3875,9 @@ void main() {
       }
 
       this.characterAnimationSystem.update(deltaTime)
+
+      // Update animation-synced battle sequencer (polls mixer time, fires camera cuts)
+      this.battleAnimSync?.update(deltaTime)
       
       // Update shader material uniforms for all ObjectManager objects
       this.objectManager.getAllObjects().forEach((managedObject) => {

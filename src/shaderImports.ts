@@ -23,6 +23,8 @@ import lightingFragmentChunk from './shaders/common/lighting-fragment.glsl'
 // Shaders that use common lighting (prepend the chunks)
 import defaultCharacterVertexShader from './shaders/default-character-vertex.glsl'
 import defaultCharacterFragmentShader from './shaders/default-character-fragment.glsl'
+import defaultLightVertexShaderRaw from './shaders/default-light-vertex.glsl'
+import defaultLightFragmentShaderRaw from './shaders/default-light-fragment.glsl'
 import landVertexShaderRaw from './shaders/land-vertex.glsl'
 import landFragmentShaderRaw from './shaders/land-fragment.glsl'
 
@@ -33,6 +35,14 @@ const landVertexShader = landVertexShaderRaw.replace(
   lightingVertexChunk
 )
 const landFragmentShader = landFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
+const defaultLightVertexShader = defaultLightVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const defaultLightFragmentShader = defaultLightFragmentShaderRaw.replace(
   '#include ./common/lighting-fragment.glsl',
   lightingFragmentChunk
 )
@@ -59,6 +69,8 @@ export const SHADERS = {
   'src/shaders/titlescreen-fragment.glsl': titlescreenFragmentShader,
   'src/shaders/default-character-vertex.glsl': defaultCharacterVertexShader,
   'src/shaders/default-character-fragment.glsl': defaultCharacterFragmentShader,
+  'src/shaders/default-light-vertex.glsl': defaultLightVertexShader,
+  'src/shaders/default-light-fragment.glsl': defaultLightFragmentShader,
 } as const
 
 export type ShaderPath = keyof typeof SHADERS

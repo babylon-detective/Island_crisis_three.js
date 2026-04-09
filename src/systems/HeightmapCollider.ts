@@ -95,12 +95,22 @@ export class HeightmapCollider {
       cols = Math.max(2, Math.round(resolution * (spanX / spanZ)))
     }
 
-    // Collect all child meshes for raycasting
+    // Collect all child meshes for raycasting and pre-compute their
+    // world-space bounding boxes once so we can cull per column.
     const meshes: THREE.Mesh[] = []
     object.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         meshes.push(child)
       }
+    })
+
+    // Pre-compute / warm-up bounding boxes & spheres so Three.js can do
+    // fast early-rejection checks inside intersectObjects().
+    const meshBounds: Array<{ mesh: THREE.Mesh; box: THREE.Box3 }> = meshes.map(mesh => {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+      if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere()
+      const box = new THREE.Box3().setFromObject(mesh)
+      return { mesh, box }
     })
 
     const raycaster = new THREE.Raycaster()
@@ -112,34 +122,37 @@ export class HeightmapCollider {
     // Initialise with -Infinity so missed cells are clearly "no ground"
     heights.fill(-Infinity)
 
-    // Process rows in chunks, yielding to the event loop every CHUNK_SIZE rows
-    // to avoid freezing the main thread during baking.
-    const CHUNK_SIZE = 8
+    // Yield to the event loop every row so the browser stays responsive.
     for (let r = 0; r < rows; r++) {
       const z = minZ + (r / (rows - 1)) * spanZ
       for (let c = 0; c < cols; c++) {
         const x = minX + (c / (cols - 1)) * spanX
 
+        // Only raycast meshes whose XZ bounds contain this column — avoids
+        // testing thousands of triangles on meshes that can't possibly be hit.
+        const candidateMeshes = meshBounds
+          .filter(({ box }) => x >= box.min.x && x <= box.max.x && z >= box.min.z && z <= box.max.z)
+          .map(({ mesh }) => mesh)
+
+        if (candidateMeshes.length === 0) continue
+
         rayOrigin.set(x, rayStartY, z)
         raycaster.set(rayOrigin, rayDir)
-        const hits = raycaster.intersectObjects(meshes, true)
+        const hits = raycaster.intersectObjects(candidateMeshes, false)
 
         if (hits.length > 0) {
           // Take the highest upward-facing intersection
           let bestY = -Infinity
           for (const hit of hits) {
+            let isUpward = true
             if (hit.face) {
-              const normal = hit.face.normal.clone()
+              const worldNormal = hit.face.normal.clone()
               if (hit.object instanceof THREE.Mesh) {
-                hit.object.getWorldQuaternion(new THREE.Quaternion()).multiply(new THREE.Quaternion()) // identity
-                normal.applyQuaternion(hit.object.getWorldQuaternion(new THREE.Quaternion()))
+                worldNormal.applyQuaternion(hit.object.getWorldQuaternion(new THREE.Quaternion()))
               }
-              if (normal.y > 0.3 && hit.point.y > bestY) {
-                bestY = hit.point.y
-              }
-            } else if (hit.point.y > bestY) {
-              bestY = hit.point.y
+              isUpward = worldNormal.y > 0.3
             }
+            if (isUpward && hit.point.y > bestY) bestY = hit.point.y
           }
           if (bestY > -Infinity) {
             heights[r * cols + c] = bestY
@@ -147,11 +160,8 @@ export class HeightmapCollider {
         }
       }
 
-      // Yield to the event loop every CHUNK_SIZE rows so the browser
-      // can paint frames and handle input between batches.
-      if ((r + 1) % CHUNK_SIZE === 0) {
-        await new Promise<void>(resolve => setTimeout(resolve, 0))
-      }
+      // Yield after every row so the browser can paint & handle input.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
     }
 
     const hm = new HeightmapCollider(id, heights, cols, rows, minX, minZ, maxX, maxZ)

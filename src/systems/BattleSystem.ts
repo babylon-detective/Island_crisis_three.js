@@ -4,6 +4,7 @@ import { NPCAISystem } from './NPCAISystem'
 import { CharacterAnimationSystem } from './CharacterAnimationSystem'
 import { CameraManager } from './CameraManager'
 import type { BattleCameraShot } from './BattleCameraController'
+import { BattleAnimSync, type SyncedBattleSequence } from './BattleAnimSync'
 import type { PlayerController } from './PlayerController'
 import type { DialogueManager } from './DialogueSystem'
 import { logger, LogModule } from './Logger'
@@ -32,6 +33,7 @@ export class BattleSystem {
   private soundSystem: SoundSystem | null = null
   private itemSystem: ItemSystem | null = null
   private inventoryDisplay: InventoryDisplay | null = null
+  private animSync: BattleAnimSync | null = null
 
   private isActive = false
   private activeNpcId: string | null = null
@@ -132,6 +134,10 @@ export class BattleSystem {
 
   setInventoryDisplay(inventoryDisplay: InventoryDisplay): void {
     this.inventoryDisplay = inventoryDisplay
+  }
+
+  setAnimSync(sync: BattleAnimSync): void {
+    this.animSync = sync
   }
 
   setPauseCallback(fn: () => void): void {
@@ -502,23 +508,92 @@ export class BattleSystem {
 
     const originalPlayerPos = this.battlePlayerPos.clone()
 
-    // ── Cinematic attack sequence ───────────────────────────────────────────
+    // ── Animation-synced attack sequence ────────────────────────────────
     //
-    // Stage 1  overShoulder   — camera behind player looking at enemy;
-    //                           player starts walk animation toward the NPC.
-    // Stage 2  strikeImpact   — camera at the impact zone; player teleported
-    //                           to strike range, attack animation fires.
-    // Stage 3  targetReaction — cut to enemy receiving hit, damage applied.
-    //          (or deathHold if the enemy is defeated)
-    // Stage 4  menuIdle       — return to wide battlefield view; player
-    //                           restored to standing position, idle anim.
+    // Phase 1  Approach (timed, 0.45s)
+    //   - Camera: overShoulder → player runs toward enemy
     //
+    // Phase 2  Attack (synced to 'attack' clip)
+    //   - 'start'          → cut strikeImpact, teleport to strike range
+    //   - 'impact'         → apply damage
+    //   - 'follow-through' → cut targetReaction (or deathHold if defeated)
+    //   - 'recover'        → cut menuIdle, restore position, idle anim
+    //   - onComplete       → unlock input, start enemy counter-attack
+    //
+    if (this.animSync) {
+      this.animSync.playChain([
+        // Phase 1: Approach — timed hold, run animation
+        {
+          characterId: 'player',
+          clipName: 'run',
+          mode: 'timed',
+          duration: 0.45,
+          crossfadeDuration: 0.1,
+          events: [
+            { at: 0, camera: 'overShoulder' },
+          ],
+        },
+        // Phase 2: Attack — synced to attack clip keyframes
+        {
+          characterId: 'player',
+          clipName: 'attack',
+          crossfadeDuration: 0.08,
+          events: [
+            {
+              at: 'start',
+              camera: 'strikeImpact',
+              action: () => {
+                // Teleport player to strike range
+                this.playerController!.setPosition(strikePos)
+                this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
+              },
+            },
+            {
+              at: 'impact',
+              action: () => {
+                this.performAttackDamage(npc)
+              },
+            },
+            {
+              at: 'follow-through',
+              action: () => {
+                if (this.npcSystem.isDefeated(npc.id)) {
+                  this.animSync!.cameraCut('deathHold')
+                  try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
+                } else {
+                  this.animSync!.cameraCut('targetReaction')
+                  try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
+                }
+              },
+            },
+            {
+              at: 'recover',
+              camera: 'menuIdle',
+              action: () => {
+                // Restore player to standing position + idle
+                this.playerController!.setPosition(originalPlayerPos)
+                this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
+                try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
+              },
+            },
+          ],
+          onComplete: () => {
+            this.attackSequencePlaying = false
+            if (this.phase === 'ended') return
+            // Enemy counter-attacks with synced choreography
+            this.resolveEnemyTurnSynced(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
+          },
+        },
+      ])
+      return
+    }
+
+    // ── Legacy fallback: fixed-duration camera shots ────────────────────
     const sequence: BattleCameraShot[] = [
       {
         type: 'overShoulder',
         duration: 0.45,
         onStart: () => {
-          // Player begins walking toward the enemy (visual anticipation)
           try { this.charAnimSystem.crossfadeTo('player', 'run', 0.1) } catch (_) {}
         },
       },
@@ -526,28 +601,22 @@ export class BattleSystem {
         type: 'strikeImpact',
         duration: 0.35,
         onStart: () => {
-          // Teleport player to strike range and play attack animation
           this.playerController!.setPosition(strikePos)
           this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
           try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.08) } catch (_) {}
         },
         onComplete: () => {
-          // Apply damage at the moment of impact
           this.performAttackDamage(npc)
         },
       },
       {
-        // Camera type is resolved at runtime inside onStart because damage is
-        // not applied until strikeImpact.onComplete (the previous shot).
         type: 'targetReaction',
         duration: 0.65,
         onStart: () => {
           if (this.npcSystem.isDefeated(npc.id)) {
-            // Switch to the wider death-hold angle and play the fall animation
             this.cameraManager!.getBattleCameraController().cutTo('deathHold')
             try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
           } else {
-            // Brief recoil — NPC staggers then returns to idle
             try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
           }
         },
@@ -556,18 +625,13 @@ export class BattleSystem {
         type: 'menuIdle',
         duration: 0.3,
         onStart: () => {
-          // Restore player to standing position and idle animation
           this.playerController!.setPosition(originalPlayerPos)
           this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
           try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
         },
         onComplete: () => {
           this.attackSequencePlaying = false
-          if (this.phase === 'ended') {
-            // Enemy was defeated — overlay shows result
-            return
-          }
-          // Enemy counter-attacks with its own camera sequence
+          if (this.phase === 'ended') return
           this.resolveEnemyTurnWithCamera(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
         },
       },
@@ -577,6 +641,7 @@ export class BattleSystem {
   }
 
   private isBattleCameraBusy(): boolean {
+    if (this.animSync?.busy) return true
     return this.cameraManager?.getBattleCameraController().busy ?? false
   }
 
@@ -591,7 +656,9 @@ export class BattleSystem {
 
   /** Skip all pending battle camera sequences, firing callbacks instantly. */
   private skipBattleSequence(): void {
-    // Skip opening cinematic if active
+    // Skip animation-synced sequences first
+    this.animSync?.skip()
+    // Skip opening cinematic / legacy queue
     const ctrl = this.cameraManager?.getBattleCameraController()
     if (ctrl) {
       ctrl.skipSequence()
@@ -660,8 +727,10 @@ export class BattleSystem {
     }
 
     this.guardActive = true
-    // Use camera choreography for the enemy counterattack when available
-    if (this.cameraManager?.isInBattleMode()) {
+    // Use animation-synced choreography when available, then legacy camera, then plain
+    if (this.animSync && this.cameraManager?.isInBattleMode()) {
+      this.resolveEnemyTurnSynced(`You brace for ${npc.id}'s counterattack.`)
+    } else if (this.cameraManager?.isInBattleMode()) {
       this.resolveEnemyTurnWithCamera(`You brace for ${npc.id}'s counterattack.`)
     } else {
       this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
@@ -748,6 +817,90 @@ export class BattleSystem {
   }
 
   /**
+   * Enemy turn with animation-synced choreography.
+   * Mirrors the player attack flow: approach → attack (synced) → reaction → idle.
+   *
+   * Phase 1  Approach (timed, 0.35s)
+   *   - Camera: enemyFocus — NPC runs toward the player
+   *
+   * Phase 2  Attack (synced to NPC 'attack' clip)
+   *   - 'start'          → cut strikeImpact
+   *   - 'impact'         → apply damage to player
+   *   - 'follow-through' → cut playerReaction, update UI
+   *   - 'recover'        → cut menuIdle, NPC returns to idle
+   *   - onComplete       → unlock input
+   */
+  private resolveEnemyTurnSynced(prefix: string): void {
+    const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
+    if (!npc || !this.animSync || !this.cameraManager?.isInBattleMode()) {
+      this.resolveEnemyTurnWithCamera(prefix)
+      return
+    }
+
+    this.attackSequencePlaying = true
+
+    const baseDamage = 4 + Math.floor(Math.random() * 4)
+    const damage = this.guardActive ? Math.max(1, Math.floor(baseDamage * 0.5)) : baseDamage
+    this.guardActive = false
+
+    this.animSync.playChain([
+      // Phase 1: Approach — NPC runs toward player (timed hold)
+      {
+        characterId: npc.id,
+        clipName: 'run',
+        mode: 'timed',
+        duration: 0.35,
+        crossfadeDuration: 0.1,
+        events: [
+          { at: 0, camera: 'enemyFocus' },
+        ],
+      },
+      // Phase 2: Attack — synced to NPC's attack clip keyframes
+      {
+        characterId: npc.id,
+        clipName: 'attack',
+        crossfadeDuration: 0.08,
+        events: [
+          {
+            at: 'start',
+            camera: 'strikeImpact',
+          },
+          {
+            at: 'impact',
+            action: () => {
+              this.playerHP = Math.max(0, this.playerHP - damage)
+            },
+          },
+          {
+            at: 'follow-through',
+            camera: 'playerReaction',
+            action: () => {
+              if (this.playerHP <= 0) {
+                this.phase = 'ended'
+                this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
+              } else {
+                this.phase = 'player-turn'
+                this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
+              }
+              this.renderBattleOverlay()
+            },
+          },
+          {
+            at: 'recover',
+            camera: 'menuIdle',
+            action: () => {
+              try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.15) } catch (_) {}
+            },
+          },
+        ],
+        onComplete: () => {
+          this.attackSequencePlaying = false
+        },
+      },
+    ])
+  }
+
+  /**
    * Enemy turn with camera choreography (shot/reverse-shot structure):
    * 1. enemyFocus   — dramatic low-angle on enemy, attack anim plays
    * 2. playerReaction — cut to player receiving hit, damage applied
@@ -823,6 +976,7 @@ export class BattleSystem {
     this.guardActive = false
 
     this.attackSequencePlaying = false
+    this.animSync?.abort()
     this.battlePlayerPos = null
     this.battleEnemyPos = null
     this.restoreClusterPositions()
