@@ -97,14 +97,25 @@ export class NPCAISystem {
 
   // ---- update --------------------------------------------------------------
 
+  /** Distance beyond which AI is completely frozen. */
+  private aiFreezeDistance = 80
+
   update(dt: number): void {
     if (!this.enabled) return
     for (const npc of this.npcSystem.getAllNPCs()) {
       const ai = this.states.get(npc.id)
       if (!ai) continue
+
+      // Distance-based AI throttling: scale think interval + freeze distant NPCs
+      const distToPlayer = npc.position.distanceTo(this.playerPos)
+      if (distToPlayer > this.aiFreezeDistance) continue // fully frozen
+
+      // Scale think interval by distance (nearby = base, mid = 3×, far = 6×)
+      const distFactor = distToPlayer < 20 ? 1 : distToPlayer < 40 ? 3 : 6
+
       ai.thinkTimer -= dt
       if (ai.thinkTimer <= 0) {
-        ai.thinkTimer = this.cfg.thinkInterval + (Math.random() - 0.5) * 0.5
+        ai.thinkTimer = (this.cfg.thinkInterval + (Math.random() - 0.5) * 0.5) * distFactor
         this.think(npc, ai)
       }
       this.execute(npc, ai, dt)

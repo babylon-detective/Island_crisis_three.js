@@ -36,11 +36,20 @@ interface LandMeshInfo {
   priority: number // Higher priority = checked first
 }
 
+/** Axis-aligned wall / obstacle collider — blocks horizontal movement. */
+export interface WallCollider {
+  id: string
+  box: THREE.Box3
+  /** If true, also acts as a walkable surface (stairs, ramps). */
+  walkable: boolean
+}
+
 export class CollisionSystem {
   private collidableObjects: Map<string, CollidableObject> = new Map()
   private landMeshes: LandMeshInfo[] = []
   private landMeshObjects: THREE.Mesh[] = []
   private heightmaps: HeightmapCollider[] = [] // Baked heightmap colliders for GLB models
+  private wallColliders: WallCollider[] = []     // AABB obstacles (trees, walls, buildings)
   private raycaster: THREE.Raycaster = new THREE.Raycaster()
   private tempVector: THREE.Vector3 = new THREE.Vector3()
   private tempVector2: THREE.Vector3 = new THREE.Vector3()
@@ -121,6 +130,42 @@ export class CollisionSystem {
       await hm.rebake()
     }
     logger.info(LogModule.COLLISION, `Re-baked ${this.heightmaps.length} heightmap(s)`)
+  }
+
+  // ============================================================================
+  // WALL / OBSTACLE COLLIDERS (AABB)
+  // ============================================================================
+
+  /**
+   * Register an axis-aligned bounding box as a wall/obstacle collider.
+   * These block horizontal movement; if `walkable` is true the top surface
+   * also acts as ground (stairs, ramps, platforms).
+   */
+  public registerWallCollider(collider: WallCollider): void {
+    this.wallColliders.push(collider)
+    logger.debug(LogModule.COLLISION, `Registered wall collider "${collider.id}" walkable=${collider.walkable}`)
+  }
+
+  /**
+   * Batch-register wall colliders from meshes.
+   * Each mesh is converted to an AABB box.
+   */
+  public registerWallMeshes(meshes: THREE.Mesh[], walkable: boolean = false): void {
+    for (const mesh of meshes) {
+      mesh.updateMatrixWorld(true)
+      const box = new THREE.Box3().setFromObject(mesh)
+      this.wallColliders.push({
+        id: mesh.name || mesh.userData?.id || `wall-${this.wallColliders.length}`,
+        box,
+        walkable,
+      })
+    }
+    logger.info(LogModule.COLLISION, `Registered ${meshes.length} wall collider meshes (walkable=${walkable})`)
+  }
+
+  /** Get all wall colliders (for debug visualization). */
+  public getWallColliders(): WallCollider[] {
+    return this.wallColliders
   }
 
   // ============================================================================
@@ -287,7 +332,7 @@ export class CollisionSystem {
    * Check collision with land meshes (optimized)
    */
   private checkLandCollision(volume: CollisionVolume, position: THREE.Vector3): CollisionResult {
-    if (this.landMeshes.length === 0) {
+    if (this.landMeshes.length === 0 && this.heightmaps.length === 0) {
       return {
         hasCollision: false,
         penetrationDepth: 0,
@@ -368,7 +413,7 @@ export class CollisionSystem {
    * Check if a point collides with any land mesh
    */
   private checkPointCollision(point: THREE.Vector3, radius: number): CollisionResult {
-    if (this.landMeshes.length === 0) {
+    if (this.landMeshes.length === 0 && this.heightmaps.length === 0 && this.wallColliders.length === 0) {
       return {
         hasCollision: false,
         penetrationDepth: 0,
@@ -394,11 +439,53 @@ export class CollisionSystem {
       }
     }
 
-    // Raycast in cardinal directions for wall collisions
-    const dirs = CollisionSystem.RAY_DIRECTIONS
+    // ── AABB wall / obstacle colliders ─────────────────────────────────────
+    // Check all registered wall colliders for horizontal overlap.
     let bestPenetration = 0
     let hasWallCollision = false
 
+    for (const wall of this.wallColliders) {
+      const box = wall.box
+      // Expand box by radius for sphere-vs-AABB test
+      if (
+        point.x + radius <= box.min.x || point.x - radius >= box.max.x ||
+        point.z + radius <= box.min.z || point.z - radius >= box.max.z ||
+        point.y          >= box.max.y || point.y - radius >= box.max.y ||
+        point.y + radius <= box.min.y
+      ) {
+        continue // no overlap
+      }
+
+      // Walkable colliders: if the point is above the top surface, allow
+      // standing on it — skip horizontal push, let ground probe handle Y.
+      if (wall.walkable && point.y >= box.max.y - radius) {
+        continue
+      }
+
+      // Compute shortest horizontal push-out direction
+      const pushPosX = box.max.x - (point.x - radius) // push +X
+      const pushNegX = (point.x + radius) - box.min.x  // push -X
+      const pushPosZ = box.max.z - (point.z - radius)  // push +Z
+      const pushNegZ = (point.z + radius) - box.min.z   // push -Z
+
+      let minPush = pushPosX
+      let nx = 1, nz = 0
+      if (pushNegX < minPush) { minPush = pushNegX; nx = -1; nz = 0 }
+      if (pushPosZ < minPush) { minPush = pushPosZ; nx = 0; nz = 1 }
+      if (pushNegZ < minPush) { minPush = pushNegZ; nx = 0; nz = -1 }
+
+      if (minPush > bestPenetration) {
+        bestPenetration = minPush
+        hasWallCollision = true
+        this._ptColNormal.set(-nx, 0, -nz) // push away from box
+        this._ptColCorrected.copy(point)
+        this._ptColCorrected.x += -nx * minPush
+        this._ptColCorrected.z += -nz * minPush
+      }
+    }
+
+    // ── Cardinal-direction raycasts against land meshes ────────────────────
+    const dirs = CollisionSystem.RAY_DIRECTIONS
     const allMeshes = this.landMeshes.map(info => info.mesh)
 
     for (const direction of dirs) {
@@ -615,6 +702,17 @@ export class CollisionSystem {
       }
     }
     
+    // ── 3. Check walkable wall colliders (stairs, ramps, platforms) ──
+    for (const wall of this.wallColliders) {
+      if (!wall.walkable) continue
+      const box = wall.box
+      if (x >= box.min.x && x <= box.max.x && z >= box.min.z && z <= box.max.z) {
+        if (box.max.y > maxGroundHeight) {
+          maxGroundHeight = box.max.y
+        }
+      }
+    }
+
     const result = maxGroundHeight + this.groundHeightOffset
 
     // ── 3. Write to cache ──
@@ -793,6 +891,9 @@ export class CollisionSystem {
     return {
       registeredObjects: this.collidableObjects.size,
       landMeshes: this.landMeshes.length,
+      heightmaps: this.heightmaps.length,
+      wallColliders: this.wallColliders.length,
+      wallCollidersWalkable: this.wallColliders.filter(w => w.walkable).length,
       cacheSize: this.groundHeightCache.size,
       cacheTimeout: this.cacheTimeout,
       collisionCheckInterval: this.collisionCheckInterval,
@@ -982,5 +1083,126 @@ export class CollisionSystem {
   public testTerrainFix(): void {
     console.log(`🧪 TESTING TERRAIN HEIGHT:`)
     this.debugTerrainHeight(0, 0)
+  }
+
+  // ==========================================================================
+  // DEBUG WIREFRAME VISUALIZATION
+  // ==========================================================================
+
+  private debugWireframeGroup: THREE.Group | null = null
+  private debugScene: THREE.Scene | null = null
+
+  /** Get registered heightmaps (for debug visualization). */
+  public getHeightmaps(): HeightmapCollider[] {
+    return this.heightmaps
+  }
+
+  /**
+   * Toggle collision debug wireframes on/off.
+   * Shows: land mesh bounding boxes (blue), heightmap grids (green),
+   * registered collision volumes (yellow).
+   */
+  public toggleDebugWireframes(scene: THREE.Scene, visible?: boolean): boolean {
+    this.debugScene = scene
+
+    if (this.debugWireframeGroup) {
+      const show = visible ?? !this.debugWireframeGroup.visible
+      this.debugWireframeGroup.visible = show
+      return show
+    }
+
+    // First call — build the wireframe group
+    this.debugWireframeGroup = new THREE.Group()
+    this.debugWireframeGroup.name = 'debug-collision-wireframes'
+
+    // ── Land mesh bounding boxes (blue) ──
+    for (const info of this.landMeshes) {
+      const size = info.boundingBox.getSize(new THREE.Vector3())
+      const center = info.boundingBox.getCenter(new THREE.Vector3())
+      const geo = new THREE.BoxGeometry(size.x, size.y, size.z)
+      const wire = new THREE.WireframeGeometry(geo)
+      const line = new THREE.LineSegments(wire, new THREE.LineBasicMaterial({ color: 0x4488ff }))
+      line.position.copy(center)
+      this.debugWireframeGroup.add(line)
+    }
+
+    // ── Heightmap grid visualization (green points + red bounding box) ──
+    for (const hm of this.heightmaps) {
+      const pts: number[] = []
+      for (let r = 0; r < hm.rows; r++) {
+        for (let c = 0; c < hm.cols; c++) {
+          const h = hm.heights[r * hm.cols + c]
+          if (h <= -1e6) continue // skip invalid
+          const x = hm.minX + (c / (hm.cols - 1)) * (hm.maxX - hm.minX)
+          const z = hm.minZ + (r / (hm.rows - 1)) * (hm.maxZ - hm.minZ)
+          pts.push(x, h, z)
+        }
+      }
+      if (pts.length > 0) {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+        const points = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x00ff44, size: 0.4 }))
+        this.debugWireframeGroup.add(points)
+      }
+      // Heightmap bounding box (red)
+      const spanX = hm.maxX - hm.minX
+      const spanZ = hm.maxZ - hm.minZ
+      // Estimate Y span from valid heights
+      let minY = Infinity, maxY = -Infinity
+      for (let i = 0; i < hm.heights.length; i++) {
+        const h = hm.heights[i]
+        if (h <= -1e6) continue
+        if (h < minY) minY = h
+        if (h > maxY) maxY = h
+      }
+      if (minY < Infinity) {
+        const spanY = maxY - minY || 1
+        const boxGeo = new THREE.BoxGeometry(spanX, spanY, spanZ)
+        const wire = new THREE.WireframeGeometry(boxGeo)
+        const box = new THREE.LineSegments(wire, new THREE.LineBasicMaterial({ color: 0xff4444 }))
+        box.position.set(
+          hm.minX + spanX * 0.5,
+          minY + spanY * 0.5,
+          hm.minZ + spanZ * 0.5,
+        )
+        this.debugWireframeGroup.add(box)
+      }
+      console.log(`🗺️ Heightmap "${hm.id}": ${hm.cols}×${hm.rows} grid, bounds X[${hm.minX.toFixed(1)}..${hm.maxX.toFixed(1)}] Z[${hm.minZ.toFixed(1)}..${hm.maxZ.toFixed(1)}], Y range [${minY === Infinity ? 'empty' : minY.toFixed(1)}..${maxY === -Infinity ? 'empty' : maxY.toFixed(1)}]`)
+    }
+
+    // ── Registered collision volumes (yellow) ──
+    for (const [, obj] of this.collidableObjects) {
+      const wire = this.createDebugWireframe(obj.collisionVolume, 0xffff00)
+      wire.position.copy(obj.collisionVolume.position)
+      this.debugWireframeGroup.add(wire)
+    }
+
+    // ── Wall / obstacle colliders (orange = blocking, cyan = walkable) ──
+    for (const wall of this.wallColliders) {
+      const box = wall.box
+      const size = box.getSize(new THREE.Vector3())
+      const center = box.getCenter(new THREE.Vector3())
+      const geo = new THREE.BoxGeometry(size.x, size.y, size.z)
+      const wire = new THREE.WireframeGeometry(geo)
+      const color = wall.walkable ? 0x00cccc : 0xff8800
+      const line = new THREE.LineSegments(wire, new THREE.LineBasicMaterial({ color }))
+      line.position.copy(center)
+      this.debugWireframeGroup.add(line)
+    }
+    console.log(`🧱 Collision debug: ${this.landMeshes.length} land, ${this.heightmaps.length} heightmaps, ${this.wallColliders.length} walls, ${this.collidableObjects.size} objects`)
+
+    scene.add(this.debugWireframeGroup)
+    return true
+  }
+
+  /**
+   * Refresh wireframe positions (call if objects move at runtime).
+   */
+  public refreshDebugWireframes(): void {
+    if (!this.debugWireframeGroup || !this.debugScene) return
+    const wasVisible = this.debugWireframeGroup.visible
+    this.debugScene.remove(this.debugWireframeGroup)
+    this.debugWireframeGroup = null
+    this.toggleDebugWireframes(this.debugScene, wasVisible)
   }
 } 

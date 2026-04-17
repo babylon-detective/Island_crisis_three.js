@@ -706,6 +706,7 @@ export class ObjectLoader {
                     : new THREE.Color(0x808080)
                   
                   return new THREE.MeshStandardMaterial({
+                    name: mat.name,
                     color: color.getHex() === 0x000000 ? 0x808080 : color,
                     metalness: 0.1,
                     roughness: 0.8,
@@ -720,6 +721,7 @@ export class ObjectLoader {
                   : new THREE.Color(0x808080)
                 
                 child.material = new THREE.MeshStandardMaterial({
+                  name: originalMaterial.name,
                   color: color.getHex() === 0x000000 ? 0x808080 : color,
                   metalness: 0.1,
                   roughness: 0.8,
@@ -895,6 +897,8 @@ export class ObjectLoader {
     // ── Build shader materials lazily (once per type) ────────────────────────
     let landMaterial: THREE.ShaderMaterial | null = null
     let concreteMaterial: THREE.ShaderMaterial | null = null
+    let sandMaterial: THREE.ShaderMaterial | null = null
+    let woodMaterial: THREE.ShaderMaterial | null = null
 
     const getLandMaterial = async (): Promise<THREE.ShaderMaterial> => {
       if (landMaterial) return landMaterial
@@ -943,8 +947,8 @@ export class ObjectLoader {
       if (concreteMaterial) return concreteMaterial
 
       const shaders = await ShaderLoader.loadShaderPair({
-        vertexPath: 'src/shaders/default-light-vertex.glsl',
-        fragmentPath: 'src/shaders/default-light-fragment.glsl',
+        vertexPath: 'src/shaders/concrete-vertex.glsl',
+        fragmentPath: 'src/shaders/concrete-fragment.glsl',
       })
 
       const u = this.landUniforms || {}
@@ -953,7 +957,8 @@ export class ObjectLoader {
         fragmentShader: shaders.fragment,
         uniforms: {
           ...THREE.UniformsLib.lights,
-          uModelColor:         { value: new THREE.Color(0x9a9590) },
+          uConcreteColor:      { value: new THREE.Color(0xb0aba6) },
+          uConcreteDarkColor:  { value: new THREE.Color(0x7a7572) },
           // Lighting — shared references
           uSunDirection:       u.uSunDirection       ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
           uSunColor:           u.uSunColor           ?? { value: new THREE.Color(1, 1, 0.9) },
@@ -972,6 +977,74 @@ export class ObjectLoader {
       return concreteMaterial
     }
 
+    const getSandMaterial = async (): Promise<THREE.ShaderMaterial> => {
+      if (sandMaterial) return sandMaterial
+
+      const shaders = await ShaderLoader.loadShaderPair({
+        vertexPath: 'src/shaders/sand-vertex.glsl',
+        fragmentPath: 'src/shaders/sand-fragment.glsl',
+      })
+
+      const u = this.landUniforms || {}
+      sandMaterial = new THREE.ShaderMaterial({
+        vertexShader: shaders.vertex,
+        fragmentShader: shaders.fragment,
+        uniforms: {
+          ...THREE.UniformsLib.lights,
+          uSandColor:          { value: new THREE.Color(0xd4b896) },
+          uSandDarkColor:      { value: new THREE.Color(0xa08055) },
+          // Lighting — shared references
+          uSunDirection:       u.uSunDirection       ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
+          uSunColor:           u.uSunColor           ?? { value: new THREE.Color(1, 1, 0.9) },
+          uSunIntensity:       u.uSunIntensity       ?? { value: 1.0 },
+          uSpotlightPosition:  u.uSpotlightPosition  ?? { value: new THREE.Vector3(0, 30, 0) },
+          uSpotlightDirection: u.uSpotlightDirection ?? { value: new THREE.Vector3(0, -1, 0) },
+          uSpotlightColor:     u.uSpotlightColor     ?? { value: new THREE.Color(1, 1, 1) },
+          uSpotlightIntensity: u.uSpotlightIntensity ?? { value: 0.0 },
+          uSpotlightAngle:     u.uSpotlightAngle     ?? { value: Math.PI / 8 },
+          uSpotlightPenumbra:  u.uSpotlightPenumbra  ?? { value: 0.3 },
+          uSpotlightDistance:  u.uSpotlightDistance  ?? { value: 80 },
+        },
+        lights: true,
+        side: THREE.FrontSide,
+      })
+      return sandMaterial
+    }
+
+    const getWoodMaterial = async (): Promise<THREE.ShaderMaterial> => {
+      if (woodMaterial) return woodMaterial
+
+      const shaders = await ShaderLoader.loadShaderPair({
+        vertexPath: 'src/shaders/wood-vertex.glsl',
+        fragmentPath: 'src/shaders/wood-fragment.glsl',
+      })
+
+      const u = this.landUniforms || {}
+      woodMaterial = new THREE.ShaderMaterial({
+        vertexShader: shaders.vertex,
+        fragmentShader: shaders.fragment,
+        uniforms: {
+          ...THREE.UniformsLib.lights,
+          uWoodColor:          { value: new THREE.Color(0xc8864e) },
+          uWoodDarkColor:      { value: new THREE.Color(0x7d4e2a) },
+          // Lighting — shared references
+          uSunDirection:       u.uSunDirection       ?? { value: new THREE.Vector3(0.5, 0.8, 0.2) },
+          uSunColor:           u.uSunColor           ?? { value: new THREE.Color(1, 1, 0.9) },
+          uSunIntensity:       u.uSunIntensity       ?? { value: 1.0 },
+          uSpotlightPosition:  u.uSpotlightPosition  ?? { value: new THREE.Vector3(0, 30, 0) },
+          uSpotlightDirection: u.uSpotlightDirection ?? { value: new THREE.Vector3(0, -1, 0) },
+          uSpotlightColor:     u.uSpotlightColor     ?? { value: new THREE.Color(1, 1, 1) },
+          uSpotlightIntensity: u.uSpotlightIntensity ?? { value: 0.0 },
+          uSpotlightAngle:     u.uSpotlightAngle     ?? { value: Math.PI / 8 },
+          uSpotlightPenumbra:  u.uSpotlightPenumbra  ?? { value: 0.3 },
+          uSpotlightDistance:  u.uSpotlightDistance  ?? { value: 80 },
+        },
+        lights: true,
+        side: THREE.FrontSide,
+      })
+      return woodMaterial
+    }
+
     // ── Classify meshes ──────────────────────────────────────────────────────
     const meshChildren: THREE.Mesh[] = []
     model.traverse((child) => {
@@ -981,8 +1054,9 @@ export class ObjectLoader {
     for (const mesh of meshChildren) {
       const name = mesh.name.toLowerCase()
 
-      // ── Collision-only meshes ────────────────────────────────────────────
-      if (name.startsWith('col') || name.startsWith('collision')) {
+      // ── Collision-only meshes (COL_ prefix or "collision" prefix) ───────
+      // Use 'col_' (with underscore) to avoid capturing 'Column' nodes.
+      if (name.startsWith('col_') || name.startsWith('collision')) {
         mesh.visible = false
         mesh.userData = { ...mesh.userData, type: 'land', landType: 'box', id: mesh.name }
         collisionMeshes.push(mesh)
@@ -1000,6 +1074,10 @@ export class ObjectLoader {
           replacedMats.push(await getLandMaterial())
         } else if (matName === 'concrete') {
           replacedMats.push(await getConcreteMaterial())
+        } else if (matName === 'sand') {
+          replacedMats.push(await getSandMaterial())
+        } else if (matName === 'wood') {
+          replacedMats.push(await getWoodMaterial())
         } else {
           // Keep original material as MeshStandardMaterial
           if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
@@ -1020,12 +1098,52 @@ export class ObjectLoader {
       visibleMeshes.push(mesh)
     }
 
-    // ── Bake collision meshes into a heightmap for O(1) ground queries ───────
-    if (collisionMeshes.length > 0 && this.collisionSystem) {
-      // Count triangles for logging
+    // ── Classify collision meshes: ground vs wall/obstacle ─────────────────
+    // Flat/wide meshes → heightmap (terrain, ramps, stairs).
+    // Tall/narrow meshes → AABB wall colliders (trees, walls, buildings).
+    // Naming convention override: col_wall_*, col_stair_*, col_ground_*
+    const groundMeshes: THREE.Mesh[] = []
+    const wallMeshes: THREE.Mesh[] = []
+    const stairMeshes: THREE.Mesh[] = [] // walkable wall colliders
+
+    for (const cm of collisionMeshes) {
+      cm.updateMatrixWorld(true)
+      const name = cm.name.toLowerCase()
+
+      // Explicit naming overrides
+      if (name.includes('ground') || name.includes('floor') || name.includes('terrain')) {
+        groundMeshes.push(cm)
+        continue
+      }
+      if (name.includes('stair') || name.includes('ramp') || name.includes('platform')) {
+        stairMeshes.push(cm)
+        continue
+      }
+      if (name.includes('wall') || name.includes('tree') || name.includes('fence') || name.includes('pillar')) {
+        wallMeshes.push(cm)
+        continue
+      }
+
+      // Auto-classify by aspect ratio: tall & narrow → wall, flat & wide → ground
+      const cmBox = new THREE.Box3().setFromObject(cm)
+      const cmSize = cmBox.getSize(new THREE.Vector3())
+      const footprint = Math.max(cmSize.x, cmSize.z)
+      const heightRatio = cmSize.y / Math.max(footprint, 0.01)
+
+      if (heightRatio > 1.2) {
+        // Taller than wide → wall / obstacle
+        wallMeshes.push(cm)
+      } else {
+        groundMeshes.push(cm)
+      }
+    }
+
+    console.log(`🧱 Collision classification: ${groundMeshes.length} ground, ${wallMeshes.length} wall, ${stairMeshes.length} stair/ramp`)
+
+    // ── Bake ground meshes into a heightmap for O(1) ground queries ──────
+    if (groundMeshes.length > 0 && this.collisionSystem) {
       let totalTris = 0
-      for (const cm of collisionMeshes) {
-        cm.updateMatrixWorld(true)
+      for (const cm of groundMeshes) {
         const geo = cm.geometry
         if (geo.index) {
           totalTris += geo.index.count / 3
@@ -1034,40 +1152,52 @@ export class ObjectLoader {
           if (pos) totalTris += pos.count / 3
         }
       }
-      console.log(`🗺️ Baking heightmap from ${collisionMeshes.length} collision meshes (${totalTris} triangles)…`)
+      console.log(`🗺️ Baking heightmap from ${groundMeshes.length} ground meshes (${totalTris} triangles)…`)
 
       // Temporarily make collision meshes visible so the raycaster can hit them
-      for (const cm of collisionMeshes) cm.visible = true
+      for (const cm of groundMeshes) cm.visible = true
 
       // Create a temporary group containing only the collision meshes so
       // HeightmapCollider doesn't raycast decorative geometry.
       const collisionGroup = new THREE.Group()
       collisionGroup.name = 'level-01-collision-bake'
-      const originalParents = collisionMeshes.map(cm => cm.parent)
-      for (const cm of collisionMeshes) collisionGroup.add(cm)
+      const originalParents = groundMeshes.map(cm => cm.parent)
+      for (const cm of groundMeshes) collisionGroup.add(cm)
       this.scene.add(collisionGroup)
       collisionGroup.updateMatrixWorld(true)
 
-      // Resolution 32 → 32×32 = 1 024 raycasts (sufficient for player movement).
-      // Higher values multiply bake time by the square — keep this low.
-      const heightmap = await HeightmapCollider.fromObject(collisionGroup, 32, 'level-01')
+      // Resolution 64 → ~64×46 = ~3k raycasts. Bake stays under a few
+      // seconds even for 40k-triangle collision meshes.
+      const heightmap = await HeightmapCollider.fromObject(collisionGroup, 64, 'level-01')
       this.collisionSystem.registerHeightmap(heightmap)
 
       // Restore meshes back to their original parent (the GLB model)
-      for (let i = 0; i < collisionMeshes.length; i++) {
+      for (let i = 0; i < groundMeshes.length; i++) {
         const parent = originalParents[i]
-        if (parent) parent.add(collisionMeshes[i])
+        if (parent) parent.add(groundMeshes[i])
       }
       this.scene.remove(collisionGroup)
 
-      // Hide collision meshes again
-      for (const cm of collisionMeshes) cm.visible = false
+      for (const cm of groundMeshes) cm.visible = false
     }
+
+    // ── Register wall / obstacle meshes as AABB colliders ────────────────
+    if (this.collisionSystem) {
+      if (wallMeshes.length > 0) {
+        this.collisionSystem.registerWallMeshes(wallMeshes, false)
+      }
+      if (stairMeshes.length > 0) {
+        this.collisionSystem.registerWallMeshes(stairMeshes, true)
+      }
+    }
+
+    // Hide all collision meshes
+    for (const cm of collisionMeshes) cm.visible = false
 
     const bbox = new THREE.Box3().setFromObject(model)
     const size = new THREE.Vector3()
     bbox.getSize(size)
-    console.log(`🏗️ level_01.glb loaded — ${meshChildren.length} meshes, ${collisionMeshes.length} collision-only, size (${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)})`)
+    console.log(`🏗️ level_01.glb loaded — ${meshChildren.length} meshes, ${collisionMeshes.length} collision-only (${groundMeshes.length} ground + ${wallMeshes.length} wall + ${stairMeshes.length} stair), size (${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)})`)
 
     return { collisionMeshes, visibleMeshes }
   }

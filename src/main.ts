@@ -2,7 +2,7 @@ import './style.css'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import Stats from 'three/examples/jsm/libs/stats.module.js'
-import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js'
+// GUI import removed — now handled by DebugGUIManager
 import { Sky } from 'three/examples/jsm/objects/Sky.js'
 import { ObjectManager } from './systems/ObjectManager'
 import { ConfigManager } from './systems/ConfigManager'
@@ -28,9 +28,10 @@ import { PauseOverlay } from './systems/PauseOverlay'
 import { CharacterAnimationSystem, AnimationClipRegistry, buildQuaterniusToRigifyRemap } from './systems/CharacterAnimationSystem'
 import { AnimationBrowser } from './systems/AnimationBrowser'
 import { AnimationStateMachine, createPlayerStateMachineConfig, AnimStateParams } from './systems/AnimationStateMachine'
-import { SHOT_PARAMS, type BattleShotType } from './systems/BattleCameraController'
+// SHOT_PARAMS/BattleShotType imports moved to DebugGUIManager
 import { NPCSystem } from './systems/NPCSystem'
 import { NPCAISystem } from './systems/NPCAISystem'
+import { DistanceLODSystem, DistanceTier } from './systems/DistanceLODSystem'
 import { DialogueManager } from './systems/DialogueSystem'
 import { BattleSystem } from './systems/BattleSystem'
 import { BattleAnimSync, registerDefaultSyncPoints } from './systems/BattleAnimSync'
@@ -423,9 +424,9 @@ class LandSystem {
       uSpotlightDirection: { value: new THREE.Vector3(0, -1, 0) },
       uSpotlightColor: { value: new THREE.Color(1, 1, 1) },
       uSpotlightIntensity: { value: 0.0 },
-      uSpotlightAngle: { value: Math.PI / 8 }, // 22.5 degrees - tight focus
-      uSpotlightPenumbra: { value: 0.3 }, // Sharper edges
-      uSpotlightDistance: { value: 80 }
+      uSpotlightAngle: { value: 1 * (Math.PI / 180) }, // 1 degree
+      uSpotlightPenumbra: { value: 0.15 },
+      uSpotlightDistance: { value: 173 }
     }
   }
 
@@ -804,10 +805,6 @@ interface AnimationConfig {
 interface DebugState {
   active: boolean
   stats: Stats | null
-  gui: GUI | null
-  gameplayGui: GUI | null
-  lightingGui: GUI | null
-  battleCameraGui: GUI | null
   debugGUIManager: DebugGUIManager | null
   helpers: THREE.Object3D[]
   freezeSun: boolean
@@ -906,6 +903,7 @@ class IntegratedThreeJSApp {
   // NPC systems
   private npcSystem: NPCSystem | null = null
   private npcAISystem: NPCAISystem | null = null
+  private distanceLOD: DistanceLODSystem = new DistanceLODSystem()
   private dialogueManager: DialogueManager | null = null
   private battleSystem: BattleSystem | null = null
   private battleAnimSync: BattleAnimSync | null = null
@@ -971,14 +969,13 @@ class IntegratedThreeJSApp {
   private debugState: DebugState = {
     active: false,
     stats: null,
-    gui: null,
-    gameplayGui: null,
-    lightingGui: null,
-    battleCameraGui: null,
     debugGUIManager: null,
     helpers: [],
     freezeSun: false,
   }
+
+  /** Shared mutable config for the sun day/night cycle — referenced by DebugGUIManager. */
+  private sunCycle = { frozen: false, speed: 0.0001 }
 
   constructor(
     private container: HTMLElement,
@@ -1261,6 +1258,12 @@ class IntegratedThreeJSApp {
       await this.npcAISystem.spawnFormationGroup('unit-red',   'red',   new THREE.Vector3(-22, 0, -22), 4, 3)
       await this.npcAISystem.spawnFormationGroup('unit-green', 'green', new THREE.Vector3( 22, 0, -22), 4, 3)
       await this.npcAISystem.spawnFormationGroup('unit-blue',  'blue',  new THREE.Vector3(  0, 0,  28), 4, 3)
+
+      // Register all NPCs with distance LOD system
+      for (const npc of this.npcSystem.getAllNPCs()) {
+        this.distanceLOD.registerNPC(npc.model)
+      }
+
       // Give PlayerController awareness of NPCs and scene objects for tap-to-navigate.
       this.playerController.setNPCSystem(this.npcSystem)
       this.playerController.setObjectManager(this.objectManager)
@@ -1691,28 +1694,27 @@ class IntegratedThreeJSApp {
     this.debugState.stats.dom.style.left = ''
     this.container.appendChild(this.debugState.stats.dom)
     
-    // Create legacy GUI for backward compatibility
-    this.debugState.gui = new GUI()
-    this.debugState.gui.domElement.style.position = 'absolute'
-    this.debugState.gui.domElement.style.top = '0px'
-    this.debugState.gui.domElement.style.right = '0px'
-    this.debugState.gui.domElement.style.zIndex = '15000'
-    this.container.appendChild(this.debugState.gui.domElement)
-    
-    // Note: DebugGUIManager and ParameterGUI removed - using legacy GUI only
-    this.debugState.gui.close()
-    
-    // Add character shader controls (deferred — waits for player mesh to load)
-    this.playerController.ready.then(() => this.setupCharacterShaderGUI())
-    
-    // Create Gameplay GUI column (separate panel to the left of Controls)
-    this.setupGameplayGUI()
-
-    // Create Lighting GUI column
-    this.setupLightingGUI()
-
-    // Create Battle Camera tuning panel
-    this.setupBattleCameraGUI()
+    // Create the tabbed Debug GUI Manager (replaces legacy 4-column GUIs)
+    this.debugState.debugGUIManager = new DebugGUIManager(this.container, {
+      scene: this.scene,
+      camera: this.camera,
+      renderer: this.renderer,
+      cameraManager: this.cameraManager,
+      playerController: this.playerController,
+      battleAnimSync: this.battleAnimSync ?? undefined,
+      sky: this.sky,
+      skyConfig: this.skyConfig,
+      ambientLight: this.ambientLight,
+      keyLight: this.keyLight,
+      fillLight: this.fillLight,
+      retroPostProcessing: this.retroPostProcessing,
+      landSystem: this.landSystem,
+      npcSystem: this.npcSystem,
+      collisionSystem: this.collisionSystem,
+      updateSunPosition: () => this.updateSunPosition(),
+      sunCycle: this.sunCycle,
+    })
+    this.debugState.debugGUIManager.initialize()
     
     // Add helpers
     this.addHelpers()
@@ -1720,10 +1722,7 @@ class IntegratedThreeJSApp {
     // Enable performance monitoring
     performanceMonitor.enable()
     
-    // Show player debug wireframe (camera mode check removed - no 'player' mode exists)
-    // this.playerController.setDebugVisible(true)
-    
-    logger.info(LogModule.SYSTEM, 'Debug mode enabled with centralized GUI Manager and Parameter GUI')
+    logger.info(LogModule.SYSTEM, 'Debug mode enabled with tabbed GUI Manager')
   }
 
   private disableDebug(): void {
@@ -1735,30 +1734,7 @@ class IntegratedThreeJSApp {
       this.debugState.stats = null
     }
     
-    // Remove legacy GUI
-    if (this.debugState.gui) {
-      this.debugState.gui.destroy()
-      this.debugState.gui = null
-    }
-    
-    // Remove gameplay GUI
-    if (this.debugState.gameplayGui) {
-      this.debugState.gameplayGui.destroy()
-      this.debugState.gameplayGui = null
-    }
-    
-    // Remove lighting GUI
-    if (this.debugState.lightingGui) {
-      this.debugState.lightingGui.destroy()
-      this.debugState.lightingGui = null
-    }
-
-    if (this.debugState.battleCameraGui) {
-      this.debugState.battleCameraGui.destroy()
-      this.debugState.battleCameraGui = null
-    }
-    
-    // Dispose of centralized GUI Manager
+    // Dispose of tabbed Debug GUI Manager
     if (this.debugState.debugGUIManager) {
       this.debugState.debugGUIManager.dispose()
       this.debugState.debugGUIManager = null
@@ -1779,495 +1755,7 @@ class IntegratedThreeJSApp {
     logger.info(LogModule.SYSTEM, 'Debug mode disabled - parameters preserved')
   }
 
-  // setupGUI method removed - now handled by DebugGUIManager
-
-  // All GUI setup methods removed - now handled by DebugGUIManager
-
-  /**
-   * Setup lil-gui controls for the character shader uniforms.
-   * Collects all ShaderMaterials from the player mesh and binds sliders + color pickers.
-   */
-  private setupCharacterShaderGUI(): void {
-    const gui = this.debugState.gui
-    if (!gui) return
-
-    const playerMesh = this.playerController.getMesh()
-    if (!playerMesh) {
-      console.warn('⚠️ Player mesh not available for character shader GUI')
-      return
-    }
-
-    // Collect all ShaderMaterials from the player model
-    const shaderMaterials: THREE.ShaderMaterial[] = []
-    playerMesh.traverse((child: THREE.Object3D) => {
-      if ((child as THREE.Mesh).isMesh) {
-        const mat = (child as THREE.Mesh).material
-        if (mat && (mat as THREE.ShaderMaterial).isShaderMaterial) {
-          shaderMaterials.push(mat as THREE.ShaderMaterial)
-        }
-      }
-    })
-
-    if (shaderMaterials.length === 0) {
-      console.warn('⚠️ No ShaderMaterials found on player mesh')
-      return
-    }
-
-    // Read initial values from the first material
-    const ref = shaderMaterials[0].uniforms
-
-    // Proxy object for lil-gui (works with hex strings for colours)
-    const params = {
-      // colour
-      modelColor:     '#' + (ref.uModelColor?.value as THREE.Color).getHexString(),
-      // shading
-      ambient:        ref.uAmbient?.value ?? 0.55,
-      brightBoost:    ref.uBrightBoost?.value ?? 0.18,
-      bands:          ref.uBands?.value ?? 3.0,
-      // primary light (read-only direction set by dominant-light system)
-      lightIntensity: ref.uLightIntensity?.value ?? 1.0,
-      lightColor:     '#' + (ref.uLightColor?.value as THREE.Color ?? new THREE.Color(1,1,0.95)).getHexString(),
-      // secondary light
-      light2Intensity: ref.uLight2Intensity?.value ?? 0.0,
-      light2Color:     '#' + (ref.uLight2Color?.value as THREE.Color ?? new THREE.Color(0.6,0.7,1)).getHexString(),
-      // rim light
-      rimColor:       '#' + (ref.uRimColor?.value as THREE.Color ?? new THREE.Color(1,1,1)).getHexString(),
-      rimStrength:    ref.uRimStrength?.value ?? 0.45,
-      rimPower:       ref.uRimPower?.value ?? 2.5,
-      // specular
-      specStrength:   ref.uSpecStrength?.value ?? 0.15,
-      specPower:      ref.uSpecPower?.value ?? 32.0,
-      // outline
-      outlineWidth:   ref.uOutlineWidth?.value ?? 0.38,
-      outlineColor:   '#' + (ref.uOutlineColor?.value as THREE.Color).getHexString(),
-      // manual light direction override
-      lightDirX:      ref.uLightDir?.value?.x ?? 0.5,
-      lightDirY:      ref.uLightDir?.value?.y ?? 0.8,
-      lightDirZ:      ref.uLightDir?.value?.z ?? 0.3
-    }
-
-    // Helper: update a uniform on every collected material
-    const setUniform = (name: string, value: any) => {
-      for (const mat of shaderMaterials) {
-        if (mat.uniforms[name]) mat.uniforms[name].value = value
-      }
-    }
-    const setColorUniform = (name: string, hex: string) => {
-      for (const mat of shaderMaterials) {
-        if (mat.uniforms[name]) (mat.uniforms[name].value as THREE.Color).set(hex)
-      }
-    }
-
-    const folder = gui.addFolder('🎨 Character Shader')
-
-    // ---- Colour & Shading ----
-    folder.addColor(params, 'modelColor').name('Model Color').onChange((v: string) => setColorUniform('uModelColor', v))
-    folder.add(params, 'ambient',     0,   1,   0.01).name('Ambient').onChange((v: number) => setUniform('uAmbient', v))
-    folder.add(params, 'brightBoost', 0,   0.5, 0.01).name('Bright Boost').onChange((v: number) => setUniform('uBrightBoost', v))
-    folder.add(params, 'bands',       1,   8,   1).name('Toon Bands').onChange((v: number) => setUniform('uBands', v))
-
-    // ---- Rim / Back Light ----
-    const rimFolder = folder.addFolder('💡 Rim Light')
-    rimFolder.addColor(params, 'rimColor').name('Rim Color').onChange((v: string) => setColorUniform('uRimColor', v))
-    rimFolder.add(params, 'rimStrength', 0,   1.5, 0.01).name('Rim Strength').onChange((v: number) => setUniform('uRimStrength', v))
-    rimFolder.add(params, 'rimPower',    0.5, 8.0, 0.1).name('Rim Power').onChange((v: number) => setUniform('uRimPower', v))
-
-    // ---- Specular ----
-    const specFolder = folder.addFolder('✨ Specular')
-    specFolder.add(params, 'specStrength', 0,  0.5, 0.01).name('Spec Strength').onChange((v: number) => setUniform('uSpecStrength', v))
-    specFolder.add(params, 'specPower',    4, 128,  1).name('Spec Power').onChange((v: number) => setUniform('uSpecPower', v))
-    specFolder.close()
-
-    // ---- Outline ----
-    const outFolder = folder.addFolder('🖊️ Outline')
-    outFolder.add(params, 'outlineWidth', 0, 1, 0.01).name('Width').onChange((v: number) => setUniform('uOutlineWidth', v))
-    outFolder.addColor(params, 'outlineColor').name('Color').onChange((v: string) => setColorUniform('uOutlineColor', v))
-    outFolder.close()
-
-    // ---- Dominant Lights (artist overrides) ----
-    const lightFolder = folder.addFolder('☀️ Dominant Lights')
-    lightFolder.addColor(params, 'lightColor').name('Light 1 Color').onChange((v: string) => setColorUniform('uLightColor', v))
-    lightFolder.add(params, 'lightIntensity', 0, 3, 0.01).name('Light 1 Intensity').onChange((v: number) => setUniform('uLightIntensity', v))
-    lightFolder.addColor(params, 'light2Color').name('Light 2 Color').onChange((v: string) => setColorUniform('uLight2Color', v))
-    lightFolder.add(params, 'light2Intensity', 0, 3, 0.01).name('Light 2 Intensity').onChange((v: number) => setUniform('uLight2Intensity', v))
-    lightFolder.close()
-
-    folder.close()
-    console.log(`🎨 Character shader GUI created (${shaderMaterials.length} material(s))`)
-  }
-
-  // ============================================================================
-  // LIGHTING GUI
-  // ============================================================================
-
-  /**
-   * Create a "Lighting" lil-gui panel with World and Local lighting controls.
-   */
-  private setupLightingGUI(): void {
-    if (this.debugState.lightingGui) return
-
-    const gui = new GUI({ title: 'Lighting' })
-    gui.domElement.style.position = 'absolute'
-    gui.domElement.style.top = '0px'
-    gui.domElement.style.right = '490px' // 3rd column to the left
-    gui.domElement.style.zIndex = '15000'
-    this.container.appendChild(gui.domElement)
-    this.debugState.lightingGui = gui
-
-    // ----------------------------------------------------------------
-    // WORLD LIGHTING
-    // ----------------------------------------------------------------
-    const world = gui.addFolder('🌍 World Lighting')
-
-    // --- Ambient ---
-    const ambientParams = {
-      color: '#' + this.ambientLight.color.getHexString(),
-      intensity: this.ambientLight.intensity,
-    }
-    const ambFolder = world.addFolder('Ambient')
-    ambFolder.addColor(ambientParams, 'color').name('Color')
-      .onChange((v: string) => this.ambientLight.color.set(v))
-    ambFolder.add(ambientParams, 'intensity', 0, 2, 0.01).name('Intensity')
-      .onChange((v: number) => { this.ambientLight.intensity = v })
-    ambFolder.close()
-
-    // --- Sun / Key Light (drives the sky system + shader uniforms together) ---
-    const sunParams = {
-      elevation: this.skyConfig.elevation,
-      azimuth:   this.skyConfig.azimuth,
-      freezeSun: this.debugState.freezeSun,
-      castShadow: this.keyLight.castShadow,
-      shadowRadius: this.keyLight.shadow.radius,
-      shadowBias: this.keyLight.shadow.bias,
-    }
-    const keyFolder = world.addFolder('☀️ Sun / Key Light')
-    keyFolder.add(sunParams, 'freezeSun').name('❄️ Freeze Sun')
-      .onChange((v: boolean) => { this.debugState.freezeSun = v })
-    keyFolder.add(sunParams, 'elevation', -10, 90, 0.5).name('Elevation (°)')
-      .onChange((v: number) => { this.skyConfig.elevation = v; this.updateSunPosition() })
-    keyFolder.add(sunParams, 'azimuth', 0, 360, 1).name('Azimuth (°)')
-      .onChange((v: number) => { this.skyConfig.azimuth = v; this.updateSunPosition() })
-    keyFolder.add(sunParams, 'castShadow').name('Cast Shadow')
-      .onChange((v: boolean) => { this.keyLight.castShadow = v })
-    keyFolder.add(sunParams, 'shadowRadius', 0, 10, 0.1).name('Shadow Radius')
-      .onChange((v: number) => { this.keyLight.shadow.radius = v })
-    keyFolder.add(sunParams, 'shadowBias', -0.01, 0.01, 0.0001).name('Shadow Bias')
-      .onChange((v: number) => { this.keyLight.shadow.bias = v })
-    keyFolder.close()
-
-    // --- Fill Light ---
-    const fl = this.fillLight
-    const fillParams = {
-      color: '#' + fl.color.getHexString(),
-      intensity: fl.intensity,
-      posX: fl.position.x,
-      posY: fl.position.y,
-      posZ: fl.position.z,
-    }
-    const fillFolder = world.addFolder('🌙 Fill Light')
-    fillFolder.addColor(fillParams, 'color').name('Color')
-      .onChange((v: string) => fl.color.set(v))
-    fillFolder.add(fillParams, 'intensity', 0, 3, 0.01).name('Intensity')
-      .onChange((v: number) => { fl.intensity = v })
-    fillFolder.add(fillParams, 'posX', -100, 100, 0.5).name('Pos X')
-      .onChange((v: number) => { fl.position.x = v })
-    fillFolder.add(fillParams, 'posY', 0, 100, 0.5).name('Pos Y')
-      .onChange((v: number) => { fl.position.y = v })
-    fillFolder.add(fillParams, 'posZ', -100, 100, 0.5).name('Pos Z')
-      .onChange((v: number) => { fl.position.z = v })
-    fillFolder.close()
-
-    // --- Retro Post-Processing ---
-    const postFxFolder = world.addFolder('🧪 Post FX')
-    if (this.retroPostProcessing) {
-      const retroConfig = this.retroPostProcessing.getConfig()
-      const postFxParams = {
-        dithering: retroConfig.ditheringEnabled ?? (retroConfig.ditherAmount > 0.0001),
-        ditherAmount: Math.max(retroConfig.ditherAmount, 0.3)
-      }
-
-      postFxFolder.add(postFxParams, 'dithering').name('Dithering')
-        .onChange((enabled: boolean) => {
-          const current = this.retroPostProcessing.getConfig().ditherAmount
-          if (current > 0.0001) postFxParams.ditherAmount = current
-          this.retroPostProcessing.setDitheringEnabled(enabled)
-          this.retroPostProcessing.setDitherAmount(enabled ? postFxParams.ditherAmount : 0)
-        })
-    } else {
-      postFxFolder.add({ note: 'Retro post FX unavailable' }, 'note').name('Status').disable()
-    }
-    postFxFolder.close()
-
-    world.close()
-
-    // ----------------------------------------------------------------
-    // LOCAL LIGHTING
-    // ----------------------------------------------------------------
-    const local = gui.addFolder('💡 Local Lighting')
-
-    // --- Player Spotlight ---
-    const spotlight = this.cameraManager.getPlayerSpotlight()
-    if (spotlight) {
-      const RAD2DEG = 180 / Math.PI
-      const DEG2RAD = Math.PI / 180
-      // Read from config so sliders reflect the values that actually drive behaviour.
-      // updatePlayerSpotlight() overrides spotlight.position and spotlight.intensity
-      // every frame from config, so we must write back to config, not the object.
-      const spotConfig = this.cameraManager.getConfig().spotlight
-      let savedIntensity = spotConfig.intensity  // kept in sync so visible toggle can restore it
-
-      const spotParams = {
-        color: '#' + spotlight.color.getHexString(),
-        intensity: spotConfig.intensity,
-        angle: spotlight.angle * RAD2DEG,
-        penumbra: spotlight.penumbra,
-        decay: spotlight.decay,
-        distance: spotlight.distance,
-        height: spotConfig.height,    // vertical distance above player (drives position)
-        offset: spotConfig.offset,    // camera-forward offset (drives position)
-        castShadow: spotlight.castShadow,
-        shadowNear: spotlight.shadow.camera.near,
-        shadowFar: spotlight.shadow.camera.far,
-        visible: spotlight.visible,
-      }
-
-      const spotFolder = local.addFolder('🔦 Player Spotlight')
-      // "Enabled" must zero the config intensity so updatePlayerSpotlight() stops the light
-      spotFolder.add(spotParams, 'visible').name('Enabled')
-        .onChange((v: boolean) => {
-          const cfg = this.cameraManager.getConfig().spotlight
-          if (v) {
-            this.cameraManager.updateConfig({ spotlight: { ...cfg, intensity: savedIntensity } })
-          } else {
-            savedIntensity = cfg.intensity
-            this.cameraManager.updateConfig({ spotlight: { ...cfg, intensity: 0 } })
-          }
-        })
-      spotFolder.addColor(spotParams, 'color').name('Color')
-        .onChange((v: string) => {
-          spotlight.color.set(v)
-          this.landSystem?.setSpotlightColor(spotlight.color)
-        })
-      // Intensity must go through config because updatePlayerSpotlight() reads
-      // config.spotlight.intensity each frame and overwrites spotlight.intensity
-      spotFolder.add(spotParams, 'intensity', 0, 20, 0.1).name('Intensity')
-        .onChange((v: number) => {
-          savedIntensity = v
-          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, intensity: v } })
-          this.landSystem?.setSpotlightIntensity(v)
-        })
-      spotFolder.add(spotParams, 'angle', 1, 90, 0.5).name('Cone Angle (°)')
-        .onChange((v: number) => {
-          spotlight.angle = v * DEG2RAD
-          this.landSystem?.setSpotlightAngle(v * DEG2RAD)
-        })
-      spotFolder.add(spotParams, 'penumbra', 0, 1, 0.01).name('Penumbra')
-        .onChange((v: number) => {
-          spotlight.penumbra = v
-          this.landSystem?.setSpotlightPenumbra(v)
-        })
-      spotFolder.add(spotParams, 'decay', 0, 5, 0.1).name('Decay')
-        .onChange((v: number) => { spotlight.decay = v })
-      spotFolder.add(spotParams, 'distance', 0, 200, 1).name('Distance')
-        .onChange((v: number) => {
-          spotlight.distance = v
-          this.landSystem?.setSpotlightDistance(v)
-        })
-      // Height/Offset drive position inside updatePlayerSpotlight() each frame
-      spotFolder.add(spotParams, 'height', 0, 100, 0.5).name('Height Above Player')
-        .onChange((v: number) => {
-          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, height: v } })
-        })
-      spotFolder.add(spotParams, 'offset', -20, 20, 0.5).name('Camera Offset')
-        .onChange((v: number) => {
-          this.cameraManager.updateConfig({ spotlight: { ...this.cameraManager.getConfig().spotlight, offset: v } })
-        })
-      spotFolder.add(spotParams, 'castShadow').name('Cast Shadow')
-        .onChange((v: boolean) => { spotlight.castShadow = v })
-      spotFolder.add(spotParams, 'shadowNear', 0.1, 50, 0.1).name('Shadow Near')
-        .onChange((v: number) => { spotlight.shadow.camera.near = v; spotlight.shadow.camera.updateProjectionMatrix() })
-      spotFolder.add(spotParams, 'shadowFar', 10, 500, 1).name('Shadow Far')
-        .onChange((v: number) => { spotlight.shadow.camera.far = v; spotlight.shadow.camera.updateProjectionMatrix() })
-      spotFolder.close()
-    } else {
-      local.add({ note: 'Spotlight disabled' }, 'note').name('Status').disable()
-    }
-
-    local.close()
-    gui.close()
-    console.log('💡 Lighting GUI created')
-  }
-
-  // ============================================================================
-  // GAMEPLAY GUI
-  // ============================================================================
-
-  /**
-   * Create a "Gameplay" lil-gui panel to the left of the Controls panel.
-   * Exposes walk/run speed, jump force, gravity and friction.
-   */
-  private setupGameplayGUI(): void {
-    if (this.debugState.gameplayGui) return // already created
-
-    const gui = new GUI({ title: 'Gameplay' })
-    gui.domElement.style.position = 'absolute'
-    gui.domElement.style.top = '0px'
-    gui.domElement.style.right = '245px' // offset to the left of the Controls panel (~245px)
-    gui.domElement.style.zIndex = '15000'
-    this.container.appendChild(gui.domElement)
-    this.debugState.gameplayGui = gui
-
-    const config = this.playerController.getConfig()
-
-    const params = {
-      walkSpeed:  config.walkSpeed,
-      runSpeed:   config.runSpeed,
-      jumpForce:  config.jumpForce,
-      gravity:    config.gravity,
-      friction:   config.friction,
-      airResistance: config.airResistance,
-    }
-
-    const movement = gui.addFolder('🏃 Movement')
-    movement.add(params, 'walkSpeed', 0.5, 10, 0.1).name('Walk Speed')
-      .onChange((v: number) => this.playerController.updateConfig({ walkSpeed: v }))
-    movement.add(params, 'runSpeed', 1, 20, 0.5).name('Run Speed')
-      .onChange((v: number) => this.playerController.updateConfig({ runSpeed: v }))
-    movement.close()
-
-    const physics = gui.addFolder('⚡ Physics')
-    physics.add(params, 'jumpForce', 1, 30, 0.5).name('Jump Force')
-      .onChange((v: number) => this.playerController.updateConfig({ jumpForce: v }))
-    physics.add(params, 'gravity', 1, 60, 0.5).name('Gravity')
-      .onChange((v: number) => this.playerController.updateConfig({ gravity: v }))
-    physics.add(params, 'friction', 0, 1, 0.01).name('Friction')
-      .onChange((v: number) => this.playerController.updateConfig({ friction: v }))
-    physics.add(params, 'airResistance', 0.8, 1, 0.001).name('Air Resistance')
-      .onChange((v: number) => this.playerController.updateConfig({ airResistance: v }))
-    physics.close()
-
-    gui.close()
-    console.log('🎮 Gameplay GUI created')
-  }
-
-  private setupBattleCameraGUI(): void {
-    if (this.debugState.battleCameraGui) return
-
-    const battleCtrl = this.cameraManager.getBattleCameraController()
-    if (!battleCtrl) return
-
-    const gui = new GUI({ title: '⚔️ Battle Camera' })
-    gui.domElement.style.position = 'absolute'
-    gui.domElement.style.top = '0px'
-    gui.domElement.style.right = '735px' // 4th column, left of Lighting panel
-    gui.domElement.style.zIndex = '15000'
-    this.container.appendChild(gui.domElement)
-    this.debugState.battleCameraGui = gui
-
-    // ── Shot Parameters ──────────────────────────────────────────────────
-    const shotsFolder = gui.addFolder('Shot Params')
-
-    const shots: BattleShotType[] = [
-      'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
-      'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
-    ]
-
-    for (const type of shots) {
-      const params = SHOT_PARAMS[type]
-      const sub = shotsFolder.addFolder(type)
-
-      sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
-      sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
-      sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
-      sub.add(params, 'lookFwdOffset',    -6,   6,  0.05).name('look fwd offset')
-      sub.add(params, 'lookSideOffset',   -6,   6,  0.05).name('look side offset')
-      sub.add(params, 'lookHeightOffset',   0,  4, 0.05).name('look height')
-      sub.add(params, 'fov',               20, 90,   1).name('FOV')
-
-      const actions = {
-        preview: () => {
-          if (battleCtrl.active) {
-            battleCtrl.previewShot(type)
-          } else {
-            console.warn(`⚔️ [BattleCam] Not active — enter a battle first, then use Preview.`)
-          }
-        },
-      }
-      sub.add(actions, 'preview').name('▶ Preview shot')
-      sub.close()
-    }
-    shotsFolder.close()
-
-    // ── Animation Sync Points ────────────────────────────────────────────
-    const animSync = this.battleAnimSync
-    if (animSync) {
-      const syncFolder = gui.addFolder('Anim Sync Points')
-
-      const clips = animSync.getRegisteredClips()
-      for (const clipName of clips) {
-        const clipFolder = syncFolder.addFolder(clipName)
-        const points = animSync.getSyncPoints(clipName)
-
-        for (const point of points) {
-          clipFolder
-            .add(point, 'fraction', 0, 1, 0.01)
-            .name(point.label)
-            .onChange(() => animSync.resortSyncPoints(clipName))
-        }
-        clipFolder.close()
-      }
-      syncFolder.close()
-
-      // ── Live Status Monitor ────────────────────────────────────────────
-      const statusFolder = gui.addFolder('Live Status')
-      const statusProxy = {
-        clip: '—',
-        character: '—',
-        mode: '—',
-        fraction: 0,
-        nextEvent: '—',
-        queue: 0,
-      }
-      statusFolder.add(statusProxy, 'clip').name('clip').listen().disable()
-      statusFolder.add(statusProxy, 'character').name('character').listen().disable()
-      statusFolder.add(statusProxy, 'mode').name('mode').listen().disable()
-      statusFolder.add(statusProxy, 'fraction', 0, 1).name('progress').listen().disable()
-      statusFolder.add(statusProxy, 'nextEvent').name('next event').listen().disable()
-      statusFolder.add(statusProxy, 'queue', 0, 10, 1).name('queue').listen().disable()
-
-      // Poll at 10 Hz
-      const statusInterval = setInterval(() => {
-        if (!this.debugState.battleCameraGui) { clearInterval(statusInterval); return }
-        const s = animSync.getActiveStatus()
-        statusProxy.clip      = s.clipName ?? '—'
-        statusProxy.character = s.characterId ?? '—'
-        statusProxy.mode      = s.mode ?? '—'
-        statusProxy.fraction  = s.fraction
-        statusProxy.nextEvent = s.nextEvent ?? '—'
-        statusProxy.queue     = s.queueLength
-      }, 100)
-
-      statusFolder.open()
-    }
-
-    // ── Global Actions ───────────────────────────────────────────────────
-    const printActions: Record<string, () => void> = {
-      printShotConfig: () => battleCtrl.printConfig(),
-    }
-    gui.add(printActions, 'printShotConfig').name('📋 Print shot config')
-
-    if (animSync) {
-      const syncActions: Record<string, () => void> = {
-        printSyncPoints: () => animSync.printSyncPoints(),
-        printAll: () => { battleCtrl.printConfig(); animSync.printSyncPoints() },
-      }
-      gui.add(syncActions, 'printSyncPoints').name('🎬 Print sync points')
-      gui.add(syncActions, 'printAll').name('💾 Print all (shots + sync)')
-    }
-
-    gui.close()
-    console.log('⚔️ Battle Camera GUI created')
-  }
+  // Legacy GUI setup methods removed — now handled by DebugGUIManager
 
   private addHelpers(): void {
     // Grid helper
@@ -2337,6 +1825,11 @@ class IntegratedThreeJSApp {
     if (allLevelMeshes.length > 0) {
       this.cameraManager.setCollisionMeshes(allLevelMeshes)
       console.log(`📷 Registered ${allLevelMeshes.length} level meshes for camera collision`)
+    }
+
+    // Register visible level meshes with distance LOD system
+    for (const mesh of visibleMeshes) {
+      this.distanceLOD.registerLevelMesh(mesh)
     }
 
     // Build climbable platform structure and wire ClimbSystem to player
@@ -3449,6 +2942,18 @@ void main() {
     if (this.landSystem) {
       this.landSystem.setLandShadowCasting(settings.shadowsCast)
     }
+
+    // Distance LOD thresholds — sync with fog so objects dissolve before pop-in
+    this.distanceLOD.setNPCThresholds({
+      silhouette: settings.npcSilhouetteDist,
+      dissolve: settings.npcDissolveDist,
+      hidden: settings.npcHiddenDist,
+    })
+    this.distanceLOD.setLevelThresholds({
+      silhouette: settings.levelSilhouetteDist,
+      dissolve: settings.levelDissolveDist,
+      hidden: settings.levelHiddenDist,
+    })
   }
 
   private recoverGraphicsPipeline(reason: string): void {
@@ -3848,6 +3353,29 @@ void main() {
         this.reconcileModalState()
         const inDialogue = this.dialogueManager?.isDialogueActive() ?? false
         const inBattle = this.battleSystem?.isBattleActive() ?? false
+
+        // Distance LOD: update material swaps, visibility, dither dissolve
+        const lodCamera = this.cameraManager?.getCamera() ?? this.camera
+        this.distanceLOD.update(lodCamera)
+
+        // Sync NPC animation LOD to distance tiers
+        if (this.npcSystem) {
+          const playerPos = this.playerController.getPosition()
+          for (const npc of this.npcSystem.getAllNPCs()) {
+            const dist = npc.position.distanceTo(playerPos)
+            const tier = this.distanceLOD.getTier(npc.model)
+            if (tier === DistanceTier.HIDDEN) {
+              this.characterAnimationSystem.setAnimFrozen(npc.id, true)
+            } else if (tier === DistanceTier.DISSOLVE || tier === DistanceTier.SILHOUETTE) {
+              this.characterAnimationSystem.setAnimFrozen(npc.id, false)
+              this.characterAnimationSystem.setAnimLODSkip(npc.id, dist < 40 ? 1 : 3)
+            } else {
+              this.characterAnimationSystem.setAnimFrozen(npc.id, false)
+              this.characterAnimationSystem.setAnimLODSkip(npc.id, 0)
+            }
+          }
+        }
+
         // Update AI first so animation state reads the current movement on the same frame.
         // AI is also suppressed during the Menu Event state.
         if (this.npcAISystem && !inDialogue && !inBattle && !inMenu) {
@@ -3913,11 +3441,9 @@ void main() {
       }
 
       // Update sky system for automatic day/night cycle (throttled — sun moves very slowly)
-      // Skipped while the Lighting GUI has the sun frozen (debugState.freezeSun).
-      if (this.sky && this.frameCount % 10 === 0 && !this.debugState.freezeSun) {
-        // Animate sun elevation for day/night cycle (slow rotation)
-        const cycleSpeed = 0.0001 // Very slow for realistic effect
-        this.skyConfig.elevation = Math.sin(currentTime * cycleSpeed) * 45 + 15 // -30 to 60 degrees
+      // Skipped while the sun is frozen via debug GUI or legacy debugState.
+      if (this.sky && this.frameCount % 10 === 0 && !this.debugState.freezeSun && !this.sunCycle.frozen) {
+        this.skyConfig.elevation = Math.sin(currentTime * this.sunCycle.speed) * 45 + 15 // -30 to 60 degrees
         this.updateSunPosition()
       }
       

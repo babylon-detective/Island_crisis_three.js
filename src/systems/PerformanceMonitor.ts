@@ -230,6 +230,13 @@ export interface QualitySettings {
   shadowsCast: boolean
   oceanSegments: number      // vertex resolution for close-up ocean LOD
   postProcessingEnabled: boolean
+  // Distance LOD thresholds — tied to fog distance so objects fade before pop-in
+  npcSilhouetteDist: number
+  npcDissolveDist: number
+  npcHiddenDist: number
+  levelSilhouetteDist: number
+  levelDissolveDist: number
+  levelHiddenDist: number
 }
 
 export interface QualityTelemetry {
@@ -250,6 +257,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     shadowsCast: false,
     oceanSegments: 32,
     postProcessingEnabled: true,
+    npcSilhouetteDist: 25, npcDissolveDist: 40, npcHiddenDist: 55,
+    levelSilhouetteDist: 40, levelDissolveDist: 60, levelHiddenDist: 80,
   },
   medium: {
     pixelRatio: 0.75,
@@ -260,6 +269,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     shadowsCast: true,
     oceanSegments: 64,
     postProcessingEnabled: true,
+    npcSilhouetteDist: 40, npcDissolveDist: 60, npcHiddenDist: 80,
+    levelSilhouetteDist: 70, levelDissolveDist: 100, levelHiddenDist: 140,
   },
   high: {
     pixelRatio: 1.0,
@@ -270,6 +281,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     shadowsCast: true,
     oceanSegments: 128,
     postProcessingEnabled: true,
+    npcSilhouetteDist: 50, npcDissolveDist: 70, npcHiddenDist: 90,
+    levelSilhouetteDist: 80, levelDissolveDist: 120, levelHiddenDist: 160,
   },
   ultra: {
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
@@ -280,6 +293,8 @@ const QUALITY_PRESETS: Record<QualityTier, QualitySettings> = {
     shadowsCast: true,
     oceanSegments: 128,
     postProcessingEnabled: true,
+    npcSilhouetteDist: 70, npcDissolveDist: 100, npcHiddenDist: 140,
+    levelSilhouetteDist: 120, levelDissolveDist: 180, levelHiddenDist: 250,
   },
 }
 

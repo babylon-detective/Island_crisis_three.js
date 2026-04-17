@@ -101,6 +101,12 @@ interface CharacterAnimationState {
   clipTimeScales: Map<string, number>
   boneRemap?: BoneRemapTable
   paused: boolean
+  /** Animation LOD: skip N frames between mixer updates (0 = every frame). */
+  animLODSkip: number
+  /** Accumulator: counts frames since last mixer update. */
+  animLODAccum: number
+  /** When true, mixer is completely frozen (no updates at all). */
+  animFrozen: boolean
 }
 
 /**
@@ -512,6 +518,9 @@ export class CharacterAnimationSystem {
       clipTimeScales: new Map(),
       boneRemap: config.boneRemap,
       paused: false,
+      animLODSkip: 0,
+      animLODAccum: 0,
+      animFrozen: false,
     }
 
     for (const desc of set.clips) {
@@ -988,7 +997,16 @@ export class CharacterAnimationSystem {
     this.pendingTransitions.length = 0
 
     for (const [, state] of this.characters) {
-      if (!state.paused) {
+      if (state.paused || state.animFrozen) continue
+
+      // Animation LOD: skip frames for distant characters
+      if (state.animLODSkip > 0) {
+        state.animLODAccum++
+        if (state.animLODAccum <= state.animLODSkip) continue
+        // Catch up on skipped time so animation stays in sync
+        state.mixer.update(deltaTime * state.animLODAccum)
+        state.animLODAccum = 0
+      } else {
         state.mixer.update(deltaTime)
       }
     }
@@ -996,6 +1014,28 @@ export class CharacterAnimationSystem {
 
   start(): void { this.isRunning = true }
   stop(): void { this.isRunning = false }
+
+  // ============================================================================
+  // ANIMATION LOD — distance-based update throttling
+  // ============================================================================
+
+  /**
+   * Set how many frames to skip between mixer updates for a character.
+   * 0 = every frame (full quality), 1 = every 2nd, 3 = every 4th.
+   */
+  setAnimLODSkip(characterId: string, skip: number): void {
+    const state = this.characters.get(characterId)
+    if (state) state.animLODSkip = Math.max(0, Math.floor(skip))
+  }
+
+  /**
+   * Completely freeze a character's animation (no mixer updates).
+   * Use for characters beyond the visible distance threshold.
+   */
+  setAnimFrozen(characterId: string, frozen: boolean): void {
+    const state = this.characters.get(characterId)
+    if (state) state.animFrozen = frozen
+  }
 
   // ============================================================================
   // DIAGNOSTICS

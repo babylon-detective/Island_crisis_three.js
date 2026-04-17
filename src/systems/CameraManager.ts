@@ -90,13 +90,13 @@ const DEFAULT_CAMERA_CONFIG: CameraManagerConfig = {
 
   spotlight: {
     enabled: true,
-    intensity: 3,
-    angle: Math.PI / 8,
-    penumbra: 0.3,
-    decay: 2,
-    distance: 80,
-    height: 30,
-    offset: 5,
+    intensity: 3.6,
+    angle: 1 * (Math.PI / 180),
+    penumbra: 0.15,
+    decay: 1.5,
+    distance: 173,
+    height: 25,
+    offset: -0.5,
   },
 
   transitionDuration: 1.0,
@@ -375,8 +375,8 @@ export class CameraManager {
     this.playerSpotlight.castShadow = true
     this.playerSpotlight.shadow.mapSize.width = 2048
     this.playerSpotlight.shadow.mapSize.height = 2048
-    this.playerSpotlight.shadow.camera.near = 10
-    this.playerSpotlight.shadow.camera.far = 100
+    this.playerSpotlight.shadow.camera.near = 12.3
+    this.playerSpotlight.shadow.camera.far = 93
 
     this.scene.add(this.playerSpotlight)
     this.scene.add(this.playerSpotlight.target)
@@ -688,6 +688,9 @@ export class CameraManager {
       this.landSystem.setSpotlightDirection(direction)
       this.landSystem.setSpotlightColor(this.playerSpotlight.color)
       this.landSystem.setSpotlightIntensity(effectiveIntensity)
+      this.landSystem.setSpotlightAngle?.(this.playerSpotlight.angle)
+      this.landSystem.setSpotlightPenumbra?.(this.playerSpotlight.penumbra)
+      this.landSystem.setSpotlightDistance?.(this.playerSpotlight.distance)
     }
   }
 

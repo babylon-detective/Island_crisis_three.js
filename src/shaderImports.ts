@@ -27,6 +27,14 @@ import defaultLightVertexShaderRaw from './shaders/default-light-vertex.glsl'
 import defaultLightFragmentShaderRaw from './shaders/default-light-fragment.glsl'
 import landVertexShaderRaw from './shaders/land-vertex.glsl'
 import landFragmentShaderRaw from './shaders/land-fragment.glsl'
+import sandVertexShaderRaw from './shaders/sand-vertex.glsl'
+import sandFragmentShaderRaw from './shaders/sand-fragment.glsl'
+import concreteVertexShaderRaw from './shaders/concrete-vertex.glsl'
+import concreteFragmentShaderRaw from './shaders/concrete-fragment.glsl'
+import woodVertexShaderRaw from './shaders/wood-vertex.glsl'
+import woodFragmentShaderRaw from './shaders/wood-fragment.glsl'
+import silhouetteVertexShader from './shaders/silhouette-vertex.glsl'
+import silhouetteFragmentShader from './shaders/silhouette-fragment.glsl'
 
 // Concatenate common lighting code with shaders that use it
 // (Character shaders are standalone — no #include replacement needed)
@@ -43,6 +51,30 @@ const defaultLightVertexShader = defaultLightVertexShaderRaw.replace(
   lightingVertexChunk
 )
 const defaultLightFragmentShader = defaultLightFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
+const sandVertexShader = sandVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const sandFragmentShader = sandFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
+const concreteVertexShader = concreteVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const concreteFragmentShader = concreteFragmentShaderRaw.replace(
+  '#include ./common/lighting-fragment.glsl',
+  lightingFragmentChunk
+)
+const woodVertexShader = woodVertexShaderRaw.replace(
+  '#include ./common/lighting-vertex.glsl',
+  lightingVertexChunk
+)
+const woodFragmentShader = woodFragmentShaderRaw.replace(
   '#include ./common/lighting-fragment.glsl',
   lightingFragmentChunk
 )
@@ -71,6 +103,14 @@ export const SHADERS = {
   'src/shaders/default-character-fragment.glsl': defaultCharacterFragmentShader,
   'src/shaders/default-light-vertex.glsl': defaultLightVertexShader,
   'src/shaders/default-light-fragment.glsl': defaultLightFragmentShader,
+  'src/shaders/sand-vertex.glsl': sandVertexShader,
+  'src/shaders/sand-fragment.glsl': sandFragmentShader,
+  'src/shaders/concrete-vertex.glsl': concreteVertexShader,
+  'src/shaders/concrete-fragment.glsl': concreteFragmentShader,
+  'src/shaders/wood-vertex.glsl': woodVertexShader,
+  'src/shaders/wood-fragment.glsl': woodFragmentShader,
+  'src/shaders/silhouette-vertex.glsl': silhouetteVertexShader,
+  'src/shaders/silhouette-fragment.glsl': silhouetteFragmentShader,
 } as const
 
 export type ShaderPath = keyof typeof SHADERS
