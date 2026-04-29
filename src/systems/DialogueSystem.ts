@@ -126,6 +126,12 @@ export class DialogueManager {
   private inputMode: ActiveInputMode = 'keyboard'
   private pendingBattleNpcId: string | null = null
 
+  // — text animation —
+  private textAnimTimer: ReturnType<typeof setInterval> | null = null
+  private isTextAnimating: boolean = false
+  /** Milliseconds between each revealed word. Increase to slow down, decrease to speed up. */
+  public textAnimWordInterval: number = 120
+
   // ── Cluster (multi-NPC) support ──
   private clusterNpcIds: string[] = []
   private selectedClusterIndex = 0
@@ -611,6 +617,13 @@ export class DialogueManager {
     }
 
     // Dialogue is active — determine what to do
+
+    // If text is still animating, reveal it fully before advancing
+    if (this.isTextAnimating) {
+      this.skipTextAnimation()
+      return true
+    }
+
     const node = this.activeTree?.nodes.get(this.activeNodeId ?? '')
     if (!node) {
       traceInputCommand({ source, target: 'dialogue', command: 'confirm', result: 'executed', details: { reason: 'missing-node' } })
@@ -752,6 +765,52 @@ export class DialogueManager {
 
   static choice(text: string, nextNodeId?: string, condition?: () => boolean, onSelect?: () => void, tag?: DialogueChoiceTag): DialogueChoice {
     return { text, nextNodeId, condition, onSelect, tag }
+  }
+
+  // --------------------------------------------------------------------------
+  // TEXT ANIMATION
+  // --------------------------------------------------------------------------
+
+  /** Animate dialogue text appearing word-by-word. */
+  private animateDialogueText(text: string): void {
+    if (!this.overlayText) return
+    // Cancel any in-progress animation
+    if (this.textAnimTimer !== null) {
+      clearInterval(this.textAnimTimer)
+      this.textAnimTimer = null
+    }
+    const words = text.split(' ')
+    if (words.length === 0) {
+      this.overlayText.textContent = text
+      this.isTextAnimating = false
+      return
+    }
+    let wordIndex = 0
+    this.isTextAnimating = true
+    this.overlayText.textContent = ''
+    this.textAnimTimer = setInterval(() => {
+      wordIndex++
+      this.overlayText!.textContent = words.slice(0, wordIndex).join(' ')
+      if (wordIndex >= words.length) {
+        clearInterval(this.textAnimTimer!)
+        this.textAnimTimer = null
+        this.isTextAnimating = false
+      }
+    }, this.textAnimWordInterval)
+  }
+
+  /** Skip to full text immediately. */
+  private skipTextAnimation(): void {
+    if (!this.isTextAnimating) return
+    if (this.textAnimTimer !== null) {
+      clearInterval(this.textAnimTimer)
+      this.textAnimTimer = null
+    }
+    this.isTextAnimating = false
+    if (this.overlayText && this.activeTree && this.activeNodeId) {
+      const node = this.activeTree.nodes.get(this.activeNodeId)
+      if (node) this.overlayText.textContent = node.text
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -917,7 +976,7 @@ export class DialogueManager {
       })
 
     const speaker = node.speaker ?? this.activeNpcId ?? 'NPC'
-    this.showDialogueOverlay(speaker, node.text, visibleChoices)
+    this.showDialogueOverlay(speaker, node.text, visibleChoices, true)
   }
 
   private showPromptOverlay(text: string): void {
@@ -958,7 +1017,7 @@ export class DialogueManager {
     // Don't hide root — dialogue box may still be visible
   }
 
-  private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number; tag?: DialogueChoiceTag }[]): void {
+  private showDialogueOverlay(speaker: string, text: string, choices: { text: string; index: number; tag?: DialogueChoiceTag }[], skipAnim = false): void {
     if (!this.overlayRoot) return
     this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
@@ -972,7 +1031,11 @@ export class DialogueManager {
         this.overlaySpeaker.textContent = speaker
       }
     }
-    if (this.overlayText) this.overlayText.textContent = text
+    if (skipAnim) {
+      if (this.overlayText) this.overlayText.textContent = text
+    } else {
+      this.animateDialogueText(text)
+    }
 
     // Mobile cluster NPC navigation buttons
     if (this.overlayTopBox) {
@@ -1067,6 +1130,11 @@ export class DialogueManager {
   }
 
   private hideDialogueOverlay(): void {
+    if (this.textAnimTimer !== null) {
+      clearInterval(this.textAnimTimer)
+      this.textAnimTimer = null
+    }
+    this.isTextAnimating = false
     if (this.overlayTopBox) this.overlayTopBox.style.display = 'none'
     if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
