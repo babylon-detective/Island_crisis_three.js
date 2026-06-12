@@ -25,6 +25,7 @@ export class TitleScreen {
   private startTime: number = Date.now()
   private config: TitleScreenConfig
   private isActive: boolean = true
+  private loadingBarEl: HTMLDivElement | null = null
   private selectedIndex: number = 0
   private menuItems: string[] = ['menu-start', 'menu-continue', 'menu-hub']
   private gamepadState: { [key: string]: boolean } = {}
@@ -56,7 +57,7 @@ export class TitleScreen {
         <div class="menu-item" id="menu-continue">CONTINUE</div>
         <div class="menu-item hub" id="menu-hub">GAME HUB</div>
       </div>
-      <div class="loading-text">Loading...</div>
+      <div class="loading-bar" id="loading-bar"></div>
     `
     
     document.body.appendChild(this.container)
@@ -289,6 +290,7 @@ export class TitleScreen {
   private async handleStart(): Promise<void> {
     if (!this.isActive) return
     this.isActive = false // prevent double-clicks while loading
+    this.showLoadingBar()
     
     // Fade out ocean as the game loads (2 s matches the loading phase feel).
     this.config.soundSystem?.stopOceanLoop(2)
@@ -315,6 +317,7 @@ export class TitleScreen {
       return
     }
     this.isActive = false // prevent double-clicks while loading
+    this.showLoadingBar()
     
     // Fade out ocean as the game loads.
     this.config.soundSystem?.stopOceanLoop(2)
@@ -397,20 +400,26 @@ export class TitleScreen {
     }
   }
 
-  public hideLoadingText(): void {
-    const loadingText = document.querySelector('.loading-text') as HTMLElement
-    if (loadingText) {
-      loadingText.style.opacity = '0'
-      setTimeout(() => {
-        loadingText.style.display = 'none'
-      }, 500)
+  private showLoadingBar(): void {
+    if (!this.loadingBarEl) {
+      this.loadingBarEl = document.getElementById('loading-bar') as HTMLDivElement
     }
+    if (!this.loadingBarEl) return
+    this.loadingBarEl.style.display = 'block'
+    // Force a reflow so the transition fires from 0
+    void this.loadingBarEl.offsetWidth
+    // Crawl to 80 % slowly — gives an organic loading-bar feel
+    this.loadingBarEl.style.transition = 'width 8s cubic-bezier(0.2, 0, 0.08, 1)'
+    this.loadingBarEl.style.width = '80%'
   }
 
+  /** @deprecated No-op — loading state is now shown by the bottom progress bar. */
+  public hideLoadingText(): void {}
+
   public updateLoadingText(text: string): void {
-    const loadingText = document.querySelector('.loading-text') as HTMLElement
-    if (loadingText) {
-      loadingText.textContent = text
+    if (text === 'Ready!' && this.loadingBarEl) {
+      this.loadingBarEl.style.transition = 'width 0.25s ease-out'
+      this.loadingBarEl.style.width = '100%'
     }
   }
 

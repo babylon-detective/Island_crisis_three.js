@@ -184,7 +184,7 @@ export class NPCSystem {
 
     const animParams: AnimStateParams = {
       speed: 0, isGrounded: true, isJumping: false, isFalling: false,
-      isRunning: false, isAttacking: false, isDead: false, isCrouching: false,
+      isRunning: false, isSprinting: false, isAttacking: false, isDead: false, isCrouching: false,
       movementX: 0, movementZ: 0,
     }
 

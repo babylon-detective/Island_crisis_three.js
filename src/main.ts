@@ -847,7 +847,8 @@ const PLAYER_DEFAULTS = {
   radius: 0.5,
   mass: 70,
   walkSpeed: 1.4,   // m/s — matches UAL walk animation
-  runSpeed: 5.0,    // m/s — matches UAL run animation
+  runSpeed: 5.0,    // m/s — matches UAL run (Jog_Fwd) animation
+  sprintSpeed: 8.5, // m/s — matches UAL Sprint_Loop animation
   jumpForce: 15.0,
   gravity: 8.0,
   groundCheckDistance: 0.1,
@@ -1060,6 +1061,8 @@ class IntegratedThreeJSApp {
         this.landSystem?.getLandUniforms(), // Pass land lighting uniforms
         { ...PLAYER_DEFAULTS }
       )
+      // Wire audio so footstep SFX plays in-world
+      if (this.soundSystem) this.playerController.setSoundSystem(this.soundSystem)
     
     // Initialize gamepad handler and connect to player controller
     this.gamepadHandler = this.inputSystem.createGamepadHandler((input) => {
@@ -1301,6 +1304,7 @@ class IntegratedThreeJSApp {
 
       // Menu Event system — always constructed alongside NPC systems
       this.menuSystem = new MenuSystem(this.scene, this.cameraManager, this.playerController)
+      if (this.soundSystem) this.menuSystem.setSoundSystem(this.soundSystem)
 
       // Inventory display — circular 3-D item browser
       this.inventoryDisplay = new InventoryDisplay(
@@ -1311,6 +1315,7 @@ class IntegratedThreeJSApp {
         this.pauseManager,
       )
       this.inventoryDisplay.setInputMode(this.activeInputMode)
+      if (this.soundSystem) this.inventoryDisplay.setSoundSystem(this.soundSystem)
 
       // Wire inventory display into battle system for item browsing during combat
       this.battleSystem.setInventoryDisplay(this.inventoryDisplay)
@@ -1421,13 +1426,15 @@ class IntegratedThreeJSApp {
     const isGrounded = this.playerController.isOnGround()
     const isMoving = this.playerController.isMoving()
     const isRunning = this.playerController.isRunning()
+    const isSprinting = this.playerController.isSprinting()
 
     return {
       speed,
       isGrounded,
       isJumping: velocity.y > 2.0 && !isGrounded,
       isFalling: velocity.y < -3.0 && !isGrounded,
-      isRunning: isRunning && isMoving,
+      isRunning: isRunning && isMoving && !isSprinting,
+      isSprinting: isSprinting && isMoving,
       isAttacking: false,
       isDead: false,
       isCrouching: false,
@@ -2263,10 +2270,14 @@ class IntegratedThreeJSApp {
       // If pause overlay is visible, hide it and resume
       this.pauseOverlay.hide()
       this.pauseManager.setPaused(false)
+      this.soundSystem.resumeAreaMusic(1.5)
+      this.soundSystem.playUISfx('confirm')
     } else {
       // Show pause overlay and pause the game
       this.pauseOverlay.show()
       this.pauseManager.setPaused(true)
+      this.soundSystem.pauseAreaMusic(0.5)
+      this.soundSystem.playUISfx('cancel')
     }
   }
 
@@ -2279,6 +2290,9 @@ class IntegratedThreeJSApp {
         this.pauseOverlay.hide()
       }
       this.pauseManager.setPaused(false)
+    } else {
+      // Gameplay is now live — start the current area's background music.
+      this.soundSystem.setArea('outdoors_beach')
     }
   }
 
@@ -3300,6 +3314,7 @@ void main() {
         // When inventory is open, keep spinning items and updating camera
         if (this.inventoryDisplay?.isInventoryActive()) {
           this.inventoryDisplay.update(deltaTime)
+          this.playerController.updateTouchCamera()
           this.cameraManager.update(deltaTime)
         }
         // Still render the scene even when paused — use the CameraManager's active camera

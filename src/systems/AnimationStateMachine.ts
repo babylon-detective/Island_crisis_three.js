@@ -53,6 +53,7 @@ export interface AnimStateParams {
   isJumping: boolean
   isFalling: boolean
   isRunning: boolean
+  isSprinting: boolean
   isAttacking: boolean
   isDead: boolean
   isCrouching: boolean
@@ -98,6 +99,7 @@ export class AnimationStateMachine {
   private transitions: AnimTransition[] = []
   private currentStateName: string = ''
   private params: AnimStateParams = {
+    isSprinting: false,
     speed: 0,
     isGrounded: true,
     isJumping: false,
@@ -344,6 +346,7 @@ export function createPlayerStateMachineConfig(
     { name: 'idle',           clipName: 'idle' },
     { name: 'walk',           clipName: 'walk' },
     { name: 'run',            clipName: 'run' },
+    { name: 'sprint',         clipName: 'sprint' },
     { name: 'walk_backward',  clipName: 'walk_backward' },
     { name: 'run_backward',   clipName: 'run_backward' },
     { name: 'strafe_left',    clipName: 'strafe_left' },
@@ -368,14 +371,16 @@ export function createPlayerStateMachineConfig(
     { from: 'jump', to: 'fall',        condition: () => !p().isGrounded && p().isFalling, priority: 82 },
 
     // Jump initiation
-    { from: 'idle', to: 'jump',        condition: () => p().isJumping, priority: 80 },
-    { from: 'walk', to: 'jump',        condition: () => p().isJumping, priority: 80 },
-    { from: 'run',  to: 'jump',        condition: () => p().isJumping, priority: 80 },
+    { from: 'idle',   to: 'jump',      condition: () => p().isJumping, priority: 80 },
+    { from: 'walk',   to: 'jump',      condition: () => p().isJumping, priority: 80 },
+    { from: 'run',    to: 'jump',      condition: () => p().isJumping, priority: 80 },
+    { from: 'sprint', to: 'jump',      condition: () => p().isJumping, priority: 80 },
 
     // Fall — only from grounded states when truly airborne (NOT from land)
-    { from: 'idle', to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
-    { from: 'walk', to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
-    { from: 'run',  to: 'fall',        condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'idle',   to: 'fall',      condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'walk',   to: 'fall',      condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'run',    to: 'fall',      condition: () => p().isFalling && !p().isGrounded, priority: 70 },
+    { from: 'sprint', to: 'fall',      condition: () => p().isFalling && !p().isGrounded, priority: 70 },
 
     // Land — only from fall
     { from: 'fall', to: 'land',        condition: () => p().isGrounded, priority: 75 },
@@ -384,9 +389,10 @@ export function createPlayerStateMachineConfig(
     { from: '*', to: 'crouch_walk',    condition: () => p().isCrouching && p().speed > 0.5 && p().isGrounded, priority: 55 },
     { from: '*', to: 'crouch_idle',    condition: () => p().isCrouching && p().speed <= 0.5 && p().isGrounded, priority: 50 },
 
-    // Locomotion — thresholds tuned for walkSpeed=1.4, runSpeed=5.0
-    { from: '*', to: 'run',            condition: () => p().isRunning && p().speed > 0.5 && p().isGrounded, priority: 40 },
-    { from: '*', to: 'walk',           condition: () => p().speed > 0.2 && !p().isRunning && p().isGrounded, priority: 30 },
+    // Locomotion — thresholds tuned for walkSpeed=1.4, runSpeed=5.0, sprintSpeed=8.5
+    { from: '*', to: 'sprint',         condition: () => p().isSprinting && p().speed > 0.5 && p().isGrounded, priority: 45 },
+    { from: '*', to: 'run',            condition: () => p().isRunning && !p().isSprinting && p().speed > 0.5 && p().isGrounded, priority: 40 },
+    { from: '*', to: 'walk',           condition: () => p().speed > 0.2 && !p().isRunning && !p().isSprinting && p().isGrounded, priority: 30 },
 
     // Idle — lowest priority, fallback
     { from: '*', to: 'idle',           condition: () => p().speed <= 0.2 && p().isGrounded && !p().isCrouching, priority: 0 },

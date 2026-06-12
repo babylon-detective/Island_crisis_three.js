@@ -471,6 +471,7 @@ export class BattleSystem {
 
     this.renderBattleOverlay()
     logger.info(LogModule.SYSTEM, `Battle started with NPC "${npcId}" (${trigger}), cluster size ${this.clusterNpcIds.length}`)
+    this.soundSystem?.pauseAreaMusic(1)
     this.soundSystem?.startBattleTheme_01()
     return true
   }
@@ -991,6 +992,7 @@ export class BattleSystem {
     this.hideBattleOverlay()
     console.log(`⚔️ Battle end: npc=${resolvedNpcId ?? 'none'}, applyCooldown=${applyCooldown}, cameraModeBeforeExit=${this.cameraManager?.getCurrentMode() ?? 'none'}`)
     this.soundSystem?.stopBattleTheme_01()
+    this.soundSystem?.resumeAreaMusic(1.5)
     this.cameraManager?.exitBattleMode()
   }
 

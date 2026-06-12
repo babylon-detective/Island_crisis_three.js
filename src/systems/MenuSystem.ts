@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { CameraManager } from './CameraManager'
 import type { PlayerController } from './PlayerController'
+import type { SoundSystem } from './SoundSystem'
 
 // ============================================================================
 // MENU EVENT STATE SYSTEM
@@ -88,6 +89,7 @@ export class MenuSystem {
 
   // Stats applied at open time (can be updated between opens)
   private stats: Partial<PlayerMenuStats> = {}
+  private soundSystem: SoundSystem | null = null
 
   constructor(
     scene: THREE.Scene,
@@ -98,6 +100,10 @@ export class MenuSystem {
     this.cameraManager = cameraManager
     this.playerController = playerController
     this.initDefaultCards()
+  }
+
+  public setSoundSystem(sound: SoundSystem): void {
+    this.soundSystem = sound
   }
 
   // ============================================================================
@@ -125,6 +131,7 @@ export class MenuSystem {
   public open(stats?: Partial<PlayerMenuStats>): void {
     if (this.isActive) return
     this.isActive = true
+    this.soundSystem?.playUISfx('menuOpen')
 
     if (stats) this.stats = stats
 
@@ -175,6 +182,7 @@ export class MenuSystem {
   public close(): void {
     if (!this.isActive) return
     this.isActive = false
+    this.soundSystem?.playUISfx('menuClose')
 
     // -- Restore world object visibility --
     this.scene.traverse((object) => {
@@ -422,6 +430,7 @@ export class MenuSystem {
     const n = this.cards.length
     if (n === 0) return
     this.currentCardIndex = ((this.currentCardIndex + delta) % n + n) % n
+    this.soundSystem?.playUISfx('click')
     this.applyCardState()
   }
 

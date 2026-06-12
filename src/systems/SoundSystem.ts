@@ -8,6 +8,12 @@
  * (~14 s/cycle), mimicking the push-and-pull of ocean waves.
  * No Reverb node — avoids the async OfflineAudioContext setup that can
  * silently stall on some browsers.
+ *
+ * Area music system:
+ *   Each gameplay zone has an AreaId mapped to an MP3 file.
+ *   Tone.Player loops the file; a Volume node handles fade in/out.
+ *   During battle the area track is silenced (pauseAreaMusic) and restored
+ *   afterwards (resumeAreaMusic) without restarting playback.
  */
 
 // Type-only import — zero runtime cost, no AudioContext created at module load.
@@ -20,7 +26,33 @@ async function loadTone(): Promise<typeof import('tone')> {
   return _Tone
 }
 
+// ─── Area music registry ──────────────────────────────────────────────────────
+// Add new zones here as the game expands.
+export type AreaId = 'outdoors_beach'
+
+const AREA_MUSIC_SRC: Record<AreaId, string> = {
+  outdoors_beach: '/music/helpabeach.mp3',
+}
+
+/** Normal playback volume (dB) for area music — kept lower than SFX/battle. */
+const AREA_MUSIC_DB = -14
+
 export class SoundSystem {
+  // ─── Area (zone) background music ────────────────────────────────────────
+  // Signal chain:  Player (loop) → Volume → Destination
+  //
+  // pauseAreaMusic / resumeAreaMusic only ramp the Volume — the Player keeps
+  // spinning so the loop resumes from the same position after a battle.
+  //
+  private areaPlayer: Tone.Player | null = null
+  private areaVolume: Tone.Volume | null = null
+  private currentAreaId: AreaId | null = null
+  private isAreaMusicPlaying = false
+  private areaStarting = false
+  private areaAbort = false
+  /** True while the area track is intentionally silenced for a battle. */
+  private areaIsPaused = false
+
   // ─── Ocean wave nodes ────────────────────────────────────────────────────
   private oceanNoise: Tone.Noise | null = null
   private oceanFilter: Tone.Filter | null = null
@@ -72,6 +104,113 @@ export class SoundSystem {
   private isBattlePlaying = false
   private battleStarting = false
   private battleAbort = false
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Public API — Area music
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Switch to the background music for the given area, or stop music when
+   * called with `null`.  Safe to call while music is already playing —
+   * the old track fades out before the new one starts.
+   *
+   * Must be invoked after (or from within) a user-gesture handler so the
+   * browser allows AudioContext to resume.
+   */
+  async setArea(areaId: AreaId | null): Promise<void> {
+    // Already on this area and playing — nothing to do.
+    if (areaId === this.currentAreaId && this.isAreaMusicPlaying) return
+
+    // Tear down any current track first (1 s cross-fade out).
+    if (this.isAreaMusicPlaying) {
+      this.stopAreaMusic(1)
+      // Brief pause to let the fade clear before starting the new track.
+      await new Promise<void>(resolve => setTimeout(resolve, 1200))
+    }
+
+    if (areaId === null) return
+
+    this.areaStarting = true
+    this.areaAbort = false
+    this.currentAreaId = areaId
+
+    try {
+      const T = await loadTone()
+      await T.start()
+      if (this.areaAbort) return
+
+      this.areaVolume = new T.Volume(-60).toDestination()
+
+      this.areaPlayer = new T.Player({
+        url: AREA_MUSIC_SRC[areaId],
+        loop: true,
+        autostart: false,
+        onload: () => {
+          if (this.areaAbort || !this.areaPlayer || !this.areaVolume) return
+          this.areaPlayer.connect(this.areaVolume)
+          this.areaPlayer.start()
+          // Only fade in if we are not currently in a battle.
+          if (!this.areaIsPaused) {
+            this.areaVolume.volume.rampTo(AREA_MUSIC_DB, 3)
+          }
+          this.isAreaMusicPlaying = true
+          console.log(`🎵 SoundSystem: area music started — ${areaId}`)
+        },
+      })
+    } catch (err) {
+      console.error('🎵 SoundSystem: area music failed to start', err)
+      this._teardownAreaNodes()
+    } finally {
+      this.areaStarting = false
+    }
+  }
+
+  /**
+   * Silence the area music without stopping playback.
+   * Call when entering a battle; the loop keeps its position.
+   * @param fadeDuration seconds (default 1)
+   */
+  pauseAreaMusic(fadeDuration = 1): void {
+    this.areaIsPaused = true
+    if (!this.isAreaMusicPlaying || !this.areaVolume) return
+    this.areaVolume.volume.rampTo(-60, fadeDuration)
+  }
+
+  /**
+   * Restore the area music volume after a battle ends.
+   * @param fadeDuration seconds (default 1.5)
+   */
+  resumeAreaMusic(fadeDuration = 1.5): void {
+    this.areaIsPaused = false
+    if (!this.isAreaMusicPlaying || !this.areaVolume) return
+    this.areaVolume.volume.rampTo(AREA_MUSIC_DB, fadeDuration)
+  }
+
+  /**
+   * Fully stop and dispose area music nodes.
+   * @param fadeDuration seconds (default 2)
+   */
+  stopAreaMusic(fadeDuration = 2): void {
+    this.areaAbort = true
+    if (!this.isAreaMusicPlaying) return
+    this.isAreaMusicPlaying = false
+    this.currentAreaId = null
+
+    const player = this.areaPlayer
+    const vol    = this.areaVolume
+    this.areaPlayer = null
+    this.areaVolume = null
+
+    if (fadeDuration > 0 && vol) {
+      vol.volume.rampTo(-60, fadeDuration)
+    }
+
+    const delay = fadeDuration > 0 ? (fadeDuration + 0.3) * 1000 : 0
+    setTimeout(() => {
+      try { player?.stop(); player?.dispose() } catch { /* already disposed */ }
+      try { vol?.dispose()                    } catch { /* already disposed */ }
+    }, delay)
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Public API — Ocean
@@ -392,11 +531,146 @@ export class SoundSystem {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Public API — Footstep SFX
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Play a single footstep sound.  Uses the already-loaded Tone instance if
+   * available; silently skips when the AudioContext has not yet been unlocked.
+   * @param kind   'walk' | 'run' | 'sprint' — controls pitch/character
+   */
+  playFootstep(kind: 'walk' | 'run' | 'sprint' = 'walk'): void {
+    const T = _Tone
+    if (!T) return
+    try {
+      // Thud: short noise burst through a bandpass filter
+      const vol = new T.Volume(-18).toDestination()
+      const filt = new T.Filter({
+        type: 'bandpass',
+        frequency: kind === 'sprint' ? 220 : kind === 'run' ? 180 : 140,
+        Q: 1.2,
+      }).connect(vol)
+      const synth = new T.NoiseSynth({
+        noise: { type: 'pink' },
+        envelope: { attack: 0.001, decay: kind === 'sprint' ? 0.055 : kind === 'run' ? 0.07 : 0.09, sustain: 0, release: 0.01 },
+      }).connect(filt)
+      synth.triggerAttackRelease('32n')
+      // Dispose after sound completes (decay + small buffer)
+      const disposeMs = (kind === 'sprint' ? 0.055 : kind === 'run' ? 0.07 : 0.09) * 1000 + 100
+      setTimeout(() => {
+        try { synth.dispose() } catch { /* */ }
+        try { filt.dispose()  } catch { /* */ }
+        try { vol.dispose()   } catch { /* */ }
+      }, disposeMs)
+    } catch { /* AudioContext not ready */ }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Public API — UI SFX
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Supported UI sound effect types:
+   * - hover         : soft tick when a menu item is highlighted
+   * - click         : crisp tap on button press
+   * - itemHighlight : chime when an inventory item is focused
+   * - menuOpen      : ascending two-note sweep when a panel opens
+   * - menuClose     : descending two-note sweep when a panel closes
+   * - confirm       : bright ping on successful confirm / accept
+   * - cancel        : low thunk on cancel / back
+   * - stat          : neutral mid ping (e.g. stat updated)
+   * - dud           : short buzz for empty / disabled interaction
+   */
+  playUISfx(type: 'hover' | 'click' | 'itemHighlight' | 'menuOpen' | 'menuClose' | 'confirm' | 'cancel' | 'stat' | 'dud'): void {
+    const T = _Tone
+    if (!T) return
+    try {
+      this._playUISfxInternal(T, type)
+    } catch { /* AudioContext not ready */ }
+  }
+
+  private _playUISfxInternal(T: typeof import('tone'), type: string): void {
+    const vol = new T.Volume(-14).toDestination()
+    let disposeMs = 200
+
+    if (type === 'hover') {
+      // Soft triangle tick at 900 Hz, 30 ms
+      const s = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.002, decay: 0.03, sustain: 0, release: 0.01 } }).connect(vol)
+      s.triggerAttackRelease(900, '64n')
+      disposeMs = 80
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'click') {
+      // Very short noise click
+      const s = new T.NoiseSynth({ noise: { type: 'white' }, envelope: { attack: 0.001, decay: 0.012, sustain: 0, release: 0.005 } }).connect(vol)
+      s.triggerAttackRelease('64n')
+      disposeMs = 60
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'itemHighlight') {
+      // Chime: sine at 1 400 Hz, 60 ms decay
+      const s = new T.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.005, decay: 0.08, sustain: 0, release: 0.02 } }).connect(vol)
+      s.triggerAttackRelease(1400, '32n')
+      disposeMs = 140
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'menuOpen') {
+      // Two-note ascending sweep: 600 → 900 Hz, staggered 60 ms
+      const s1 = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.005, decay: 0.07, sustain: 0, release: 0.02 } }).connect(vol)
+      const s2 = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.005, decay: 0.07, sustain: 0, release: 0.02 } }).connect(vol)
+      s1.triggerAttackRelease(600, '32n')
+      setTimeout(() => { try { s2.triggerAttackRelease(900, '32n') } catch { /* */ } }, 60)
+      disposeMs = 220
+      setTimeout(() => { try { s1.dispose(); s2.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'menuClose') {
+      // Two-note descending sweep: 900 → 600 Hz, staggered 60 ms
+      const s1 = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.005, decay: 0.07, sustain: 0, release: 0.02 } }).connect(vol)
+      const s2 = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.005, decay: 0.07, sustain: 0, release: 0.02 } }).connect(vol)
+      s1.triggerAttackRelease(900, '32n')
+      setTimeout(() => { try { s2.triggerAttackRelease(600, '32n') } catch { /* */ } }, 60)
+      disposeMs = 220
+      setTimeout(() => { try { s1.dispose(); s2.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'confirm') {
+      // Bright ping: sine at 1 600 Hz, short
+      const s = new T.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.003, decay: 0.10, sustain: 0, release: 0.03 } }).connect(vol)
+      s.triggerAttackRelease(1600, '32n')
+      disposeMs = 180
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'cancel') {
+      // Low thunk: triangle at 350 Hz
+      const s = new T.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.002, decay: 0.07, sustain: 0, release: 0.02 } }).connect(vol)
+      s.triggerAttackRelease(350, '32n')
+      disposeMs = 140
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'stat') {
+      // Neutral mid ping: sine at 1 000 Hz
+      const s = new T.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.003, decay: 0.08, sustain: 0, release: 0.02 } }).connect(vol)
+      s.triggerAttackRelease(1000, '32n')
+      disposeMs = 150
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+
+    } else if (type === 'dud') {
+      // Short low buzz: square at 180 Hz, very fast decay
+      const s = new T.Synth({ oscillator: { type: 'square' }, envelope: { attack: 0.001, decay: 0.035, sustain: 0, release: 0.01 } }).connect(vol)
+      s.triggerAttackRelease(180, '64n')
+      disposeMs = 80
+      setTimeout(() => { try { s.dispose() } catch { /* */ } }, disposeMs)
+    }
+
+    setTimeout(() => { try { vol.dispose() } catch { /* */ } }, disposeMs + 50)
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Public API — lifecycle
   // ─────────────────────────────────────────────────────────────────────────
 
   /** Dispose all resources immediately (e.g. on page unload). */
   dispose(): void {
+    this.stopAreaMusic(0)
     this.stopOceanLoop(0)
     this.stopBattleTheme_01(0)
   }
@@ -404,6 +678,15 @@ export class SoundSystem {
   // ─────────────────────────────────────────────────────────────────────────
   // Private helpers
   // ─────────────────────────────────────────────────────────────────────────
+
+  private _teardownAreaNodes(): void {
+    try { this.areaPlayer?.stop(); this.areaPlayer?.dispose() } catch { /* */ }
+    try { this.areaVolume?.dispose()                          } catch { /* */ }
+    this.areaPlayer = null
+    this.areaVolume = null
+    this.isAreaMusicPlaying = false
+    this.currentAreaId = null
+  }
 
   private _teardownOceanNodes(): void {
     try { this.oceanNoise?.stop();  this.oceanNoise?.dispose()  } catch { /* */ }

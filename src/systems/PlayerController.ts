@@ -10,6 +10,7 @@ import type { GamepadPlayerInput } from './InputSystem'
 import type { NPCSystem } from './NPCSystem'
 import type { ObjectManager } from './ObjectManager'
 import type { ClimbSystem } from './ClimbSystem'
+import type { SoundSystem } from './SoundSystem'
 
 // ============================================================================
 // PLAYER CONFIGURATION
@@ -24,6 +25,7 @@ export interface PlayerConfig {
   // Movement properties
   walkSpeed: number
   runSpeed: number
+  sprintSpeed: number
   jumpForce: number
   gravity: number
   
@@ -40,6 +42,7 @@ export interface PlayerState {
   canJump: boolean
   isMoving: boolean
   isRunning: boolean
+  isSprinting: boolean
 }
 
 export interface PlayerInput {
@@ -67,6 +70,7 @@ export class PlayerController {
   private collisionSystem: CollisionSystem
   private cameraManager: CameraManager
   private landUniforms?: { [key: string]: { value: any } }
+  private soundSystem: SoundSystem | null = null
   
   // Configuration
   private config: PlayerConfig
@@ -81,6 +85,13 @@ export class PlayerController {
   private isDebugVisible: boolean = false
   private meshGroundOffset: number = 0 // Runtime-adjustable Y offset for mesh placement (positive = move mesh down)
   private _debugFrameCount: number = 0 // Counter for periodic debug logging
+
+  // Sprint state — timer tracks continuous run duration; resets when run stops
+  private sprintTimer: number = 0
+  private readonly SPRINT_THRESHOLD = 3.0  // seconds before run→sprint transition
+
+  // Footstep timing
+  private footstepTimer: number = 0
 
   // Pose cycling
   private currentPoseIndex: number = -1 // -1 = rest pose
@@ -206,6 +217,7 @@ export class PlayerController {
       mass: 70,
       walkSpeed: 1.4,   // m/s — matches UAL walk animation cycle
       runSpeed: 5.0,    // m/s — matches UAL run animation cycle
+      sprintSpeed: 8.5, // m/s — matches UAL Sprint_Loop animation cycle
       jumpForce: 8.0,
       gravity: 20.0,
       groundCheckDistance: 0.3,  // Distance below feet to check for ground
@@ -223,7 +235,8 @@ export class PlayerController {
       onGround: true,
       canJump: true,
       isMoving: false,
-      isRunning: false
+      isRunning: false,
+      isSprinting: false
     }
     
     // Initialize input
@@ -952,6 +965,32 @@ export class PlayerController {
   // MOVEMENT SYSTEM
   // ============================================================================
 
+  /**
+   * Lightweight camera-only update called by the main loop while the game is
+   * paused (e.g. inventory open).  Applies accumulated touch look deltas and
+   * inertia to the camera without running physics, movement, or collision.
+   */
+  public updateTouchCamera(): void {
+    if (this.touchState.activeLookTouch !== null) {
+      const rawX = this.touchState.lastLookDelta.x
+      const rawY = this.touchState.lastLookDelta.y
+      if (Math.abs(rawX) > 0.5 || Math.abs(rawY) > 0.5) {
+        this.cameraManager.updatePlayerCameraFromTouch(rawX, rawY)
+        this.touchCameraVelocity.set(rawX, rawY)
+      }
+      this.touchState.lastLookDelta.set(0, 0)
+    } else if (this.touchCameraVelocity.lengthSq() > 0.25) {
+      this.cameraManager.updatePlayerCameraFromTouch(
+        this.touchCameraVelocity.x,
+        this.touchCameraVelocity.y,
+      )
+      this.touchCameraVelocity.multiplyScalar(0.82)
+      if (this.touchCameraVelocity.lengthSq() < 0.25) {
+        this.touchCameraVelocity.set(0, 0)
+      }
+    }
+  }
+
   public update(deltaTime: number): void {
     // Always update movement and input
     this.updateMovement(deltaTime)
@@ -962,7 +1001,18 @@ export class PlayerController {
     // Don't update until player is initialized
     if (!this.mesh) return
     
-    // Always update physics and visuals
+    // Footstep SFX — triggered at an interval that matches walk/run/sprint animation speed
+    if (this.state.isMoving && this.state.onGround && this.soundSystem) {
+      this.footstepTimer -= deltaTime
+      if (this.footstepTimer <= 0) {
+        const kind = this.state.isSprinting ? 'sprint' : this.state.isRunning ? 'run' : 'walk'
+        this.soundSystem.playFootstep(kind)
+        // Reset timer: walk ≅20 steps/10 s, run ≅35 steps/10 s, sprint ≅50 steps/10 s
+        this.footstepTimer = kind === 'sprint' ? 0.20 : kind === 'run' ? 0.28 : 0.48
+      }
+    } else {
+      this.footstepTimer = 0 // reset so next step fires immediately when moving again
+    }
     this.updatePhysics(deltaTime)
     this.updateVisuals()
     this.updateCamera(deltaTime)
@@ -1153,6 +1203,8 @@ export class PlayerController {
           baseSpeed = this.config.walkSpeed + (this.config.runSpeed - this.config.walkSpeed) * t
         }
       }
+      // Upgrade to sprint speed once sprintTimer has matured
+      if (this.state.isSprinting) baseSpeed = this.config.sprintSpeed
       const speed = baseSpeed * inputMagnitude // Scale by analog input magnitude
       const movement = moveDirection.multiplyScalar(speed) // Don't multiply by deltaTime yet
       
@@ -1161,6 +1213,14 @@ export class PlayerController {
       this.state.velocity.z = movement.z
       this.state.isMoving = true
       this.state.isRunning = navigating ? navigationDistance > 1.1 : this.input.run
+      // Advance sprint timer when running; transition after SPRINT_THRESHOLD seconds
+      if (this.state.isRunning) {
+        this.sprintTimer += deltaTime
+        this.state.isSprinting = this.sprintTimer >= this.SPRINT_THRESHOLD
+      } else {
+        this.sprintTimer = 0
+        this.state.isSprinting = false
+      }
       
       // (Speed debug logging removed to avoid per-frame console.log overhead)
       
@@ -1450,6 +1510,15 @@ export class PlayerController {
 
   public isRunning(): boolean {
     return this.state.isRunning
+  }
+
+  public isSprinting(): boolean {
+    return this.state.isSprinting
+  }
+
+  /** Late-bind the SoundSystem so footsteps and UI SFX play in-world. */
+  public setSoundSystem(sound: SoundSystem): void {
+    this.soundSystem = sound
   }
 
   /** Provide NPC system so tap-to-navigate can detect and follow NPCs. */

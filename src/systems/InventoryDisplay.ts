@@ -15,6 +15,7 @@ import type { ItemSystem, InventorySlot, ItemShape } from './ItemSystem'
 import type { CameraManager } from './CameraManager'
 import type { PlayerController } from './PlayerController'
 import type { PauseManager } from './PauseManager'
+import type { SoundSystem } from './SoundSystem'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -71,6 +72,7 @@ export class InventoryDisplay {
 
   // Ring orientation tracking (navigation mode)
   private frontYaw: number = 0        // player facing yaw captured at open() time
+  private soundSystem: SoundSystem | null = null
   private currentRingYaw: number = 0  // animated current Y rotation
   private targetRingYaw: number = 0   // destination Y rotation for current selection
 
@@ -92,6 +94,12 @@ export class InventoryDisplay {
   private touchStartX = 0
   private touchStartY = 0
 
+  // Document-level touch listeners for inventory swipe (added when open, removed when closed).
+  // Using document rather than the panel lets the canvas also receive the same touches so
+  // camera look continues to work while the inventory is visible.
+  private boundDocTouchStart: ((e: TouchEvent) => void) | null = null
+  private boundDocTouchEnd: ((e: TouchEvent) => void) | null = null
+
   // Callback fired when the display closes (used by BattleSystem to resume)
   private onCloseCallback: (() => void) | null = null
 
@@ -107,6 +115,10 @@ export class InventoryDisplay {
     this.cameraManager = cameraManager
     this.playerController = playerController
     this.pauseManager = pauseManager
+  }
+
+  public setSoundSystem(sound: SoundSystem): void {
+    this.soundSystem = sound
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -132,6 +144,7 @@ export class InventoryDisplay {
     this.selectedIndex = 0
     this.mode = mode
     this.onCloseCallback = onClose ?? null
+    this.soundSystem?.playUISfx('menuOpen')
 
     // In navigation mode, pause world physics/AI (rendering stays live)
     if (mode === 'navigation') {
@@ -168,12 +181,39 @@ export class InventoryDisplay {
     document.addEventListener('keydown', this.boundKeyDown)
     document.addEventListener('keyup', this.boundKeyUp)
 
+    // Document-level swipe detection for mobile item navigation.
+    // The panel itself has pointer-events:none so these touches also reach the
+    // canvas, keeping camera look fully functional during inventory.
+    this.boundDocTouchStart = (e: TouchEvent) => {
+      if (!this.isActive) return
+      this.touchStartX = e.changedTouches[0].clientX
+      this.touchStartY = e.changedTouches[0].clientY
+    }
+    this.boundDocTouchEnd = (e: TouchEvent) => {
+      if (!this.isActive) return
+      // Only treat as an inventory swipe if the gesture started in the bottom
+      // panel region (lower 35 % of the screen).
+      if (this.touchStartY < window.innerHeight * 0.65) return
+      const dx = e.changedTouches[0].clientX - this.touchStartX
+      const dy = e.changedTouches[0].clientY - this.touchStartY
+      const absDx = Math.abs(dx)
+      const absDy = Math.abs(dy)
+      if (absDx > 40 && absDx > absDy) {
+        this.navigate(dx < 0 ? 1 : -1)
+      } else if (absDy > 40 && absDy > absDx) {
+        this.navigate(dy < 0 ? 1 : -1)
+      }
+    }
+    document.addEventListener('touchstart', this.boundDocTouchStart, { passive: true })
+    document.addEventListener('touchend', this.boundDocTouchEnd, { passive: true })
+
     console.log(`🎒 Inventory opened (${mode})`)
   }
 
   public close(): void {
     if (!this.isActive) return
     this.isActive = false
+    this.soundSystem?.playUISfx('menuClose')
 
     // Remove 3-D objects
     this.removeCircleGroup()
@@ -190,6 +230,14 @@ export class InventoryDisplay {
     if (this.boundKeyUp) {
       document.removeEventListener('keyup', this.boundKeyUp)
       this.boundKeyUp = null
+    }
+    if (this.boundDocTouchStart) {
+      document.removeEventListener('touchstart', this.boundDocTouchStart)
+      this.boundDocTouchStart = null
+    }
+    if (this.boundDocTouchEnd) {
+      document.removeEventListener('touchend', this.boundDocTouchEnd)
+      this.boundDocTouchEnd = null
     }
     this.confirmConsumed = false
 
@@ -299,10 +347,14 @@ export class InventoryDisplay {
 
   private navigate(dir: number): void {
     const slots = this.itemSystem.getInventory()
-    if (slots.length === 0) return
+    if (slots.length === 0) {
+      this.soundSystem?.playUISfx('dud')
+      return
+    }
     this.selectedIndex = (this.selectedIndex + dir + slots.length) % slots.length
     this.computeTargetRingYaw()
     this.updateSelection()
+    this.soundSystem?.playUISfx('itemHighlight')
   }
 
   /**
@@ -326,9 +378,11 @@ export class InventoryDisplay {
     const useMode = this.mode === 'dialogue' ? 'navigation' : this.mode
     const effects = this.itemSystem.useItem(slot.item.id, useMode)
     if (effects === null) {
+      this.soundSystem?.playUISfx('dud')
       this.flashStatus(`Can't use ${slot.item.name} here.`)
       return
     }
+    this.soundSystem?.playUISfx('confirm')
     console.log(`🎒 Used ${slot.item.icon} ${slot.item.name}`, effects)
     this.flashStatus(`Used ${slot.item.name}!`)
 
@@ -542,11 +596,13 @@ export class InventoryDisplay {
     title.textContent = 'Inventory'
     root.appendChild(title)
 
-    // Bottom info panel
+    // Bottom info panel — pointer-events:none so touch events fall through to the
+    // canvas underneath, keeping camera-look available on mobile while the
+    // inventory is open.  Only the nav buttons below override this back to auto.
     const panel = document.createElement('div')
     panel.style.cssText =
       'position:absolute;bottom:0;left:50%;transform:translateX(-50%);' +
-      'width:min(400px,calc(100vw - 24px));pointer-events:auto;' +
+      'width:min(400px,calc(100vw - 24px));pointer-events:none;' +
       'background:linear-gradient(to top,rgba(0,0,0,0.88),rgba(0,0,0,0.55) 80%,transparent);' +
       'border-radius:14px 14px 0 0;padding:24px 28px env(safe-area-inset-bottom,12px);' +
       'text-align:center;'
@@ -563,32 +619,13 @@ export class InventoryDisplay {
     this.overlayHint.style.cssText = 'font-size:12px;color:#888;letter-spacing:1px;'
     panel.appendChild(this.overlayHint)
 
-    // ── Touch navigation: swipe left/right to browse, tap to use ────────────
-    panel.addEventListener('touchstart', (e) => {
-      this.touchStartX = e.changedTouches[0].clientX
-      this.touchStartY = e.changedTouches[0].clientY
-    }, { passive: true })
-    panel.addEventListener('touchend', (e) => {
-      const dx = e.changedTouches[0].clientX - this.touchStartX
-      const dy = e.changedTouches[0].clientY - this.touchStartY
-      const absDx = Math.abs(dx)
-      const absDy = Math.abs(dy)
-      // Horizontal swipe → navigate items (consistent in all modes)
-      if (absDx > 40 && absDx > absDy) {
-        this.navigate(dx < 0 ? 1 : -1)
-      } else if (absDy > 40 && absDy > absDx) {
-        // Vertical swipe → also navigate (intuitive for vertical ring)
-        this.navigate(dy < 0 ? 1 : -1)
-      } else {
-        // Tap → use selected item
-        this.useSelected()
-      }
-    }, { passive: true })
-
     // ── Mobile nav buttons (← →) ───────────────────────────────────────────
+    // pointer-events:auto restores interactivity for buttons only; the panel
+    // background above remains passthrough so camera look reaches the canvas.
     const navRow = document.createElement('div')
     navRow.style.cssText =
-      'display:flex;justify-content:space-between;align-items:center;margin-top:10px;'
+      'display:flex;justify-content:space-between;align-items:center;margin-top:10px;' +
+      'pointer-events:auto;'
 
     const mkNavBtn = (label: string, dir: number): HTMLButtonElement => {
       const btn = document.createElement('button')
