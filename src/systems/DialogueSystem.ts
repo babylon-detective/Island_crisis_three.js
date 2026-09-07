@@ -902,6 +902,30 @@ export class DialogueManager {
 
     document.body.appendChild(this.overlayRoot)
     this.applyOverlayLayout()
+    // Global touch-to-confirm handler for mobile: tap anywhere (except precise choice buttons)
+    // advances the dialogue (skip/confirm). Choice buttons and cluster nav stop propagation
+    // so this handler won't intercept precise taps.
+    this.overlayRoot.addEventListener('touchend', (ev: TouchEvent) => {
+      if (!this.isTouchInputMode()) return
+      if (!this.isActive) return
+      const t = ev.target as Node
+      if (this.overlayChoices && this.overlayChoices.contains(t)) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      this.handleActionButton('touch')
+    }, { passive: false })
+
+    // Pointer fallback for environments that use pointer events for touch.
+    this.overlayRoot.addEventListener('pointerup', (ev: PointerEvent) => {
+      if ((ev as PointerEvent).pointerType !== 'touch') return
+      if (!this.isTouchInputMode()) return
+      if (!this.isActive) return
+      const t = ev.target as Node
+      if (this.overlayChoices && this.overlayChoices.contains(t)) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      this.handleActionButton('touch')
+    })
   }
 
   private isTouchInputMode(): boolean {
