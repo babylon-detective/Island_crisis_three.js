@@ -117,6 +117,7 @@ export class DialogueManager {
   private overlayRoot: HTMLDivElement | null = null
   private overlayBox: HTMLDivElement | null = null
   private overlayTopBox: HTMLDivElement | null = null
+  private overlayTapCatcher: HTMLDivElement | null = null
   private overlayPrompt: HTMLDivElement | null = null
   private overlaySpeaker: HTMLDivElement | null = null
   private overlayText: HTMLDivElement | null = null
@@ -178,6 +179,13 @@ export class DialogueManager {
     if (this.isActive) {
       this.refreshOverlayContent()
     }
+    this.updateTapCatcherState()
+  }
+
+  /** Enable the tap-anywhere catcher only while a dialogue is active in touch mode. */
+  private updateTapCatcherState(): void {
+    if (!this.overlayTapCatcher) return
+    this.overlayTapCatcher.style.pointerEvents = (this.isActive && this.isTouchInputMode()) ? 'auto' : 'none'
   }
 
   /** Start listening for interaction key (E). */
@@ -848,6 +856,18 @@ export class DialogueManager {
       'position:fixed;inset:0;z-index:12100;pointer-events:none;display:none;' +
       'font-family:"Courier New",monospace;'
 
+    // Full-viewport tap-anywhere layer — advances dialogue on mobile (skip text / reveal choices / end terminal node).
+    // Positioned below the choice buttons so precise choice taps still take priority.
+    this.overlayTapCatcher = document.createElement('div')
+    this.overlayTapCatcher.style.cssText = 'position:absolute;inset:0;pointer-events:none;'
+    const handleTapAnywhere = (e: Event) => {
+      e.preventDefault()
+      if (this.isActive && this.isTouchInputMode()) this.handleActionButton('touch')
+    }
+    this.overlayTapCatcher.addEventListener('touchend', handleTapAnywhere, { passive: false })
+    this.overlayTapCatcher.addEventListener('click', handleTapAnywhere)
+    this.overlayRoot.appendChild(this.overlayTapCatcher)
+
     // Prompt bubble ("Press Space to talk")
     this.overlayPrompt = document.createElement('div')
     this.overlayPrompt.style.cssText =
@@ -902,30 +922,6 @@ export class DialogueManager {
 
     document.body.appendChild(this.overlayRoot)
     this.applyOverlayLayout()
-    // Global touch-to-confirm handler for mobile: tap anywhere (except precise choice buttons)
-    // advances the dialogue (skip/confirm). Choice buttons and cluster nav stop propagation
-    // so this handler won't intercept precise taps.
-    this.overlayRoot.addEventListener('touchend', (ev: TouchEvent) => {
-      if (!this.isTouchInputMode()) return
-      if (!this.isActive) return
-      const t = ev.target as Node
-      if (this.overlayChoices && this.overlayChoices.contains(t)) return
-      ev.preventDefault()
-      ev.stopPropagation()
-      this.handleActionButton('touch')
-    }, { passive: false })
-
-    // Pointer fallback for environments that use pointer events for touch.
-    this.overlayRoot.addEventListener('pointerup', (ev: PointerEvent) => {
-      if ((ev as PointerEvent).pointerType !== 'touch') return
-      if (!this.isTouchInputMode()) return
-      if (!this.isActive) return
-      const t = ev.target as Node
-      if (this.overlayChoices && this.overlayChoices.contains(t)) return
-      ev.preventDefault()
-      ev.stopPropagation()
-      this.handleActionButton('touch')
-    })
   }
 
   private isTouchInputMode(): boolean {
@@ -1183,6 +1179,7 @@ export class DialogueManager {
       }
     }
     this.updateContinueIndicator()
+    this.updateTapCatcherState()
   }
 
   private hideDialogueOverlay(): void {
@@ -1195,5 +1192,6 @@ export class DialogueManager {
     if (this.overlayTopBox) this.overlayTopBox.style.display = 'none'
     if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
+    this.updateTapCatcherState()
   }
 }
