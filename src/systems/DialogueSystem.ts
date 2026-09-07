@@ -121,8 +121,10 @@ export class DialogueManager {
   private overlaySpeaker: HTMLDivElement | null = null
   private overlayText: HTMLDivElement | null = null
   private overlayChoices: HTMLDivElement | null = null
+  private overlayContinue: HTMLDivElement | null = null
   private currentVisibleChoices: DialogueChoice[] = []
   private highlightedChoiceIndex: number = 0
+  private choicesVisible = false
   private inputMode: ActiveInputMode = 'keyboard'
   private pendingBattleNpcId: string | null = null
 
@@ -287,12 +289,6 @@ export class DialogueManager {
       return
     }
 
-    if (e.code === 'KeyJ') {
-      e.preventDefault()
-      this.handleConfirmInput('keyboard')
-      return
-    }
-
     // Left/right: cycle cluster NPC selection
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       e.preventDefault()
@@ -424,6 +420,7 @@ export class DialogueManager {
 
     this.activeNodeId = nodeId
     node.onEnter?.()
+    this.choicesVisible = false
 
     // Play node-specific animation
     if (node.animation && this.activeNpcId) {
@@ -618,9 +615,14 @@ export class DialogueManager {
 
     // Dialogue is active — determine what to do
 
-    // If text is still animating, reveal it fully before advancing
+    // If text is still animating, complete it and reveal this node's choices.
+    // A single confirm therefore never leaves the player at a hidden intermediate state.
     if (this.isTextAnimating) {
       this.skipTextAnimation()
+      if (this.currentVisibleChoices.length > 0) {
+        this.choicesVisible = true
+        this.refreshOverlayContent()
+      }
       return true
     }
 
@@ -646,6 +648,11 @@ export class DialogueManager {
 
     // Has choices → select the currently highlighted choice
     if (this.currentVisibleChoices.length > 0) {
+      if (!this.choicesVisible) {
+        this.choicesVisible = true
+        this.refreshOverlayContent()
+        return true
+      }
       this.selectChoice(this.highlightedChoiceIndex, source)
       return true
     }
@@ -783,6 +790,7 @@ export class DialogueManager {
     if (words.length === 0) {
       this.overlayText.textContent = text
       this.isTextAnimating = false
+      this.updateContinueIndicator()
       return
     }
     let wordIndex = 0
@@ -795,6 +803,7 @@ export class DialogueManager {
         clearInterval(this.textAnimTimer!)
         this.textAnimTimer = null
         this.isTextAnimating = false
+        this.updateContinueIndicator()
       }
     }, this.textAnimWordInterval)
   }
@@ -810,6 +819,20 @@ export class DialogueManager {
     if (this.overlayText && this.activeTree && this.activeNodeId) {
       const node = this.activeTree.nodes.get(this.activeNodeId)
       if (node) this.overlayText.textContent = node.text
+    }
+    this.updateContinueIndicator()
+  }
+
+  /** Show the continuation marker only after the NPC's line is fully visible. */
+  private updateContinueIndicator(): void {
+    if (!this.overlayContinue) return
+    const shouldShow = this.isActive && !this.isTextAnimating && !this.choicesVisible
+    this.overlayContinue.style.display = shouldShow ? 'block' : 'none'
+    if (shouldShow) {
+      this.overlayContinue.animate(
+        [{ opacity: 0.25, transform: 'translateY(0)' }, { opacity: 1, transform: 'translateY(5px)' }, { opacity: 0.25, transform: 'translateY(0)' }],
+        { duration: 1500, iterations: Infinity, easing: 'ease-in-out' },
+      )
     }
   }
 
@@ -855,7 +878,14 @@ export class DialogueManager {
       'color:#eee;font-size:18px;line-height:1.5;max-width:700px;margin:0 auto;'
     topBox.appendChild(this.overlayText)
 
-    // Bottom box — player choices only
+    this.overlayContinue = document.createElement('div')
+    this.overlayContinue.textContent = '▼'
+    this.overlayContinue.style.cssText =
+      'display:none;color:#eefcff;font-size:16px;line-height:1;margin-top:12px;' +
+      'animation:dialogue-continue-blink 1.5s ease-in-out infinite;'
+    topBox.appendChild(this.overlayContinue)
+
+    // Bottom box is reserved for other modal UI; dialogue choices stay in the NPC panel.
     const choicesBox = document.createElement('div')
     choicesBox.id = 'dialogue-box'
     choicesBox.style.cssText =
@@ -867,8 +897,8 @@ export class DialogueManager {
 
     // Choices list
     this.overlayChoices = document.createElement('div')
-    this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
-    choicesBox.appendChild(this.overlayChoices)
+    this.overlayChoices.style.cssText = 'display:none;flex-direction:column;gap:6px;max-width:700px;margin:16px auto 0;pointer-events:auto;text-align:left;'
+    topBox.appendChild(this.overlayChoices)
 
     document.body.appendChild(this.overlayRoot)
     this.applyOverlayLayout()
@@ -959,7 +989,7 @@ export class DialogueManager {
       this.overlayText.style.cssText =
         'color:#eee;font-size:18px;line-height:1.5;max-width:700px;margin:0 auto;'
 
-      this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;'
+      this.overlayChoices.style.cssText = 'display:none;flex-direction:column;gap:6px;max-width:700px;margin:16px auto 0;pointer-events:auto;text-align:left;'
     }
   }
 
@@ -1022,7 +1052,7 @@ export class DialogueManager {
     this.applyOverlayLayout()
     this.overlayRoot.style.display = 'block'
     if (this.overlayTopBox) this.overlayTopBox.style.display = 'block'
-    if (this.overlayBox) this.overlayBox.style.display = 'block'
+    if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlaySpeaker) {
       if (this.clusterNpcIds.length > 1) {
         const navHint = this.inputMode === 'touch' ? '' : this.inputMode === 'gamepad' ? ' (◀ D-Pad ▶)' : ' (◀ A/D ▶)'
@@ -1070,13 +1100,14 @@ export class DialogueManager {
 
     if (this.overlayChoices) {
       this.overlayChoices.innerHTML = ''
-      for (const c of choices) {
+      this.overlayChoices.style.display = this.choicesVisible ? 'flex' : 'none'
+      for (const c of this.choicesVisible ? choices : []) {
         const isHighlighted = c.index === this.highlightedChoiceIndex
         const choiceColor = this.getChoiceColor(c.tag, isHighlighted)
         const btn = document.createElement('div')
         btn.textContent = `${isHighlighted ? '▶ ' : ''}${c.index + 1}. ${c.text}`
         btn.style.cssText =
-          `color:${choiceColor};cursor:pointer;padding:${this.isTouchInputMode() ? '10px 18px' : '6px 14px'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s,border-color 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;border:1px solid ${choiceColor};border-radius:4px;background:transparent;box-sizing:border-box;`
+          `color:${choiceColor};cursor:pointer;padding:${this.isTouchInputMode() ? '8px 4px' : '5px 2px'};font-size:${this.isTouchInputMode() ? '17px' : '15px'};transition:color 0.15s,transform 0.15s;text-shadow:${this.isTouchInputMode() ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;border:none;background:transparent;box-sizing:border-box;`
         btn.addEventListener('mouseenter', () => {
           this.highlightedChoiceIndex = c.index
           this.updateChoiceHighlight()
@@ -1109,7 +1140,7 @@ export class DialogueManager {
         })
         this.overlayChoices!.appendChild(btn)
       }
-      if (choices.length === 0) {
+      if (this.choicesVisible && choices.length === 0) {
         const hint = document.createElement('div')
         hint.textContent = this.getContinueHintText()
         hint.style.cssText = 'color:#b9d0d8;font-size:13px;margin-top:4px;text-shadow:0 0 12px rgba(0,0,0,0.85);'
@@ -1127,6 +1158,7 @@ export class DialogueManager {
         this.overlayChoices.appendChild(hint)
       }
     }
+    this.updateContinueIndicator()
   }
 
   private hideDialogueOverlay(): void {
@@ -1135,6 +1167,7 @@ export class DialogueManager {
       this.textAnimTimer = null
     }
     this.isTextAnimating = false
+    this.choicesVisible = false
     if (this.overlayTopBox) this.overlayTopBox.style.display = 'none'
     if (this.overlayBox) this.overlayBox.style.display = 'none'
     if (this.overlayRoot) this.overlayRoot.style.display = 'none'
