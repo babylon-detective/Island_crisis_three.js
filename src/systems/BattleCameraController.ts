@@ -89,11 +89,11 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
   // ¾ isometric overview — wide enough to read both combatants + UI
   menuIdle:       { posAnchor: 'mid',    fwdOffset: -8.2, sideOffset: -10.3, heightOffset: 3.3, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.2,  fov: 30 },
   // Player action shots
-  attackerFocus:  { posAnchor: 'player', fwdOffset:  7.1, sideOffset:  -1.1, heightOffset: 1.5, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.75, fov: 35 },
-  strikeImpact:   { posAnchor: 'impact', fwdOffset: -12.0, sideOffset: 12.0, heightOffset: 0.0, lookAnchor: 'impact', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.15, fov: 46 },
+  attackerFocus:  { posAnchor: 'player', fwdOffset:  -8, sideOffset:  -3.5, heightOffset: 0, lookAnchor: 'player', lookFwdOffset: -3.35, lookSideOffset: -2, lookHeightOffset: 0.4, fov: 20 },
+  strikeImpact:   { posAnchor: 'impact', fwdOffset: -7.4, sideOffset: -5.7, heightOffset: 2.4, lookAnchor: 'impact', lookFwdOffset: -1.9, lookSideOffset: -1.75, lookHeightOffset: 1.4, fov: 20 },
   targetReaction: { posAnchor: 'enemy',  fwdOffset: -6.7, sideOffset:   0.0, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
   // Enemy action shots
-  enemyFocus:     { posAnchor: 'enemy',  fwdOffset:  8.3, sideOffset:   4.2, heightOffset: 1.5, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.15, fov: 28 },
+  enemyFocus:     { posAnchor: 'enemy',  fwdOffset:  -5.7, sideOffset:   0.1, heightOffset: 1.7, lookAnchor: 'enemy',  lookFwdOffset: 3.35, lookSideOffset: 0, lookHeightOffset: 0.15, fov: 41 },
   playerReaction: { posAnchor: 'player', fwdOffset:  8.3, sideOffset:  -4.1, heightOffset: 0.5, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.35, fov: 27 },
   // Special event shots
   deathHold:      { posAnchor: 'enemy',  fwdOffset:  5.9, sideOffset:   0.6, heightOffset: 2.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.7,  fov: 32 },
@@ -215,7 +215,7 @@ export class BattleCameraController {
   skipSequence(): void {
     if (this.openingActive) {
       this.openingActive = false
-      this.cutTo('menuIdle')
+      this.cutTo('attackerFocus')
       const cb = this.openingCompleteCallback
       this.openingCompleteCallback = null
       cb?.()
@@ -378,12 +378,12 @@ export class BattleCameraController {
     this.camera.position.copy(frame.pos)
     this.camera.lookAt(frame.lookAt)
 
-    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_PARAMS.menuIdle.fov, easeOutCubic(t))
+    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_PARAMS.attackerFocus.fov, easeOutCubic(t))
     this.camera.updateProjectionMatrix()
 
     if (t >= 1) {
       this.openingActive = false
-      this.cutTo('menuIdle')
+      this.cutTo('attackerFocus')
       const cb = this.openingCompleteCallback
       this.openingCompleteCallback = null
       cb?.()
@@ -393,7 +393,7 @@ export class BattleCameraController {
   /**
    * Compute camera pos+lookAt for the opening cinematic at normalised time `t`.
    * t=0 — low angle behind the player, gazing toward the enemy.
-   * t=1 — the ¾ isometric menu idle position.
+   * t=1 — the attackerFocus battle-trigger position.
    */
   private getOpeningPosition(t: number): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
     const player = this.positions.player
@@ -406,8 +406,8 @@ export class BattleCameraController {
       .addScaledVector(this.side, 2.0)
     startPos.y = player.y + 1.2 // low angle
 
-    // End: menu idle position
-    const endPosData = this.computeShotPosAndLookAt('menuIdle')
+    // End: attackerFocus position
+    const endPosData = this.computeShotPosAndLookAt('attackerFocus')
 
     const eased = easeInOutCubic(t)
     const pos = new THREE.Vector3().lerpVectors(startPos, endPosData.pos, eased)

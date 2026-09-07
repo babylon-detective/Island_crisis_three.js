@@ -12,6 +12,7 @@ import { traceInputCommand, type InputTraceSource } from './InputTrace'
 import type { SoundSystem } from './SoundSystem'
 import type { ItemSystem } from './ItemSystem'
 import type { InventoryDisplay } from './InventoryDisplay'
+import type { PlayerStatsSystem } from './PlayerStatsSystem'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -27,6 +28,7 @@ export class BattleSystem {
   private npcSystem: NPCSystem
   private aiSystem: NPCAISystem
   private charAnimSystem: CharacterAnimationSystem
+  private scene: THREE.Scene | null = null
   private cameraManager: CameraManager | null = null
   private playerController: PlayerController | null = null
   private dialogueManager: DialogueManager | null = null
@@ -42,9 +44,11 @@ export class BattleSystem {
   private highlightedActionIndex = 0
   private promptVisible = false
   private guardActive = false
-  private playerHP = 30
+  private playerStats: PlayerStatsSystem | null = null
+  /** Fallback HP store used only if no PlayerStatsSystem has been attached. */
+  private localPlayerHP = 30
+  private readonly localMaxPlayerHP = 30
   private enemyHP = 18
-  private readonly maxPlayerHP = 30
   private readonly maxEnemyHP = 18
   private statusText = 'Choose an action.'
 
@@ -89,10 +93,53 @@ export class BattleSystem {
   private overlayPanel: HTMLDivElement | null = null
   private overlayTitle: HTMLDivElement | null = null
   private overlayHP: HTMLDivElement | null = null
+  private overlayHPText: HTMLDivElement | null = null
+  private overlayPlayerHPBarFill: HTMLDivElement | null = null
   private overlayStatus: HTMLDivElement | null = null
   private overlayChoices: HTMLDivElement | null = null
   private inputMode: ActiveInputMode = 'keyboard'
   private pendingScriptedBattleNpcId: string | null = null
+
+  /** Tuned live in the Battle tab of the debug GUI. */
+  public victoryParams = {
+    titleDuration: 3,
+    fadeDuration: 0.65,
+    expPerEnemy: 25,
+    expForNextLevel: 100,
+  }
+  private experience = 0
+  private playerLevel = 1
+  private victoryActive = false
+  private victoryOverlay: HTMLDivElement | null = null
+  private victorySavedVisibility: Map<string, boolean> = new Map()
+  private victorySavedBackground: THREE.Color | THREE.Texture | null = null
+  private victoryAmbient: THREE.AmbientLight | null = null
+  private victoryTimer: number | null = null
+  private setOceanVisible: ((visible: boolean) => void) | null = null
+
+  /** Visually eased player HP value shown in the battle overlay bar/text. */
+  private displayedPlayerHP = this.maxPlayerHP
+  private hpAnimHandle: number | null = null
+
+  /** Game Over presentation: death anim → slow camera spin → white fade → GAME OVER → restart. */
+  private gameOverActive = false
+  private gameOverOverlay: HTMLDivElement | null = null
+  private gameOverSpinHandle: number | null = null
+
+  /** Enemy HP/stats stay hidden until a special condition is met (currently: using Guard once). */
+  private enemyStatsRevealed = false
+
+  /** Delegates to the shared PlayerStatsSystem when attached, so HP persists across battles/exploration. */
+  private get playerHP(): number {
+    return this.playerStats ? this.playerStats.getHP() : this.localPlayerHP
+  }
+  private set playerHP(value: number) {
+    if (this.playerStats) this.playerStats.setHP(value)
+    else this.localPlayerHP = value
+  }
+  private get maxPlayerHP(): number {
+    return this.playerStats ? this.playerStats.getMaxHP() : this.localMaxPlayerHP
+  }
 
   private readonly menuActions: BattleMenuAction[] = [
     { id: 'attack', label: 'Attack' },
@@ -110,6 +157,18 @@ export class BattleSystem {
     this.aiSystem = aiSystem
     this.charAnimSystem = charAnimSystem
     this.buildOverlayUI()
+  }
+
+  setScene(scene: THREE.Scene): void {
+    this.scene = scene
+  }
+
+  setPlayerStats(stats: PlayerStatsSystem): void {
+    this.playerStats = stats
+  }
+
+  setOceanVisibility(setVisible: (visible: boolean) => void): void {
+    this.setOceanVisible = setVisible
   }
 
   setCameraManager(cam: CameraManager): void {
@@ -238,6 +297,18 @@ export class BattleSystem {
     return this.activeNpcId
   }
 
+  public getPlayerHP(): number { return this.playerHP }
+  public getMaxPlayerHP(): number { return this.maxPlayerHP }
+  public getPlayerLevel(): number { return this.playerLevel }
+  public getExperience(): number { return this.experience }
+  public getExpForNextLevel(): number { return this.victoryParams.expForNextLevel }
+
+  public isEnemyStatsRevealed(): boolean { return this.enemyStatsRevealed }
+  public setEnemyStatsRevealed(revealed: boolean): void {
+    this.enemyStatsRevealed = revealed
+    if (this.isActive) this.renderBattleOverlay()
+  }
+
   handleAttackButton(source: InputTraceSource = 'system'): boolean {
     if (this.isActive) {
       traceInputCommand({ source, target: 'battle', command: 'engage', result: 'ignored', details: { reason: 'battle-already-active' } })
@@ -294,9 +365,19 @@ export class BattleSystem {
   }
 
   handleConfirmActionButton(source: InputTraceSource = 'system'): boolean {
+    if (this.gameOverActive) {
+      this.restartGame()
+      return true
+    }
     if (!this.isActive) {
       traceInputCommand({ source, target: 'battle', command: 'confirm', result: 'ignored' })
       return false
+    }
+    if (this.inventoryDisplay?.isInventoryActive()) {
+      // Item browser owns confirm while open — don't fall through to the battle menu's highlighted action.
+      const consumed = this.inventoryDisplay.handleConfirmInput()
+      traceInputCommand({ source, target: 'battle', command: 'confirm', result: consumed ? 'consumed' : 'ignored', details: { reason: 'inventory-active' } })
+      return consumed
     }
     if (this.phase === 'ended') {
       traceInputCommand({ source, target: 'battle', command: 'confirm', result: 'executed', details: { phase: this.phase } })
@@ -452,9 +533,11 @@ export class BattleSystem {
     this.activeNpcId = npcId
     this.phase = 'player-turn'
     this.highlightedActionIndex = 0
-    this.playerHP = this.maxPlayerHP
     this.enemyHP = this.clusterHPs.get(npcId) ?? this.maxEnemyHP
     this.guardActive = false
+    if (this.hpAnimHandle !== null) { cancelAnimationFrame(this.hpAnimHandle); this.hpAnimHandle = null }
+    this.displayedPlayerHP = this.playerHP
+    this.enemyStatsRevealed = false
     this.statusText = trigger === 'enemy'
       ? `${npc.id} closes in and forces a battle.`
       : `You challenge ${npc.id}.`
@@ -476,6 +559,11 @@ export class BattleSystem {
     return true
   }
 
+  /**
+   * Player attack turn — deterministic two-shot sequence:
+   * 1. strikeImpact — player teleports next to the enemy, attack anim plays, damage applied on completion.
+   * 2. attackerFocus — player returns to original position; idle camera resumes; enemy turn follows.
+   */
   private performAttackTurn(): void {
     const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
     if (!npc) {
@@ -500,107 +588,18 @@ export class BattleSystem {
     this.attackSequencePlaying = true
     this.skipTapCount = 0
 
-    // Compute the strike position: 0.8 units from enemy, along player→enemy axis
+    // Strike position: strikeRange units from the enemy, along the player→enemy axis
     const fwd = this.battleEnemyPos.clone().sub(this.battlePlayerPos)
     fwd.y = 0
     fwd.normalize()
     const strikePos = this.battleEnemyPos.clone().addScaledVector(fwd, -this.strikeRange)
     strikePos.y = this.battlePlayerPos.y
-
     const originalPlayerPos = this.battlePlayerPos.clone()
 
-    // ── Animation-synced attack sequence ────────────────────────────────
-    //
-    // Phase 1  Approach (timed, 0.45s)
-    //   - Camera: overShoulder → player runs toward enemy
-    //
-    // Phase 2  Attack (synced to 'attack' clip)
-    //   - 'start'          → cut strikeImpact, teleport to strike range
-    //   - 'impact'         → apply damage
-    //   - 'follow-through' → cut targetReaction (or deathHold if defeated)
-    //   - 'recover'        → cut menuIdle, restore position, idle anim
-    //   - onComplete       → unlock input, start enemy counter-attack
-    //
-    if (this.animSync) {
-      this.animSync.playChain([
-        // Phase 1: Approach — timed hold, run animation
-        {
-          characterId: 'player',
-          clipName: 'run',
-          mode: 'timed',
-          duration: 0.45,
-          crossfadeDuration: 0.1,
-          events: [
-            { at: 0, camera: 'overShoulder' },
-          ],
-        },
-        // Phase 2: Attack — synced to attack clip keyframes
-        {
-          characterId: 'player',
-          clipName: 'attack',
-          crossfadeDuration: 0.08,
-          events: [
-            {
-              at: 'start',
-              camera: 'strikeImpact',
-              action: () => {
-                // Teleport player to strike range
-                this.playerController!.setPosition(strikePos)
-                this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
-              },
-            },
-            {
-              at: 'impact',
-              action: () => {
-                this.performAttackDamage(npc)
-              },
-            },
-            {
-              at: 'follow-through',
-              action: () => {
-                if (this.npcSystem.isDefeated(npc.id)) {
-                  this.animSync!.cameraCut('deathHold')
-                  try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
-                } else {
-                  this.animSync!.cameraCut('targetReaction')
-                  try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
-                }
-              },
-            },
-            {
-              at: 'recover',
-              camera: 'menuIdle',
-              action: () => {
-                // Restore player to standing position + idle
-                this.playerController!.setPosition(originalPlayerPos)
-                this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
-                try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
-              },
-            },
-          ],
-          onComplete: () => {
-            this.attackSequencePlaying = false
-            if (this.phase === 'ended') return
-            // Enemy counter-attacks with synced choreography
-            this.resolveEnemyTurnSynced(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
-          },
-        },
-      ])
-      return
-    }
-
-    // ── Legacy fallback: fixed-duration camera shots ────────────────────
     const sequence: BattleCameraShot[] = [
       {
-        type: 'overShoulder',
-        duration: 0.45,
-        onStart: () => {
-          try { this.charAnimSystem.crossfadeTo('player', 'run', 0.1) } catch (_) {}
-        },
-      },
-      {
         type: 'strikeImpact',
-        duration: 0.35,
+        duration: 0.55,
         onStart: () => {
           this.playerController!.setPosition(strikePos)
           this.cameraManager!.updateBattlePositions(strikePos, this.battleEnemyPos!)
@@ -608,14 +607,7 @@ export class BattleSystem {
         },
         onComplete: () => {
           this.performAttackDamage(npc)
-        },
-      },
-      {
-        type: 'targetReaction',
-        duration: 0.65,
-        onStart: () => {
           if (this.npcSystem.isDefeated(npc.id)) {
-            this.cameraManager!.getBattleCameraController().cutTo('deathHold')
             try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
           } else {
             try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
@@ -623,8 +615,8 @@ export class BattleSystem {
         },
       },
       {
-        type: 'menuIdle',
-        duration: 0.3,
+        type: 'attackerFocus',
+        duration: 0.35,
         onStart: () => {
           this.playerController!.setPosition(originalPlayerPos)
           this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
@@ -633,7 +625,7 @@ export class BattleSystem {
         onComplete: () => {
           this.attackSequencePlaying = false
           if (this.phase === 'ended') return
-          this.resolveEnemyTurnWithCamera(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
+          this.resolveEnemyTurn(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
         },
       },
     ]
@@ -644,6 +636,12 @@ export class BattleSystem {
   private isBattleCameraBusy(): boolean {
     if (this.animSync?.busy) return true
     return this.cameraManager?.getBattleCameraController().busy ?? false
+  }
+
+  /** Battle input only unblocks on the player's turn — always show attackerFocus at that moment. */
+  private forceAttackerFocusIfWaitingForInput(): void {
+    if (this.phase !== 'player-turn' || !this.cameraManager?.isInBattleMode()) return
+    this.cameraManager.getBattleCameraController().cutTo('attackerFocus')
   }
 
   private isOpeningCinematicPlaying(): boolean {
@@ -699,10 +697,11 @@ export class BattleSystem {
       this.clusterHPs.delete(npc.id)
 
       if (this.clusterNpcIds.length === 0) {
-        // All NPCs in cluster defeated — battle ends
+        // The last defeated target triggers the victory presentation.
         this.phase = 'ended'
         this.statusText = `You hit ${npc.id} for ${damage}. All enemies defeated!`
         this.renderBattleOverlay()
+        this.startVictoryEvent()
         return
       }
 
@@ -728,14 +727,9 @@ export class BattleSystem {
     }
 
     this.guardActive = true
-    // Use animation-synced choreography when available, then legacy camera, then plain
-    if (this.animSync && this.cameraManager?.isInBattleMode()) {
-      this.resolveEnemyTurnSynced(`You brace for ${npc.id}'s counterattack.`)
-    } else if (this.cameraManager?.isInBattleMode()) {
-      this.resolveEnemyTurnWithCamera(`You brace for ${npc.id}'s counterattack.`)
-    } else {
-      this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
-    }
+    // Bracing lets the player size up the opponent — reveals enemy stats for the rest of the battle.
+    this.enemyStatsRevealed = true
+    this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
   }
 
   private performItemAction(): void {
@@ -783,8 +777,11 @@ export class BattleSystem {
     for (const fx of effects) {
       if (fx.stat === 'hp') {
         this.playerHP = Math.min(this.playerHP + fx.value, this.maxPlayerHP)
+      } else if (fx.stat === 'hpPercent') {
+        this.playerHP = Math.min(this.playerHP + Math.round(this.maxPlayerHP * (fx.value / 100)), this.maxPlayerHP)
       }
     }
+    this.animatePlayerHPTo(this.playerHP)
     this.statusText = `Used ${slot.item.icon} ${slot.item.name}!`
     this.renderBattleOverlay()
     const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
@@ -793,6 +790,13 @@ export class BattleSystem {
     }
   }
 
+  /**
+   * Enemy attack turn — deterministic four-shot sequence:
+   * 1. enemyFocus     — attack banner shows while camera holds on the enemy.
+   * 2. playerReaction — enemy teleports next to the player, attack anim plays, damage applied on completion.
+   * 3. wideAction      — 2s reaction beat showing the outcome.
+   * 4. attackerFocus   — camera returns to the player; input unlocks.
+   */
   private resolveEnemyTurn(prefix: string): void {
     const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
     if (!npc) {
@@ -800,41 +804,24 @@ export class BattleSystem {
       return
     }
 
-    const baseDamage = 4 + Math.floor(Math.random() * 4)
-    const damage = this.guardActive ? Math.max(1, Math.floor(baseDamage * 0.5)) : baseDamage
-    this.guardActive = false
-    this.playerHP = Math.max(0, this.playerHP - damage)
-
-    if (this.playerHP <= 0) {
-      this.phase = 'ended'
-      this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
+    if (!this.cameraManager || !this.battlePlayerPos || !this.battleEnemyPos || !this.cameraManager.isInBattleMode()) {
+      // Fallback: no camera choreography
+      const baseDamage = 4 + Math.floor(Math.random() * 4)
+      const damage = this.guardActive ? Math.max(1, Math.floor(baseDamage * 0.5)) : baseDamage
+      this.guardActive = false
+      this.playerHP = Math.max(0, this.playerHP - damage)
+      this.animatePlayerHPTo(this.playerHP)
+      if (this.playerHP <= 0) {
+        this.phase = 'ended'
+        this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
+        this.renderBattleOverlay()
+        this.startGameOverSequence()
+        return
+      }
+      this.phase = 'player-turn'
+      this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
       this.renderBattleOverlay()
-      return
-    }
-
-    this.phase = 'player-turn'
-    this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
-    this.renderBattleOverlay()
-  }
-
-  /**
-   * Enemy turn with animation-synced choreography.
-   * Mirrors the player attack flow: approach → attack (synced) → reaction → idle.
-   *
-   * Phase 1  Approach (timed, 0.35s)
-   *   - Camera: enemyFocus — NPC runs toward the player
-   *
-   * Phase 2  Attack (synced to NPC 'attack' clip)
-   *   - 'start'          → cut strikeImpact
-   *   - 'impact'         → apply damage to player
-   *   - 'follow-through' → cut playerReaction, update UI
-   *   - 'recover'        → cut menuIdle, NPC returns to idle
-   *   - onComplete       → unlock input
-   */
-  private resolveEnemyTurnSynced(prefix: string): void {
-    const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
-    if (!npc || !this.animSync || !this.cameraManager?.isInBattleMode()) {
-      this.resolveEnemyTurnWithCamera(prefix)
+      this.forceAttackerFocusIfWaitingForInput()
       return
     }
 
@@ -844,116 +831,61 @@ export class BattleSystem {
     const damage = this.guardActive ? Math.max(1, Math.floor(baseDamage * 0.5)) : baseDamage
     this.guardActive = false
 
-    this.animSync.playChain([
-      // Phase 1: Approach — NPC runs toward player (timed hold)
-      {
-        characterId: npc.id,
-        clipName: 'run',
-        mode: 'timed',
-        duration: 0.35,
-        crossfadeDuration: 0.1,
-        events: [
-          { at: 0, camera: 'enemyFocus' },
-        ],
-      },
-      // Phase 2: Attack — synced to NPC's attack clip keyframes
-      {
-        characterId: npc.id,
-        clipName: 'attack',
-        crossfadeDuration: 0.08,
-        events: [
-          {
-            at: 'start',
-            camera: 'strikeImpact',
-          },
-          {
-            at: 'impact',
-            action: () => {
-              this.playerHP = Math.max(0, this.playerHP - damage)
-            },
-          },
-          {
-            at: 'follow-through',
-            camera: 'playerReaction',
-            action: () => {
-              if (this.playerHP <= 0) {
-                this.phase = 'ended'
-                this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
-              } else {
-                this.phase = 'player-turn'
-                this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
-              }
-              this.renderBattleOverlay()
-            },
-          },
-          {
-            at: 'recover',
-            camera: 'menuIdle',
-            action: () => {
-              try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.15) } catch (_) {}
-            },
-          },
-        ],
-        onComplete: () => {
-          this.attackSequencePlaying = false
-        },
-      },
-    ])
-  }
-
-  /**
-   * Enemy turn with camera choreography (shot/reverse-shot structure):
-   * 1. enemyFocus   — dramatic low-angle on enemy, attack anim plays
-   * 2. playerReaction — cut to player receiving hit, damage applied
-   * 3. menuIdle      — return to battlefield overview, unlock input
-   */
-  private resolveEnemyTurnWithCamera(prefix: string): void {
-    const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
-    if (!npc || !this.cameraManager || !this.cameraManager.isInBattleMode()) {
-      this.resolveEnemyTurn(prefix)
-      return
-    }
-
-    this.attackSequencePlaying = true
-
-    const baseDamage = 4 + Math.floor(Math.random() * 4)
-    const damage = this.guardActive ? Math.max(1, Math.floor(baseDamage * 0.5)) : baseDamage
-    this.guardActive = false
+    // Enemy strike position: strikeRange units from the player, along the enemy→player axis
+    const fwd = this.battlePlayerPos.clone().sub(this.battleEnemyPos)
+    fwd.y = 0
+    fwd.normalize()
+    const enemyStrikePos = this.battlePlayerPos.clone().addScaledVector(fwd, -this.strikeRange)
+    enemyStrikePos.y = this.battleEnemyPos.y
+    const originalEnemyPos = this.battleEnemyPos.clone()
 
     const sequence: BattleCameraShot[] = [
       {
         type: 'enemyFocus',
-        duration: 0.35,
+        duration: 0.8,
         onStart: () => {
-          // Play NPC attack animation — dramatic low-angle sells the threat
-          try { this.charAnimSystem.crossfadeTo(npc.id, 'attack', 0.15) } catch (_) {}
-        },
-        onComplete: () => {
-          // Apply damage as the enemy's strike lands
-          this.playerHP = Math.max(0, this.playerHP - damage)
-        },
-      },
-      {
-        type: 'playerReaction',
-        duration: 0.35,
-        onStart: () => {
-          // Show damage result while camera is on the player
-          if (this.playerHP <= 0) {
-            this.phase = 'ended'
-            this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
-          } else {
-            this.phase = 'player-turn'
-            this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
-          }
+          this.statusText = `${npc.id} attacks!`
           this.renderBattleOverlay()
         },
       },
       {
-        type: 'menuIdle',
-        duration: 0.2,
+        type: 'playerReaction',
+        duration: 0.6,
+        onStart: () => {
+          npc.position.copy(enemyStrikePos)
+          npc.model.position.copy(enemyStrikePos)
+          try { this.charAnimSystem.crossfadeTo(npc.id, 'attack', 0.1) } catch (_) {}
+        },
         onComplete: () => {
-          // Return to battlefield overview — unlock input
+          this.playerHP = Math.max(0, this.playerHP - damage)
+          this.animatePlayerHPTo(this.playerHP)
+          npc.position.copy(originalEnemyPos)
+          npc.model.position.copy(originalEnemyPos)
+          try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.15) } catch (_) {}
+        },
+      },
+      {
+        type: 'wideAction',
+        duration: 2.0,
+        onStart: () => {
+          if (this.playerHP <= 0) {
+            this.phase = 'ended'
+            this.statusText = `${prefix} ${npc.id} strikes back for ${damage}. You were overwhelmed.`
+            this.renderBattleOverlay()
+            this.startGameOverSequence()
+            return
+          }
+          this.phase = 'player-turn'
+          this.statusText = `${prefix} ${npc.id} counters for ${damage}. Choose your next action.`
+          this.renderBattleOverlay()
+        },
+      },
+      {
+        type: 'attackerFocus',
+        duration: 0.3,
+        onComplete: () => {
           this.attackSequencePlaying = false
+          this.forceAttackerFocusIfWaitingForInput()
         },
       },
     ]
@@ -977,6 +909,7 @@ export class BattleSystem {
     this.guardActive = false
 
     this.attackSequencePlaying = false
+    if (this.hpAnimHandle !== null) { cancelAnimationFrame(this.hpAnimHandle); this.hpAnimHandle = null }
     this.animSync?.abort()
     this.battlePlayerPos = null
     this.battleEnemyPos = null
@@ -994,6 +927,127 @@ export class BattleSystem {
     this.soundSystem?.stopBattleTheme_01()
     this.soundSystem?.resumeAreaMusic(1.5)
     this.cameraManager?.exitBattleMode()
+  }
+
+  private startVictoryEvent(): void {
+    if (this.victoryActive || !this.scene || !this.playerController || !this.cameraManager) {
+      this.leaveBattle(true)
+      return
+    }
+
+    this.victoryActive = true
+    this.hideBattleOverlay()
+    const defeatedCount = Math.max(1, this.clusterOriginalPositions.size)
+    const earnedExperience = defeatedCount * this.victoryParams.expPerEnemy
+
+    const title = this.createVictoryOverlay()
+    title.innerHTML = '<div data-victory-title>Victory!</div>'
+    const titleElement = title.firstElementChild as HTMLDivElement
+    titleElement.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+      'color:#fff8dc;font-family:cursive;font-size:clamp(64px,16vw,220px);font-weight:bold;font-style:italic;' +
+      'letter-spacing:0;text-shadow:0 0 24px rgba(255,211,106,0.7),0 4px 18px rgba(0,0,0,0.9);'
+    title.style.opacity = '1'
+
+    this.victoryTimer = window.setTimeout(() => {
+      title.style.opacity = '0'
+      this.victoryTimer = window.setTimeout(() => {
+        this.showVictoryStats(earnedExperience)
+      }, this.victoryParams.fadeDuration * 1000)
+    }, this.victoryParams.titleDuration * 1000)
+  }
+
+  private showVictoryStats(earnedExperience: number): void {
+    if (!this.scene || !this.playerController || !this.cameraManager || !this.victoryOverlay) return
+
+    const playerMesh = this.playerController.getMesh()
+    const playerUuids = new Set<string>()
+    playerMesh.traverse(object => playerUuids.add(object.uuid))
+    this.victorySavedVisibility.clear()
+    this.scene.traverse(object => {
+      if (object === this.scene || playerUuids.has(object.uuid)) return
+      this.victorySavedVisibility.set(object.uuid, object.visible)
+      object.visible = false
+    })
+    playerMesh.visible = true
+    playerMesh.traverse(object => { object.visible = true })
+
+    this.victorySavedBackground = this.scene.background as THREE.Color | THREE.Texture | null
+    this.scene.background = new THREE.Color(0x000000)
+    this.setOceanVisible?.(false)
+    this.victoryAmbient = new THREE.AmbientLight(0xffffff, 0.8)
+    this.scene.add(this.victoryAmbient)
+    this.cameraManager.enterMenuMode(this.playerController.getPosition(), this.playerController.getFacingYaw())
+
+    const startExperience = this.experience
+    const endExperience = startExperience + earnedExperience
+    this.victoryOverlay.innerHTML =
+      '<div data-victory-stats>' +
+        `<div style="color:#fff8dc;font-family:cursive;font-size:clamp(38px,8vw,96px);font-weight:bold;font-style:italic;">Victory!</div>` +
+        `<div style="margin-top:18px;color:#ffd866;font-size:clamp(16px,3vw,28px);letter-spacing:2px;">+${earnedExperience} EXP</div>` +
+        '<div data-victory-exp style="margin-top:10px;color:#eefcff;font-size:clamp(26px,5vw,52px);font-weight:bold;font-variant-numeric:tabular-nums;"></div>' +
+        `<div style="margin-top:8px;color:#b9d0d8;font-size:clamp(13px,2vw,18px);letter-spacing:2px;">LEVEL ${this.playerLevel}</div>` +
+      '</div>'
+    const stats = this.victoryOverlay.firstElementChild as HTMLDivElement
+    stats.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:0 24px max(12vh,72px);text-align:center;'
+    this.victoryOverlay.style.opacity = '1'
+
+    const expElement = this.victoryOverlay.querySelector('[data-victory-exp]') as HTMLDivElement
+    const duration = 1100
+    const startedAt = performance.now()
+    const countExperience = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration)
+      const currentExperience = Math.round(startExperience + (endExperience - startExperience) * progress)
+      expElement.textContent = `EXP ${currentExperience} / ${this.victoryParams.expForNextLevel}`
+      if (progress < 1) {
+        requestAnimationFrame(countExperience)
+        return
+      }
+      this.experience = endExperience
+      while (this.experience >= this.victoryParams.expForNextLevel) {
+        this.experience -= this.victoryParams.expForNextLevel
+        this.playerLevel++
+      }
+      this.victoryTimer = window.setTimeout(() => this.finishVictoryEvent(), 1400)
+    }
+    requestAnimationFrame(countExperience)
+  }
+
+  private createVictoryOverlay(): HTMLDivElement {
+    if (!this.victoryOverlay) {
+      this.victoryOverlay = document.createElement('div')
+      this.victoryOverlay.id = 'battle-victory-overlay'
+      this.victoryOverlay.style.cssText =
+        'position:fixed;inset:0;z-index:12200;pointer-events:none;opacity:0;' +
+        `transition:opacity ${this.victoryParams.fadeDuration}s ease;background:rgba(0,0,0,0.06);` +
+        'font-family:"Courier New",monospace;'
+      document.body.appendChild(this.victoryOverlay)
+    }
+    return this.victoryOverlay
+  }
+
+  private finishVictoryEvent(): void {
+    if (!this.victoryActive) return
+    if (this.victoryTimer !== null) window.clearTimeout(this.victoryTimer)
+    this.victoryTimer = null
+    this.victoryOverlay?.remove()
+    this.victoryOverlay = null
+    this.victorySavedVisibility.forEach((visible, uuid) => {
+      const object = this.scene?.getObjectByProperty('uuid', uuid)
+      if (object) object.visible = visible
+    })
+    this.victorySavedVisibility.clear()
+    if (this.scene) this.scene.background = this.victorySavedBackground
+    this.victorySavedBackground = null
+    this.setOceanVisible?.(true)
+    if (this.victoryAmbient) {
+      this.scene?.remove(this.victoryAmbient)
+      this.victoryAmbient.dispose()
+      this.victoryAmbient = null
+    }
+    this.victoryActive = false
+    this.cameraManager?.exitVictoryMode()
+    this.leaveBattle(true)
   }
 
   private syncBattleFacing(): void {
@@ -1139,6 +1193,16 @@ export class BattleSystem {
   private handleKey(e: KeyboardEvent): void {
     if (!this.isActive) return
 
+    if (this.gameOverActive) {
+      if (e.code === 'KeyJ' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space') {
+        e.preventDefault()
+        this.restartGame()
+      }
+      return
+    }
+
+    if (this.victoryActive) return
+
     // When the inventory display is open during battle, let it handle all input
     if (this.inventoryDisplay?.isInventoryActive()) return
 
@@ -1216,6 +1280,39 @@ export class BattleSystem {
     this.updateChoiceHighlight()
   }
 
+  private setPlayerHPDisplay(value: number): void {
+    if (this.overlayHPText) {
+      const enemyText = this.enemyStatsRevealed
+        ? `Enemy ${this.enemyHP}/${this.maxEnemyHP}`
+        : 'Enemy HP: ???'
+      this.overlayHPText.textContent = `Player ${Math.round(value)}/${this.maxPlayerHP}   |   ${enemyText}`
+    }
+    if (this.overlayPlayerHPBarFill) {
+      const pct = Math.max(0, Math.min(1, value / this.maxPlayerHP)) * 100
+      this.overlayPlayerHPBarFill.style.width = `${pct}%`
+      this.overlayPlayerHPBarFill.style.backgroundColor = pct <= 25 ? '#ff3b3b' : pct <= 50 ? '#ffb266' : '#ff6b6b'
+    }
+  }
+
+  /** Eases the displayed player HP toward the real value so damage/healing reads as a smooth bar/text drain or fill. */
+  private animatePlayerHPTo(target: number): void {
+    if (this.hpAnimHandle !== null) cancelAnimationFrame(this.hpAnimHandle)
+    const start = this.displayedPlayerHP
+    const startedAt = performance.now()
+    const duration = 450
+    const step = (now: number) => {
+      const t = Math.min(1, (now - startedAt) / duration)
+      this.displayedPlayerHP = start + (target - start) * t
+      this.setPlayerHPDisplay(this.displayedPlayerHP)
+      if (t < 1) {
+        this.hpAnimHandle = requestAnimationFrame(step)
+      } else {
+        this.hpAnimHandle = null
+      }
+    }
+    this.hpAnimHandle = requestAnimationFrame(step)
+  }
+
   private renderBattleOverlay(): void {
     if (!this.overlayRoot || !this.overlayPanel || !this.overlayTopBox) return
 
@@ -1239,7 +1336,7 @@ export class BattleSystem {
     }
 
     if (this.overlayHP) {
-      this.overlayHP.textContent = `Player ${this.playerHP}/${this.maxPlayerHP}   |   Enemy ${this.enemyHP}/${this.maxEnemyHP}`
+      this.setPlayerHPDisplay(this.displayedPlayerHP)
     }
 
     if (this.overlayStatus) {
@@ -1424,8 +1521,19 @@ export class BattleSystem {
     this.overlayTopBox.appendChild(this.overlayTitle)
 
     this.overlayHP = document.createElement('div')
-    this.overlayHP.style.cssText = 'color:#ffd9c7;font-size:14px;letter-spacing:1px;margin-bottom:10px;'
+    this.overlayHP.style.cssText = 'margin-bottom:10px;'
     this.overlayTopBox.appendChild(this.overlayHP)
+
+    this.overlayHPText = document.createElement('div')
+    this.overlayHPText.style.cssText = 'color:#ffd9c7;font-size:14px;letter-spacing:1px;margin-bottom:4px;'
+    this.overlayHP.appendChild(this.overlayHPText)
+
+    const playerHPBarTrack = document.createElement('div')
+    playerHPBarTrack.style.cssText = 'width:220px;max-width:60vw;height:6px;margin:0 auto;background:rgba(255,255,255,0.15);border-radius:3px;overflow:hidden;'
+    this.overlayPlayerHPBarFill = document.createElement('div')
+    this.overlayPlayerHPBarFill.style.cssText = 'height:100%;width:100%;background:#ff6b6b;border-radius:3px;transition:background-color 0.2s;'
+    playerHPBarTrack.appendChild(this.overlayPlayerHPBarFill)
+    this.overlayHP.appendChild(playerHPBarTrack)
 
     this.overlayStatus = document.createElement('div')
     this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin:0 auto;'
@@ -1589,5 +1697,75 @@ export class BattleSystem {
   private clearPromptState(): void {
     this.nearestBattleNpc = null
     this.hidePromptOverlay()
+  }
+
+  // ── Game Over presentation ───────────────────────────────────────────────────────
+
+  private startGameOverSequence(): void {
+    if (this.gameOverActive || !this.cameraManager || !this.playerController) return
+    this.gameOverActive = true
+    this.hideBattleOverlay()
+    this.attackSequencePlaying = false
+    if (this.hpAnimHandle !== null) { cancelAnimationFrame(this.hpAnimHandle); this.hpAnimHandle = null }
+
+    try { this.charAnimSystem.crossfadeTo('player', 'death', 0.2) } catch (_) {}
+
+    // Take manual control of the battle camera — stop the shot queue so it can't fight our spin.
+    this.cameraManager.getBattleCameraController().stop()
+    const camera = this.cameraManager.getCamera()
+    const center = this.playerController.getPosition().clone().add(new THREE.Vector3(0, 1.2, 0))
+    const radius = 4.5
+    const startAngle = Math.atan2(camera.position.x - center.x, camera.position.z - center.z)
+    const spinSpeed = 0.35 // rad/sec — slow, deliberate
+    const spinDuration = 3200 // ms
+    const startedAt = performance.now()
+
+    const overlay = this.createGameOverOverlay()
+
+    const spin = (now: number) => {
+      const elapsed = now - startedAt
+      const angle = startAngle + spinSpeed * (elapsed / 1000)
+      camera.position.set(
+        center.x + Math.sin(angle) * radius,
+        center.y + 1.6,
+        center.z + Math.cos(angle) * radius,
+      )
+      camera.lookAt(center)
+      if (elapsed < spinDuration) {
+        this.gameOverSpinHandle = requestAnimationFrame(spin)
+      } else {
+        this.gameOverSpinHandle = null
+        this.showGameOverText(overlay)
+      }
+    }
+    this.gameOverSpinHandle = requestAnimationFrame(spin)
+  }
+
+  private createGameOverOverlay(): HTMLDivElement {
+    const overlay = document.createElement('div')
+    overlay.id = 'battle-gameover-overlay'
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:12300;background:#ffffff;opacity:0;pointer-events:none;' +
+      'transition:opacity 0.65s ease;font-family:"Courier New",monospace;'
+    overlay.addEventListener('click', () => this.restartGame())
+    overlay.addEventListener('touchend', (e) => { e.preventDefault(); this.restartGame() })
+    document.body.appendChild(overlay)
+    this.gameOverOverlay = overlay
+    return overlay
+  }
+
+  private showGameOverText(overlay: HTMLDivElement): void {
+    overlay.style.opacity = '1'
+    window.setTimeout(() => {
+      overlay.innerHTML =
+        '<div style="font-family:cursive;font-weight:bold;font-style:italic;' +
+          'font-size:clamp(48px,14vw,180px);color:#000;text-align:center;line-height:1;">GAME OVER</div>' +
+        '<div style="margin-top:18px;font-size:clamp(14px,2.4vw,22px);color:#000;letter-spacing:2px;">Press to restart</div>'
+      overlay.style.cssText += 'display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:auto;cursor:pointer;'
+    }, 650)
+  }
+
+  private restartGame(): void {
+    window.location.reload()
   }
 }

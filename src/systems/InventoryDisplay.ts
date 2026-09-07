@@ -16,6 +16,7 @@ import type { CameraManager } from './CameraManager'
 import type { PlayerController } from './PlayerController'
 import type { PauseManager } from './PauseManager'
 import type { SoundSystem } from './SoundSystem'
+import type { PlayerStatsSystem } from './PlayerStatsSystem'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
@@ -73,6 +74,7 @@ export class InventoryDisplay {
   // Ring orientation tracking (navigation mode)
   private frontYaw: number = 0        // player facing yaw captured at open() time
   private soundSystem: SoundSystem | null = null
+  private playerStats: PlayerStatsSystem | null = null
   private currentRingYaw: number = 0  // animated current Y rotation
   private targetRingYaw: number = 0   // destination Y rotation for current selection
 
@@ -119,6 +121,10 @@ export class InventoryDisplay {
 
   public setSoundSystem(sound: SoundSystem): void {
     this.soundSystem = sound
+  }
+
+  public setPlayerStats(stats: PlayerStatsSystem): void {
+    this.playerStats = stats
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -243,7 +249,7 @@ export class InventoryDisplay {
 
     // Camera: return to default for the mode
     if (this.mode === 'battle') {
-      this.cameraManager.battleCutTo('menuIdle')
+      this.cameraManager.battleCutTo('attackerFocus')
     } else if (this.mode === 'dialogue') {
       // dialogue camera is managed by DialogueManager, nothing to do
     }
@@ -384,6 +390,7 @@ export class InventoryDisplay {
     }
     this.soundSystem?.playUISfx('confirm')
     console.log(`🎒 Used ${slot.item.icon} ${slot.item.name}`, effects)
+    this.playerStats?.applyEffects(effects)
     this.flashStatus(`Used ${slot.item.name}!`)
 
     // Refresh

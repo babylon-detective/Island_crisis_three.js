@@ -11,6 +11,7 @@ export interface SystemReferences {
   renderer: THREE.WebGLRenderer
   cameraManager?: any
   playerController?: any
+  battleSystem?: any
   battleAnimSync?: BattleAnimSync
   sky?: any
   skyConfig?: any
@@ -136,6 +137,8 @@ export class DebugGUIManager {
       // Battle
       this.setupDialogueCameraControls(battleGui)
       this.setupBattleCameraControls(battleGui)
+      this.setupVictoryControls(battleGui)
+      this.setupEnemyIntelControls(battleGui)
     } catch (error) {
       logger.error(LogModule.SYSTEM, 'Error setting up debug controls:', error)
     }
@@ -921,6 +924,30 @@ export class DebugGUIManager {
       folder.add({ print: () => { battleCtrl.printConfig(); animSync.printSyncPoints() } }, 'print').name('\uD83D\uDCBE Print all')
     }
 
+    folder.close()
+  }
+
+  private setupVictoryControls(gui: GUI): void {
+    const params = this.systems.battleSystem?.victoryParams
+    if (!params) return
+
+    const folder = gui.addFolder('Victory Event')
+    folder.add(params, 'titleDuration', 1, 8, 0.1).name('Title duration')
+    folder.add(params, 'fadeDuration', 0.1, 2, 0.05).name('Fade duration')
+    folder.add(params, 'expPerEnemy', 1, 500, 1).name('EXP per enemy')
+    folder.add(params, 'expForNextLevel', 10, 1000, 10).name('EXP next level')
+    this.addPrintButton(folder, 'Victory Event', () => params)
+    folder.close()
+  }
+
+  private setupEnemyIntelControls(gui: GUI): void {
+    const battle = this.systems.battleSystem
+    if (!battle) return
+
+    const folder = gui.addFolder('Enemy Intel')
+    const proxy = { revealed: battle.isEnemyStatsRevealed() }
+    folder.add(proxy, 'revealed').name('Reveal enemy stats')
+      .onChange((v: boolean) => battle.setEnemyStatsRevealed(v))
     folder.close()
   }
 

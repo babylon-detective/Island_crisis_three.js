@@ -1103,6 +1103,18 @@ export class CameraManager {
   }
 
   /**
+   * Return from a battle victory showcase directly to gameplay rather than
+   * restoring the battle camera that preceded the menu-style framing.
+   */
+  public exitVictoryMode(): void {
+    if (this.currentMode !== 'menu') return
+    this.battleCameraController.stop()
+    this.switchCamera('thirdperson', true)
+    this.requestModalRecovery('exit-victory')
+    console.log('📷 Victory camera exited: resumed=thirdperson')
+  }
+
+  /**
    * Exit battle camera mode — white flash back to thirdperson.
    */
   public exitBattleMode(): void {

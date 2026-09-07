@@ -35,8 +35,9 @@ import { DistanceLODSystem, DistanceTier } from './systems/DistanceLODSystem'
 import { DialogueManager } from './systems/DialogueSystem'
 import { BattleSystem } from './systems/BattleSystem'
 import { BattleAnimSync, registerDefaultSyncPoints } from './systems/BattleAnimSync'
-import { MenuSystem } from './systems/MenuSystem'
+import { MenuSystem, type PlayerMenuStats } from './systems/MenuSystem'
 import { ItemSystem } from './systems/ItemSystem'
+import { PlayerStatsSystem } from './systems/PlayerStatsSystem'
 import { InventoryDisplay } from './systems/InventoryDisplay'
 import { SoundSystem } from './systems/SoundSystem'
 import { ClimbSystem } from './systems/ClimbSystem'
@@ -133,6 +134,7 @@ class OceanLODSystem {
   private camera: THREE.Camera
   private scene: THREE.Scene
   private oceanUniforms: { [key: string]: { value: any } }
+  private visible = true
 
   constructor(camera: THREE.Camera, scene: THREE.Scene) {
     this.camera = camera
@@ -292,7 +294,7 @@ class OceanLODSystem {
       const level = this.lodLevels[i]
       
       // Only the active LOD level is visible - eliminates jumping between levels
-      const isActive = (i === activeLODIndex)
+      const isActive = this.visible && (i === activeLODIndex)
       level.mesh.visible = isActive
       level.shadowMesh.visible = isActive
       
@@ -310,6 +312,17 @@ class OceanLODSystem {
           level.mesh.position.z = followZ
           level.shadowMesh.position.set(followX, -1.9, followZ)
         }
+      }
+    }
+  }
+
+  /** Hide every ocean LOD, including its shadow proxy, for modal scenes. */
+  public setVisible(visible: boolean): void {
+    this.visible = visible
+    if (!visible) {
+      for (const level of this.lodLevels) {
+        level.mesh.visible = false
+        level.shadowMesh.visible = false
       }
     }
   }
@@ -910,6 +923,8 @@ class IntegratedThreeJSApp {
   private battleAnimSync: BattleAnimSync | null = null
   private menuSystem: MenuSystem | null = null
   private itemSystem: ItemSystem = new ItemSystem()
+  /** Single source of truth for player HP; shared by BattleSystem and InventoryDisplay so it persists across battles and exploration. */
+  private playerStats: PlayerStatsSystem = new PlayerStatsSystem(30)
   private inventoryDisplay: InventoryDisplay | null = null
   private soundSystem: SoundSystem = new SoundSystem()
   private climbSystem: ClimbSystem | null = null
@@ -1084,7 +1099,7 @@ class IntegratedThreeJSApp {
       // Handle select button — Menu Event
       if (input.select && !modalActive && this.menuSystem) {
         traceInputCommand({ source: 'gamepad', target: 'main', command: 'menu-event', result: 'executed' })
-        this.menuSystem.toggle()
+        this.menuSystem.toggle(this.getMenuStats())
       }
 
       // Handle Y button — Inventory (when not in battle/dialogue/menu)
@@ -1287,6 +1302,9 @@ class IntegratedThreeJSApp {
         this.npcAISystem,
         this.characterAnimationSystem,
       )
+      this.battleSystem.setScene(this.scene)
+      this.battleSystem.setOceanVisibility((visible) => this.oceanLODSystem?.setVisible(visible))
+      this.battleSystem.setPlayerStats(this.playerStats)
       this.battleSystem.setCameraManager(this.cameraManager)
       this.battleSystem.setDialogueManager(this.dialogueManager)
       this.battleSystem.setPlayerController(this.playerController)
@@ -1304,7 +1322,9 @@ class IntegratedThreeJSApp {
 
       // Menu Event system — always constructed alongside NPC systems
       this.menuSystem = new MenuSystem(this.scene, this.cameraManager, this.playerController)
+      this.menuSystem.setOceanVisibility((visible) => this.oceanLODSystem?.setVisible(visible))
       if (this.soundSystem) this.menuSystem.setSoundSystem(this.soundSystem)
+      // Menu Event VITALS card reads live HP/level/EXP tracked by BattleSystem
 
       // Inventory display — circular 3-D item browser
       this.inventoryDisplay = new InventoryDisplay(
@@ -1315,6 +1335,7 @@ class IntegratedThreeJSApp {
         this.pauseManager,
       )
       this.inventoryDisplay.setInputMode(this.activeInputMode)
+      this.inventoryDisplay.setPlayerStats(this.playerStats)
       if (this.soundSystem) this.inventoryDisplay.setSoundSystem(this.soundSystem)
 
       // Wire inventory display into battle system for item browsing during combat
@@ -1709,6 +1730,7 @@ class IntegratedThreeJSApp {
       cameraManager: this.cameraManager,
       playerController: this.playerController,
       battleAnimSync: this.battleAnimSync ?? undefined,
+      battleSystem: this.battleSystem ?? undefined,
       sky: this.sky,
       skyConfig: this.skyConfig,
       ambientLight: this.ambientLight,
@@ -2146,7 +2168,7 @@ class IntegratedThreeJSApp {
       menuBtn.style.background = 'rgba(180,170,255,0.2)'
       if (this.menuSystem) {
         traceInputCommand({ source: 'touch', target: 'main', command: 'menu-event', result: 'executed' })
-        this.menuSystem.toggle()
+        this.menuSystem.toggle(this.getMenuStats())
       }
     }, () => {
       menuBtn.style.background = 'rgba(0,0,0,0.35)'
@@ -2247,6 +2269,17 @@ class IntegratedThreeJSApp {
         }, 300)
       }
     }, duration)
+  }
+
+  /** Reads live HP/level/EXP from BattleSystem for the Menu Event VITALS card. */
+  private getMenuStats(): Partial<PlayerMenuStats> {
+    return {
+      hp: this.battleSystem?.getPlayerHP(),
+      maxHp: this.battleSystem?.getMaxPlayerHP(),
+      level: this.battleSystem?.getPlayerLevel(),
+      exp: this.battleSystem?.getExperience(),
+      maxExp: this.battleSystem?.getExpForNextLevel(),
+    }
   }
 
   /**
@@ -2867,7 +2900,7 @@ void main() {
           ) {
             event.preventDefault()
             traceInputCommand({ source: 'keyboard', target: 'main', command: 'menu-event', result: 'executed' })
-            this.menuSystem.toggle()
+            this.menuSystem.toggle(this.getMenuStats())
           }
           break
         case 'i':

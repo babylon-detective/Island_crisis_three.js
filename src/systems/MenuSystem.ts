@@ -90,6 +90,7 @@ export class MenuSystem {
   // Stats applied at open time (can be updated between opens)
   private stats: Partial<PlayerMenuStats> = {}
   private soundSystem: SoundSystem | null = null
+  private setOceanVisible: ((visible: boolean) => void) | null = null
 
   constructor(
     scene: THREE.Scene,
@@ -104,6 +105,10 @@ export class MenuSystem {
 
   public setSoundSystem(sound: SoundSystem): void {
     this.soundSystem = sound
+  }
+
+  public setOceanVisibility(setVisible: (visible: boolean) => void): void {
+    this.setOceanVisible = setVisible
   }
 
   // ============================================================================
@@ -159,6 +164,7 @@ export class MenuSystem {
     // -- Black background --
     this.savedBackground = this.scene.background as THREE.Color | THREE.Texture | null
     this.scene.background = new THREE.Color(0x000000)
+    this.setOceanVisible?.(false)
 
     // -- Soft ambient lighting for the isolated player avatar --
     // No scene PointLight — the character shader has its own lighting uniforms.
@@ -194,6 +200,7 @@ export class MenuSystem {
     // -- Restore background --
     this.scene.background = this.savedBackground
     this.savedBackground = null
+    this.setOceanVisible?.(true)
 
     // -- Remove showcase lighting --
     if (this.menuAmbient) {
