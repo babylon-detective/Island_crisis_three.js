@@ -106,16 +106,31 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
 }
 
 // Mobile-only overrides — cloned from SHOT_PARAMS as a starting point. Tune these
-// independently (debug GUI → Battle Camera → Mobile Shot Params) for phone-aspect
-// framing; desktop values above are untouched. Active only when mobile mode is on.
+// independently (debug GUI → Battle Camera → Mobile Shot Params) for handheld-phone
+// framing; desktop values above are untouched and also cover tablets. Active only
+// when mobile mode is on (see detectMobileDevice — phones only, not tablets).
 export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = Object.fromEntries(
   Object.entries(SHOT_PARAMS).map(([key, val]) => [key, { ...val }]),
 ) as Record<BattleShotType, ShotParams>
 
-/** True on touch-capable or narrow-viewport devices — used to auto-select the mobile shot table. */
+// Largest handheld phone short-side seen in practice (gaming phones like ROG Phone,
+// Xperia 1, and Pro Max iPhones/Ultra Android phones all fall under this in CSS px).
+// Smallest tablets (iPad mini and up) start at 768 short-side, so 600 leaves a clear gap.
+const MOBILE_PHONE_MAX_SHORT_SIDE = 600
+
+/**
+ * True only for handheld phones (touch-primary AND short viewport side ≤ 600px).
+ * Uses the smaller of width/height so rotation doesn't flip the result, and a
+ * coarse-pointer check so narrow desktop/laptop windows aren't misdetected.
+ * Tablets (small or large) intentionally fall through to the desktop table —
+ * their aspect ratios read the same as laptop/monitor framing.
+ */
 function detectMobileDevice(): boolean {
   if (typeof window === 'undefined') return false
-  return ('ontouchstart' in window) || window.innerWidth < 768
+  const hasCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches ?? ('ontouchstart' in window)
+  if (!hasCoarsePointer) return false
+  const shortSide = Math.min(window.innerWidth, window.innerHeight)
+  return shortSide <= MOBILE_PHONE_MAX_SHORT_SIDE
 }
 
 export class BattleCameraController {
@@ -164,7 +179,7 @@ export class BattleCameraController {
   // Flag: is the controller actively driving the camera?
   private _active: boolean = false
 
-  // Mobile-only camera tuning — defaults to device auto-detection, overridable from the debug GUI.
+  // Mobile-only camera tuning — defaults to phone auto-detection, overridable from the debug GUI.
   private mobileMode: boolean = detectMobileDevice()
 
   constructor(camera: THREE.PerspectiveCamera) {
