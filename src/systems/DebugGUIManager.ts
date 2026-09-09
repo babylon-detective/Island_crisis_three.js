@@ -1,7 +1,7 @@
 import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js'
 import * as THREE from 'three'
 import { logger, LogModule } from './Logger'
-import { SHOT_PARAMS, type BattleShotType } from './BattleCameraController'
+import { SHOT_PARAMS, SHOT_PARAMS_MOBILE, type BattleShotType } from './BattleCameraController'
 import type { BattleAnimSync } from './BattleAnimSync'
 import type { CollisionSystem } from './CollisionSystem'
 
@@ -851,34 +851,46 @@ export class DebugGUIManager {
     if (!battleCtrl) return
 
     const folder = gui.addFolder('\u2694\uFE0F Battle Camera')
-    const shotsFolder = folder.addFolder('Shot Params')
+
+    const modeProxy = { mobileMode: battleCtrl.mobileModeActive }
+    folder.add(modeProxy, 'mobileMode').name('\uD83D\uDCF1 Mobile Camera Mode')
+      .onChange((v: boolean) => battleCtrl.setMobileMode(v))
 
     const shots: BattleShotType[] = [
       'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
       'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
     ]
 
-    for (const type of shots) {
-      const params = SHOT_PARAMS[type]
-      const sub = shotsFolder.addFolder(type)
+    const buildShotFolder = (parent: GUI, table: Record<BattleShotType, ReturnType<typeof battleCtrl.getShotParams>>) => {
+      for (const type of shots) {
+        const params = table[type]
+        const sub = parent.addFolder(type)
 
-      sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
-      sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
-      sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
-      sub.add(params, 'lookFwdOffset',    -6,   6,  0.05).name('look fwd offset')
-      sub.add(params, 'lookSideOffset',   -6,   6,  0.05).name('look side offset')
-      sub.add(params, 'lookHeightOffset',   0,  4,  0.05).name('look height')
-      sub.add(params, 'fov',              20, 90,  1).name('FOV')
+        sub.add(params, 'fwdOffset',        -12, 12,  0.1).name('fwd offset')
+        sub.add(params, 'sideOffset',       -12, 12,  0.1).name('side offset')
+        sub.add(params, 'heightOffset',       0, 16,  0.1).name('height offset')
+        sub.add(params, 'lookFwdOffset',    -6,   6,  0.05).name('look fwd offset')
+        sub.add(params, 'lookSideOffset',   -6,   6,  0.05).name('look side offset')
+        sub.add(params, 'lookHeightOffset',   0,  4,  0.05).name('look height')
+        sub.add(params, 'fov',              20, 90,  1).name('FOV')
 
-      sub.add({
-        preview: () => {
-          if (battleCtrl.active) battleCtrl.previewShot(type)
-          else console.warn(`\u2694\uFE0F [BattleCam] Not active \u2014 enter a battle first.`)
-        },
-      }, 'preview').name('\u25B6 Preview shot')
-      sub.close()
+        sub.add({
+          preview: () => {
+            if (battleCtrl.active) battleCtrl.previewShot(type)
+            else console.warn(`\u2694\uFE0F [BattleCam] Not active \u2014 enter a battle first.`)
+          },
+        }, 'preview').name('\u25B6 Preview shot')
+        sub.close()
+      }
     }
+
+    const shotsFolder = folder.addFolder('Desktop Shot Params')
+    buildShotFolder(shotsFolder, SHOT_PARAMS)
     shotsFolder.close()
+
+    const mobileShotsFolder = folder.addFolder('\uD83D\uDCF1 Mobile Shot Params')
+    buildShotFolder(mobileShotsFolder, SHOT_PARAMS_MOBILE)
+    mobileShotsFolder.close()
 
     const animSync = this.systems.battleAnimSync
     if (animSync) {
@@ -918,7 +930,8 @@ export class DebugGUIManager {
     }
 
     // Global actions
-    folder.add({ print: () => battleCtrl.printConfig() }, 'print').name('\uD83D\uDCCB Print shot config')
+    folder.add({ print: () => battleCtrl.printConfig('desktop') }, 'print').name('\uD83D\uDCCB Print desktop shot config')
+    folder.add({ print: () => battleCtrl.printConfig('mobile') }, 'print').name('\uD83D\uDCF1 Print mobile shot config')
     if (animSync) {
       folder.add({ print: () => animSync.printSyncPoints() }, 'print').name('\uD83C\uDFAC Print sync points')
       folder.add({ print: () => { battleCtrl.printConfig(); animSync.printSyncPoints() } }, 'print').name('\uD83D\uDCBE Print all')

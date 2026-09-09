@@ -105,6 +105,19 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
   enemyCloseUp:   { posAnchor: 'enemy',  fwdOffset:  2.2, sideOffset:   0.8, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
 }
 
+// Mobile-only overrides — cloned from SHOT_PARAMS as a starting point. Tune these
+// independently (debug GUI → Battle Camera → Mobile Shot Params) for phone-aspect
+// framing; desktop values above are untouched. Active only when mobile mode is on.
+export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = Object.fromEntries(
+  Object.entries(SHOT_PARAMS).map(([key, val]) => [key, { ...val }]),
+) as Record<BattleShotType, ShotParams>
+
+/** True on touch-capable or narrow-viewport devices — used to auto-select the mobile shot table. */
+function detectMobileDevice(): boolean {
+  if (typeof window === 'undefined') return false
+  return ('ontouchstart' in window) || window.innerWidth < 768
+}
+
 export class BattleCameraController {
   private camera: THREE.PerspectiveCamera
   private positions: BattlePositions = {
@@ -151,6 +164,9 @@ export class BattleCameraController {
   // Flag: is the controller actively driving the camera?
   private _active: boolean = false
 
+  // Mobile-only camera tuning — defaults to device auto-detection, overridable from the debug GUI.
+  private mobileMode: boolean = detectMobileDevice()
+
   constructor(camera: THREE.PerspectiveCamera) {
     this.camera = camera
   }
@@ -162,6 +178,15 @@ export class BattleCameraController {
   get active(): boolean { return this._active }
   get busy(): boolean { return this.openingActive || this.currentShot !== null || this.queue.length > 0 }
   get openingPlaying(): boolean { return this.openingActive }
+
+  /** Force mobile shot params on/off (debug GUI can override the auto-detected default). */
+  setMobileMode(active: boolean): void { this.mobileMode = active }
+  get mobileModeActive(): boolean { return this.mobileMode }
+
+  /** Resolve the params table to read from for a shot, based on the active mode. */
+  private paramsFor(type: BattleShotType): ShotParams {
+    return this.mobileMode ? SHOT_PARAMS_MOBILE[type] : SHOT_PARAMS[type]
+  }
 
   /** Set the fixed battle positions (exactly 8 units apart). */
   setBattlePositions(player: THREE.Vector3, enemy: THREE.Vector3): void {
@@ -248,7 +273,7 @@ export class BattleCameraController {
       targetPos: pos,
       targetLookAt: lookAt,
       startFov: this.camera.fov,
-      targetFov: SHOT_PARAMS[type].fov,
+      targetFov: this.paramsFor(type).fov,
       duration: Math.max(duration, 0.01),
       elapsed: 0,
     }
@@ -259,7 +284,7 @@ export class BattleCameraController {
     const { pos, lookAt } = this.computeShotPosAndLookAt(type)
     this.camera.position.copy(pos)
     this.camera.lookAt(lookAt)
-    const fov = fovOverride ?? SHOT_PARAMS[type].fov
+    const fov = fovOverride ?? this.paramsFor(type).fov
     if (this.camera.fov !== fov) {
       this.camera.fov = fov
       this.camera.updateProjectionMatrix()
@@ -279,20 +304,25 @@ export class BattleCameraController {
     this.cutTo(type)
   }
 
-  /** Return a direct (live) reference to the params for a given shot type,
-   * so the debug GUI can mutate values and see changes in real time. */
+  /** Return a direct (live) reference to the params for a given shot type
+   * from the currently active table (desktop or mobile), so the debug GUI
+   * can mutate values and see changes in real time. */
   getShotParams(type: BattleShotType): ShotParams {
-    return SHOT_PARAMS[type]
+    return this.paramsFor(type)
   }
 
-  /** Print the current SHOT_PARAMS table to the browser console as JSON
-   * so you can copy tweaked values back into the source. */
-  printConfig(): void {
+  /** Print a SHOT_PARAMS table to the browser console as JSON so you can copy
+   * tweaked values back into the source. Defaults to whichever table is active. */
+  printConfig(which: 'active' | 'desktop' | 'mobile' = 'active'): void {
+    const table = which === 'mobile' ? SHOT_PARAMS_MOBILE
+      : which === 'desktop' ? SHOT_PARAMS
+      : (this.mobileMode ? SHOT_PARAMS_MOBILE : SHOT_PARAMS)
+    const label = which === 'active' ? (this.mobileMode ? 'mobile' : 'desktop') : which
     const out: Record<string, object> = {}
-    for (const [key, val] of Object.entries(SHOT_PARAMS)) {
+    for (const [key, val] of Object.entries(table)) {
       out[key] = { ...val }
     }
-    console.log('⚔️ BattleCameraController SHOT_PARAMS (copy into source):')
+    console.log(`⚔️ BattleCameraController SHOT_PARAMS (${label}) — copy into source:`)
     console.log(JSON.stringify(out, null, 2))
   }
 
@@ -453,7 +483,7 @@ export class BattleCameraController {
     this.targetLookAt.copy(computed.lookAt)
 
     // Apply FOV
-    const fov = shot.fov ?? SHOT_PARAMS[shot.type].fov
+    const fov = shot.fov ?? this.paramsFor(shot.type).fov
     if (this.camera.fov !== fov) {
       this.camera.fov = fov
       this.camera.updateProjectionMatrix()
@@ -485,7 +515,7 @@ export class BattleCameraController {
    * (and console commands) can tweak angles without touching logic code.
    */
   computeShotPosAndLookAt(type: BattleShotType): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
-    const params = SHOT_PARAMS[type]
+    const params = this.paramsFor(type)
     const fwd  = this.forward
     const side = this.side
 

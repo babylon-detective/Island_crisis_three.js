@@ -861,7 +861,7 @@ export class DialogueManager {
     this.overlayTapCatcher = document.createElement('div')
     this.overlayTapCatcher.style.cssText = 'position:absolute;inset:0;pointer-events:none;'
     const handleTapAnywhere = (e: Event) => {
-      e.preventDefault()
+      if (e.cancelable) e.preventDefault()
       if (this.isActive && this.isTouchInputMode()) this.handleActionButton('touch')
     }
     this.overlayTapCatcher.addEventListener('touchend', handleTapAnywhere, { passive: false })
