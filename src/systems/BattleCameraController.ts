@@ -106,31 +106,36 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
 }
 
 // Mobile-only overrides — cloned from SHOT_PARAMS as a starting point. Tune these
-// independently (debug GUI → Battle Camera → Mobile Shot Params) for handheld-phone
-// framing; desktop values above are untouched and also cover tablets. Active only
-// when mobile mode is on (see detectMobileDevice — phones only, not tablets).
+// independently (debug GUI → Battle Camera → Mobile Shot Params) for handheld-portrait
+// framing; desktop values above are untouched. Active only when mobile mode is on.
 export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = Object.fromEntries(
   Object.entries(SHOT_PARAMS).map(([key, val]) => [key, { ...val }]),
 ) as Record<BattleShotType, ShotParams>
 
-// Largest handheld phone short-side seen in practice (gaming phones like ROG Phone,
-// Xperia 1, and Pro Max iPhones/Ultra Android phones all fall under this in CSS px).
-// Smallest tablets (iPad mini and up) start at 768 short-side, so 600 leaves a clear gap.
-const MOBILE_PHONE_MAX_SHORT_SIDE = 600
+/** True on touch-primary (coarse pointer) devices — phones and tablets, not mouse/trackpad laptops. */
+function hasCoarsePointer(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return window.matchMedia('(pointer: coarse)').matches
+}
+
+/** True when the viewport is taller than it is wide. */
+function isPortraitViewport(): boolean {
+  if (typeof window === 'undefined') return false
+  return window.innerHeight > window.innerWidth
+}
 
 /**
- * True only for handheld phones (touch-primary AND short viewport side ≤ 600px).
- * Uses the smaller of width/height so rotation doesn't flip the result, and a
- * coarse-pointer check so narrow desktop/laptop windows aren't misdetected.
- * Tablets (small or large) intentionally fall through to the desktop table —
- * their aspect ratios read the same as laptop/monitor framing.
+ * Decide whether SHOT_PARAMS_MOBILE should drive the camera right now.
+ * Handheld framing (mobile) is about aspect ratio, not device class:
+ *  - Non-touch devices (mouse/trackpad laptops, monitors) always use desktop params.
+ *  - Touch devices in portrait — phones AND tablets, any size — use mobile params,
+ *    since a tall narrow viewport needs the same tighter framing regardless of screen size.
+ *  - Touch devices in landscape use desktop params — a wide viewport reads like a
+ *    laptop/monitor whether it's a tablet or a phone rotated sideways.
+ * Re-evaluated live (not cached) so rotating the device mid-battle updates framing.
  */
 function detectMobileDevice(): boolean {
-  if (typeof window === 'undefined') return false
-  const hasCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches ?? ('ontouchstart' in window)
-  if (!hasCoarsePointer) return false
-  const shortSide = Math.min(window.innerWidth, window.innerHeight)
-  return shortSide <= MOBILE_PHONE_MAX_SHORT_SIDE
+  return hasCoarsePointer() && isPortraitViewport()
 }
 
 export class BattleCameraController {
@@ -179,8 +184,9 @@ export class BattleCameraController {
   // Flag: is the controller actively driving the camera?
   private _active: boolean = false
 
-  // Mobile-only camera tuning — defaults to phone auto-detection, overridable from the debug GUI.
-  private mobileMode: boolean = detectMobileDevice()
+  // Mobile-only camera tuning — null means "auto-detect from pointer type + orientation";
+  // set explicitly (debug GUI) to force a mode regardless of the current device/rotation.
+  private mobileModeOverride: boolean | null = null
 
   constructor(camera: THREE.PerspectiveCamera) {
     this.camera = camera
@@ -194,13 +200,13 @@ export class BattleCameraController {
   get busy(): boolean { return this.openingActive || this.currentShot !== null || this.queue.length > 0 }
   get openingPlaying(): boolean { return this.openingActive }
 
-  /** Force mobile shot params on/off (debug GUI can override the auto-detected default). */
-  setMobileMode(active: boolean): void { this.mobileMode = active }
-  get mobileModeActive(): boolean { return this.mobileMode }
+  /** Force mobile shot params on/off; pass null to return to auto-detection. */
+  setMobileMode(active: boolean | null): void { this.mobileModeOverride = active }
+  get mobileModeActive(): boolean { return this.mobileModeOverride ?? detectMobileDevice() }
 
   /** Resolve the params table to read from for a shot, based on the active mode. */
   private paramsFor(type: BattleShotType): ShotParams {
-    return this.mobileMode ? SHOT_PARAMS_MOBILE[type] : SHOT_PARAMS[type]
+    return this.mobileModeActive ? SHOT_PARAMS_MOBILE[type] : SHOT_PARAMS[type]
   }
 
   /** Set the fixed battle positions (exactly 8 units apart). */
@@ -331,8 +337,8 @@ export class BattleCameraController {
   printConfig(which: 'active' | 'desktop' | 'mobile' = 'active'): void {
     const table = which === 'mobile' ? SHOT_PARAMS_MOBILE
       : which === 'desktop' ? SHOT_PARAMS
-      : (this.mobileMode ? SHOT_PARAMS_MOBILE : SHOT_PARAMS)
-    const label = which === 'active' ? (this.mobileMode ? 'mobile' : 'desktop') : which
+      : (this.mobileModeActive ? SHOT_PARAMS_MOBILE : SHOT_PARAMS)
+    const label = which === 'active' ? (this.mobileModeActive ? 'mobile' : 'desktop') : which
     const out: Record<string, object> = {}
     for (const [key, val] of Object.entries(table)) {
       out[key] = { ...val }
@@ -423,7 +429,7 @@ export class BattleCameraController {
     this.camera.position.copy(frame.pos)
     this.camera.lookAt(frame.lookAt)
 
-    this.camera.fov = THREE.MathUtils.lerp(44, SHOT_PARAMS.attackerFocus.fov, easeOutCubic(t))
+    this.camera.fov = THREE.MathUtils.lerp(44, this.paramsFor('attackerFocus').fov, easeOutCubic(t))
     this.camera.updateProjectionMatrix()
 
     if (t >= 1) {
