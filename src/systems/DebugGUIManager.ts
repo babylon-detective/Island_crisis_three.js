@@ -858,7 +858,7 @@ export class DebugGUIManager {
 
     const shots: BattleShotType[] = [
       'menuIdle', 'attackerFocus', 'strikeImpact', 'targetReaction',
-      'enemyFocus', 'playerReaction', 'deathHold', 'wideAction', 'overShoulder',
+      'enemyFocus', 'playerReaction', 'deathHold', 'victoryPose', 'wideAction', 'overShoulder',
     ]
 
     const buildShotFolder = (parent: GUI, table: Record<BattleShotType, ReturnType<typeof battleCtrl.getShotParams>>) => {

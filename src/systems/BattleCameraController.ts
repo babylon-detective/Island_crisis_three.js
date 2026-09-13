@@ -22,6 +22,7 @@ export type BattleShotType =
   | 'playerReaction'    // Cut to player receiving hit
   // Special event shots
   | 'deathHold'         // Wider deliberate frame on a dying unit
+  | 'victoryPose'       // Heroic framing on the player's post-battle victory pose
   | 'wideAction'        // Broad frame for magic / area-of-effect skills
   | 'overShoulder'      // Utility: behind player looking at enemy
   // Legacy aliases (kept for external compatibility)
@@ -97,6 +98,7 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
   playerReaction: { posAnchor: 'player', fwdOffset:  8.3, sideOffset:  -4.1, heightOffset: 0.5, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.35, fov: 27 },
   // Special event shots
   deathHold:      { posAnchor: 'enemy',  fwdOffset:  5.9, sideOffset:   0.6, heightOffset: 2.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.7,  fov: 32 },
+  victoryPose:    { posAnchor: 'player', fwdOffset: -4.5, sideOffset:   3.0, heightOffset: 1.4, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: -0.4, lookHeightOffset: 0.9, fov: 42 },
   wideAction:     { posAnchor: 'mid',    fwdOffset: -3.8, sideOffset:   7.7, heightOffset: 2.1, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.65, fov: 60 },
   overShoulder:   { posAnchor: 'player', fwdOffset: -1.5, sideOffset:   0.8, heightOffset: 1.0, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.4,  fov: 81 },
   // Legacy aliases — unchanged
@@ -118,7 +120,8 @@ export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = {
   enemyFocus:     { posAnchor: 'enemy',  fwdOffset:  -5.7, sideOffset:   0.1, heightOffset: 1.7, lookAnchor: 'enemy',  lookFwdOffset: 3.35, lookSideOffset: 0, lookHeightOffset: 0.15, fov: 41 },
   playerReaction: { posAnchor: 'player', fwdOffset: 1.1, sideOffset: -3.3, heightOffset: 0, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 1.95, lookHeightOffset: 0, fov: 52 },
   // Special event shots
-  deathHold:      { posAnchor: 'enemy',  fwdOffset:  5.9, sideOffset:   0.6, heightOffset: 2.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.7,  fov: 32 },
+  deathHold:      { posAnchor: 'enemy',  fwdOffset:  8.5, sideOffset:   0.6, heightOffset: 2.0, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.9,  fov: 46 },
+  victoryPose:    { posAnchor: 'player', fwdOffset: -7.0, sideOffset:   3.0, heightOffset: 1.2, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: -0.4, lookHeightOffset: 1.0, fov: 42 },
   wideAction:     { posAnchor: 'mid',    fwdOffset: -6.5, sideOffset: -0.8, heightOffset: 2.1, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0,    fov: 90 },
   overShoulder:   { posAnchor: 'player', fwdOffset: -2.5, sideOffset: -0.5, heightOffset: 1,   lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 4,    fov: 76 },
   // Legacy aliases — unchanged

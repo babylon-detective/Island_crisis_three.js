@@ -578,7 +578,7 @@ export class BattleSystem {
       !this.cameraManager.isInBattleMode()
     ) {
       // Fallback: no camera choreography
-      this.performAttackDamage(npc)
+      this.performAttackDamage(npc, this.rollAttackDamage())
       if (this.phase !== 'ended') {
         this.resolveEnemyTurn(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
       }
@@ -596,6 +596,12 @@ export class BattleSystem {
     strikePos.y = this.battlePlayerPos.y
     const originalPlayerPos = this.battlePlayerPos.clone()
 
+    // Roll damage up front so we know whether this hit is lethal — lets the
+    // sequence below insert a deathHold beat only when the target actually dies.
+    const damage = this.rollAttackDamage()
+    const currentHp = this.clusterHPs.get(npc.id) ?? this.enemyHP
+    const willDefeat = Math.max(0, currentHp - damage) <= 0
+
     const sequence: BattleCameraShot[] = [
       {
         type: 'strikeImpact',
@@ -606,29 +612,35 @@ export class BattleSystem {
           try { this.charAnimSystem.crossfadeTo('player', 'attack', 0.08) } catch (_) {}
         },
         onComplete: () => {
-          this.performAttackDamage(npc)
-          if (this.npcSystem.isDefeated(npc.id)) {
+          this.performAttackDamage(npc, damage)
+          if (willDefeat) {
             try { this.charAnimSystem.crossfadeTo(npc.id, 'death', 0.15) } catch (_) {}
           } else {
             try { this.charAnimSystem.crossfadeTo(npc.id, 'idle', 0.1) } catch (_) {}
           }
         },
       },
-      {
-        type: 'attackerFocus',
-        duration: 0.35,
-        onStart: () => {
-          this.playerController!.setPosition(originalPlayerPos)
-          this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
-          try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
-        },
-        onComplete: () => {
-          this.attackSequencePlaying = false
-          if (this.phase === 'ended') return
-          this.resolveEnemyTurn(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
-        },
-      },
     ]
+
+    if (willDefeat) {
+      // NPC Death shot — hold on the fallen target before returning to the player.
+      sequence.push({ type: 'deathHold', duration: 1.1 })
+    }
+
+    sequence.push({
+      type: 'attackerFocus',
+      duration: 0.35,
+      onStart: () => {
+        this.playerController!.setPosition(originalPlayerPos)
+        this.cameraManager!.updateBattlePositions(originalPlayerPos, this.battleEnemyPos!)
+        try { this.charAnimSystem.crossfadeTo('player', 'idle', 0.15) } catch (_) {}
+      },
+      onComplete: () => {
+        this.attackSequencePlaying = false
+        if (this.phase === 'ended') return
+        this.resolveEnemyTurn(`You hit ${npc.id} for ${this.lastDamageDealt}.`)
+      },
+    })
 
     this.cameraManager.battlePlaySequence(sequence)
   }
@@ -680,8 +692,10 @@ export class BattleSystem {
 
   /** Damage-only portion of the attack turn (no camera). */
   private lastDamageDealt = 0
-  private performAttackDamage(npc: NPCInstance): void {
-    const damage = 5 + Math.floor(Math.random() * 5)
+  private rollAttackDamage(): number {
+    return 5 + Math.floor(Math.random() * 5)
+  }
+  private performAttackDamage(npc: NPCInstance, damage: number): void {
     this.lastDamageDealt = damage
     const hp = Math.max(0, (this.clusterHPs.get(npc.id) ?? this.enemyHP) - damage)
     this.clusterHPs.set(npc.id, hp)
@@ -937,6 +951,13 @@ export class BattleSystem {
 
     this.victoryActive = true
     this.hideBattleOverlay()
+
+    // Victory Pose shot — heroic framing on the player while the title banner shows.
+    if (this.cameraManager.isInBattleMode()) {
+      this.cameraManager.getBattleCameraController().cutTo('victoryPose')
+    }
+    try { this.charAnimSystem.crossfadeTo('player', 'wave', 0.25) } catch (_) {}
+
     const defeatedCount = Math.max(1, this.clusterOriginalPositions.size)
     const earnedExperience = defeatedCount * this.victoryParams.expPerEnemy
 
@@ -989,7 +1010,7 @@ export class BattleSystem {
         `<div style="margin-top:8px;color:#b9d0d8;font-size:clamp(13px,2vw,18px);letter-spacing:2px;">LEVEL ${this.playerLevel}</div>` +
       '</div>'
     const stats = this.victoryOverlay.firstElementChild as HTMLDivElement
-    stats.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:0 24px max(12vh,72px);text-align:center;'
+    stats.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:max(8vh,56px) 24px 0;text-align:center;'
     this.victoryOverlay.style.opacity = '1'
 
     const expElement = this.victoryOverlay.querySelector('[data-victory-exp]') as HTMLDivElement
