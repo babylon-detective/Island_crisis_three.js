@@ -4,7 +4,7 @@ This document summarizes the recent redesign of the battle camera system (cut-ba
 
 **Overview**
 
-- Design philosophy: prefer hard cuts between fixed camera positions to prioritize readable, punchy combat beats. Smooth motion is limited to the opening cinematic; in-turn events use instant cuts ("manga-panel" rhythm).
+- Design philosophy: prefer hard cuts between fixed camera positions to prioritize readable, punchy combat beats. Every battle opens on a static `wideAction` establishing shot — driven by the same SHOT_PARAMS system as every other cut, no hardcoded framing — before settling on `attackerFocus` ("manga-panel" rhythm).
 - Two modes: Menu/Idle (readable, ¾ isometric) and Event shots (attacker/impact/reaction/enemy-focus/etc.).
 
 **New Shot Types (BattleShotType)**
@@ -25,7 +25,7 @@ Legacy aliases remain supported: `establishing`, `playerCloseUp`, `enemyCloseUp`
 
 - Default behavior: hard cuts (instantly place camera at computed `pos`/`lookAt`) and hold for the configured `duration`.
 - Optional interpolation: shots may opt into smooth interpolation by setting `hardCut: false` on the `BattleCameraShot`.
-- Opening cinematic: a single smooth sweep from a low-angle start to the `menuIdle` view; duration shortened to 2s.
+- Opening beat: every battle hard-cuts to `wideAction`, holds briefly (~1.2s), then hard-cuts to `attackerFocus` for the player's first turn. No custom sweep/interpolation — both cuts read from SHOT_PARAMS (desktop) / SHOT_PARAMS_MOBILE (mobile), so the establishing shot is fully tunable in the debug GUI.
 
 **Default FOVs**
 
@@ -80,7 +80,7 @@ Key edited files:
 **Testing & QA**
 
 - Playthrough checklist:
-  - Enter battle and verify opening cinematic ends at the ¾ `menuIdle` view.
+  - Enter battle and verify it opens on `wideAction`, holds briefly, then cuts to `attackerFocus`.
   - Trigger a player attack — verify the sequence: `attackerFocus` → `strikeImpact` → `targetReaction` (or `deathHold`).
   - Trigger an enemy attack — verify: `enemyFocus` → `playerReaction` → `menuIdle`.
   - Test skip behavior: rapid taps while camera is busy should invoke `skipSequence()` and return to `menuIdle`.

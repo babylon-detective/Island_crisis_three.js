@@ -5,7 +5,8 @@ import * as THREE from 'three'
 // Cut-based cinematic camera system for turn-based battle sequences.
 //
 // Design philosophy: punchy, efficient hard cuts between fixed positions —
-// manga-panel rhythm. Fluid pans are reserved for the opening cinematic only.
+// manga-panel rhythm. Every battle opens on a static wideAction establishing
+// shot (same SHOT_PARAMS system as every other cut — no hidden hardcoded framing).
 // Each cut answers: whose action matters most right now, and what angle
 // makes it hit hardest?
 // ============================================================================
@@ -43,11 +44,6 @@ export interface BattleCameraShot {
 export interface BattlePositions {
   player: THREE.Vector3
   enemy: THREE.Vector3
-}
-
-/** Easing: ease-in-out cubic */
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 }
 
 /** Easing: ease-out cubic */
@@ -193,10 +189,10 @@ export class BattleCameraController {
     elapsed: number
   } | null = null
 
-  // Opening cinematic state
+  // Opening beat: static hold on wideAction before settling on attackerFocus.
   private openingActive: boolean = false
   private openingElapsed: number = 0
-  private openingDuration: number = 2.0
+  private openingDuration: number = 1.2
   private openingCompleteCallback: (() => void) | null = null
 
   // Flag: is the controller actively driving the camera?
@@ -260,19 +256,12 @@ export class BattleCameraController {
     this.openingCompleteCallback = null
   }
 
-  /** Play the opening cinematic, then call onComplete. */
+  /** Every battle opens on the wideAction establishing shot, held briefly, then settles on attackerFocus. */
   playOpening(onComplete?: () => void): void {
     this.openingActive = true
     this.openingElapsed = 0
-    this.openingDuration = 2.0
     this.openingCompleteCallback = onComplete ?? null
-
-    // Start from a low-angle behind the player, looking toward the enemy
-    const start = this.getOpeningPosition(0)
-    this.camera.position.copy(start.pos)
-    this.camera.lookAt(start.lookAt)
-    this.camera.fov = 44
-    this.camera.updateProjectionMatrix()
+    this.cutTo('wideAction')
   }
 
   /** Skip the current opening or shot sequence — immediately finish all pending work. */
@@ -430,66 +419,19 @@ export class BattleCameraController {
   }
 
   // ============================================================================
-  // OPENING CINEMATIC
+  // OPENING BEAT
   // ============================================================================
 
-  /**
-   * Opening cinematic: camera sweeps from a low angle behind the player
-   * up to the ¾ isometric menu view, keeping both combatants in frame.
-   * This is the one moment that uses a fluid motion — everything else
-   * in battle is hard cuts.
-   */
+  /** Hold on the wideAction establishing shot, then cut to attackerFocus for the player's first turn. */
   private updateOpening(dt: number): void {
     this.openingElapsed += dt
-    const t = Math.min(this.openingElapsed / this.openingDuration, 1)
-
-    const frame = this.getOpeningPosition(t)
-    this.camera.position.copy(frame.pos)
-    this.camera.lookAt(frame.lookAt)
-
-    this.camera.fov = THREE.MathUtils.lerp(44, this.paramsFor('attackerFocus').fov, easeOutCubic(t))
-    this.camera.updateProjectionMatrix()
-
-    if (t >= 1) {
+    if (this.openingElapsed >= this.openingDuration) {
       this.openingActive = false
       this.cutTo('attackerFocus')
       const cb = this.openingCompleteCallback
       this.openingCompleteCallback = null
       cb?.()
     }
-  }
-
-  /**
-   * Compute camera pos+lookAt for the opening cinematic at normalised time `t`.
-   * t=0 — low angle behind the player, gazing toward the enemy.
-   * t=1 — the attackerFocus battle-trigger position.
-   */
-  private getOpeningPosition(t: number): { pos: THREE.Vector3; lookAt: THREE.Vector3 } {
-    const player = this.positions.player
-    const enemy = this.positions.enemy
-    const mid = this.midpoint
-
-    // Start: low behind player, offset to side
-    const startPos = player.clone()
-      .addScaledVector(this.forward, -3.0)
-      .addScaledVector(this.side, 2.0)
-    startPos.y = player.y + 1.2 // low angle
-
-    // End: attackerFocus position
-    const endPosData = this.computeShotPosAndLookAt('attackerFocus')
-
-    const eased = easeInOutCubic(t)
-    const pos = new THREE.Vector3().lerpVectors(startPos, endPosData.pos, eased)
-
-    // Look-at biased toward enemy early, then settles on battlefield mid
-    const startLookAt = new THREE.Vector3().lerpVectors(
-      new THREE.Vector3(enemy.x, enemy.y + 1.0, enemy.z),
-      new THREE.Vector3(mid.x, mid.y + 1.0, mid.z),
-      0.3,
-    )
-    const lookAt = new THREE.Vector3().lerpVectors(startLookAt, endPosData.lookAt, eased)
-
-    return { pos, lookAt }
   }
 
   // ============================================================================

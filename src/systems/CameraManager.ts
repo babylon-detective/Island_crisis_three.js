@@ -1034,7 +1034,7 @@ export class CameraManager {
 
   /**
    * Enter battle camera mode.
-   * White-flash transition → opening cinematic → menu idle (¾ isometric).
+   * White-flash transition → wideAction establishing shot → attackerFocus.
    * Positions should already be staged to 8 units apart by BattleSystem.
    */
   public enterBattleMode(playerPosition: THREE.Vector3, npcPosition: THREE.Vector3): void {
@@ -1052,9 +1052,9 @@ export class CameraManager {
       this.setActiveCamera('battle', false)
       this.battleCameraController.start()
 
-      // Play the opening cinematic → settles on ¾ isometric menu idle
+      // Establishing shot: wideAction hold → attackerFocus for the player's first turn.
       this.battleCameraController.playOpening(() => {
-        console.log('📷 Battle opening cinematic complete — menu idle active')
+        console.log('📷 Battle opening beat complete — attackerFocus active')
       })
 
       console.log(
