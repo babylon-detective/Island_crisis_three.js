@@ -11,7 +11,7 @@ import type { SoundSystem } from './SoundSystem'
 //   - Hides all world geometry (land, ocean, NPCs, lights)
 //   - Sets a black background
 //   - Positions the camera in front of the player avatar (character screen view)
-//   - Shows a bottom-anchored swipeable card carousel for in-game data
+//   - Shows a top-anchored swipeable card carousel for in-game data
 //
 // Triggers:
 //   - Keyboard:  M  (close) · ← → (navigate cards)
@@ -21,7 +21,7 @@ import type { SoundSystem } from './SoundSystem'
 // Card system:
 //   - addCard(MenuCard) registers new data screens at runtime
 //   - Default cards: VITALS, COMBAT
-//   - Cards are full-width, bottom-anchored — player avatar always visible above
+//   - Cards are full-width, top-anchored — player avatar always visible below
 // ============================================================================
 
 /**
@@ -289,7 +289,7 @@ export class MenuSystem {
 
     // ── Root overlay ────────────────────────────────────────────────────────
     // Full-screen, pointer-events disabled by default so Three.js canvas
-    // still receives clicks in the upper zone where the avatar is visible.
+    // still receives clicks in the lower zone where the avatar is visible.
     const root = document.createElement('div')
     root.id = 'menu-event-overlay'
     root.style.cssText =
@@ -306,16 +306,16 @@ export class MenuSystem {
     nameTag.textContent = s.name
     root.appendChild(nameTag)
 
-    // ── Bottom card panel — mirrors Dialogue box layout ─────────────────────
-    // Sits at the bottom of the viewport; player avatar is visible above it.
+    // ── Top card panel — mirrors Dialogue box layout, flipped to the top ────
+    // Sits at the top of the viewport, below the name tag; player avatar is visible below it.
     // pointer-events:auto re-enabled here so nav buttons and swipe work.
     const cardPanel = document.createElement('div')
     cardPanel.style.cssText =
-      'position:absolute;bottom:0;left:50%;transform:translateX(-50%);' +
+      'position:absolute;top:56px;left:50%;transform:translateX(-50%);' +
       'width:min(420px,calc(100vw - 24px));pointer-events:auto;' +
-      'background:linear-gradient(to top,rgba(0,0,0,0.90),rgba(0,0,0,0.60) 80%,transparent);' +
-      'border-radius:14px 14px 0 0;' +
-      'padding-bottom:env(safe-area-inset-bottom,0px);'
+      'background:linear-gradient(to bottom,rgba(0,0,0,0.90),rgba(0,0,0,0.60) 80%,transparent);' +
+      'border-radius:0 0 14px 14px;' +
+      'padding-top:env(safe-area-inset-top,0px);'
 
     // ── Card header: ◀  TITLE  N/N  ▶ ─────────────────────────────────────
     const header = document.createElement('div')
