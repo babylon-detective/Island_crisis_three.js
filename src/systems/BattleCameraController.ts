@@ -105,12 +105,27 @@ export const SHOT_PARAMS: Record<BattleShotType, ShotParams> = {
   enemyCloseUp:   { posAnchor: 'enemy',  fwdOffset:  2.2, sideOffset:   0.8, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
 }
 
-// Mobile-only overrides — cloned from SHOT_PARAMS as a starting point. Tune these
-// independently (debug GUI → Battle Camera → Mobile Shot Params) for handheld-portrait
-// framing; desktop values above are untouched. Active only when mobile mode is on.
-export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = Object.fromEntries(
-  Object.entries(SHOT_PARAMS).map(([key, val]) => [key, { ...val }]),
-) as Record<BattleShotType, ShotParams>
+// Mobile-only defaults — tuned for handheld portrait/tablet framing (debug GUI →
+// Battle Camera → Mobile Shot Params can still tweak these live). Desktop values above
+// are untouched. Active only when mobile mode is on (see detectMobileDevice below).
+export const SHOT_PARAMS_MOBILE: Record<BattleShotType, ShotParams> = {
+  menuIdle:       { posAnchor: 'mid',    fwdOffset: -8.2, sideOffset: -10.3, heightOffset: 3.3, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.2,  fov: 30 },
+  // Player action shots
+  attackerFocus:  { posAnchor: 'player', fwdOffset: -12, sideOffset: -3.6, heightOffset: 0, lookAnchor: 'player', lookFwdOffset: 4, lookSideOffset: -0.7, lookHeightOffset: 0.8, fov: 20 },
+  strikeImpact:   { posAnchor: 'impact', fwdOffset: -7.4, sideOffset: -5, heightOffset: 2.4, lookAnchor: 'impact', lookFwdOffset: -1.9, lookSideOffset: -1.75, lookHeightOffset: 1.95, fov: 40 },
+  targetReaction: { posAnchor: 'enemy',  fwdOffset: -6.7, sideOffset:   0.0, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
+  // Enemy action shots
+  enemyFocus:     { posAnchor: 'enemy',  fwdOffset:  -5.7, sideOffset:   0.1, heightOffset: 1.7, lookAnchor: 'enemy',  lookFwdOffset: 3.35, lookSideOffset: 0, lookHeightOffset: 0.15, fov: 41 },
+  playerReaction: { posAnchor: 'player', fwdOffset: 1.1, sideOffset: -3.3, heightOffset: 0, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 1.95, lookHeightOffset: 0, fov: 52 },
+  // Special event shots
+  deathHold:      { posAnchor: 'enemy',  fwdOffset:  5.9, sideOffset:   0.6, heightOffset: 2.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.7,  fov: 32 },
+  wideAction:     { posAnchor: 'mid',    fwdOffset: -6.5, sideOffset: -0.8, heightOffset: 2.1, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0,    fov: 90 },
+  overShoulder:   { posAnchor: 'player', fwdOffset: -2.5, sideOffset: -0.5, heightOffset: 1,   lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 4,    fov: 76 },
+  // Legacy aliases — unchanged
+  establishing:   { posAnchor: 'mid',    fwdOffset: -1.5, sideOffset:   8.0, heightOffset: 5.5, lookAnchor: 'mid',    lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 0.8,  fov: 48 },
+  playerCloseUp:  { posAnchor: 'player', fwdOffset: -2.2, sideOffset:  -0.8, heightOffset: 1.3, lookAnchor: 'player', lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
+  enemyCloseUp:   { posAnchor: 'enemy',  fwdOffset:  2.2, sideOffset:   0.8, heightOffset: 1.3, lookAnchor: 'enemy',  lookFwdOffset: 0, lookSideOffset: 0, lookHeightOffset: 1.0,  fov: 40 },
+}
 
 /** True on touch-primary (coarse pointer) devices — phones and tablets, not mouse/trackpad laptops. */
 function hasCoarsePointer(): boolean {
