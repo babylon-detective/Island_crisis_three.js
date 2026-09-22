@@ -1,0 +1,40 @@
+[
+  {
+    "spawn_id": "forest_chest_03",
+    "position": [120.5, 0, 88.2],
+    "level": "whispering_forest",
+    "loot_table": "forest_common",
+    "loot_tables_by_difficulty": {
+      "normal": "forest_common",
+      "hard": "forest_hard"
+    },
+    "conditions": {
+      "requires_flag": "met_elder",
+      "not_yet_collected": true,
+      "min_player_level": 0
+    },
+    "respawns": false
+  },
+  {
+    "spawn_id": "forest_glade_potion",
+    "position": [40, 0, 12],
+    "level": "whispering_forest",
+    "loot_table": "forest_common",
+    "conditions": {
+      "not_yet_collected": true
+    },
+    "respawns": { "interval_hours": 24 }
+  },
+  {
+    "spawn_id": "forest_secret_stash",
+    "position": [-30, 0, 65],
+    "level": "whispering_forest",
+    "loot_table": "forest_hard",
+    "conditions": {
+      "requires_quest_stage": { "quest_id": "forest_quest", "min_stage": 2 },
+      "hidden": true,
+      "not_yet_collected": true
+    },
+    "respawns": false
+  }
+]

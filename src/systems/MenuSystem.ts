@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import type { CameraManager } from './CameraManager'
 import type { PlayerController } from './PlayerController'
 import type { SoundSystem } from './SoundSystem'
+import { type BattleActionId, BATTLE_ACTION_DEFS, getBattleActionOrder, moveBattleAction, resetBattleActionOrder } from './BattleActionConfig'
 
 // ============================================================================
 // MENU EVENT STATE SYSTEM
@@ -34,6 +35,8 @@ export interface MenuCard {
   title: string
   /** Returns inner HTML for this card. Called each time the menu opens. */
   build(stats: PlayerMenuStats): string
+  /** Optional: wire up interactive behavior after build() HTML is inserted into the DOM. */
+  onMount?(cardEl: HTMLDivElement, stats: PlayerMenuStats): void
 }
 
 export interface PlayerMenuStats {
@@ -274,7 +277,67 @@ export class MenuSystem {
           this.statRow('✦', 'LCK', `${s.luck}`),
         ].join(''),
       },
+      {
+        id: 'battle-actions',
+        title: 'ACTIONS',
+        build: () => this.buildBattleActionsCard(),
+        onMount: (cardEl) => this.mountBattleActionsCard(cardEl),
+      },
     ]
+  }
+
+  /** Battle action bar order editor — read/write via BattleActionConfig, read by BattleSystem at battle start. */
+  private buildBattleActionsCard(): string {
+    const order = getBattleActionOrder()
+    const rows = order.map((id, i) => {
+      const def = BATTLE_ACTION_DEFS[id]
+      const upDisabled = i === 0
+      const downDisabled = i === order.length - 1
+      return (
+        '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid rgba(255,255,255,0.08);">' +
+          `<div style="width:32px;height:32px;flex-shrink:0;border:1px solid #ffd866;border-radius:6px;` +
+            `display:flex;align-items:center;justify-content:center;font-size:15px;color:#ffd866;">${def.icon}</div>` +
+          '<div style="flex:1;min-width:0;">' +
+            `<div style="font-size:13px;font-weight:bold;letter-spacing:1px;color:#eee;">${def.acronym}</div>` +
+            `<div style="font-size:10px;color:#888;">${def.fullLabel}</div>` +
+          '</div>' +
+          `<button data-move-id="${id}" data-move-dir="-1" ${upDisabled ? 'disabled' : ''} style="background:none;` +
+            `border:1px solid ${upDisabled ? '#444' : '#555'};color:${upDisabled ? '#444' : '#ffd866'};` +
+            `border-radius:4px;width:28px;height:28px;font-size:13px;touch-action:manipulation;` +
+            `cursor:${upDisabled ? 'default' : 'pointer'};">◀</button>` +
+          `<button data-move-id="${id}" data-move-dir="1" ${downDisabled ? 'disabled' : ''} style="background:none;` +
+            `border:1px solid ${downDisabled ? '#444' : '#555'};color:${downDisabled ? '#444' : '#ffd866'};` +
+            `border-radius:4px;width:28px;height:28px;font-size:13px;touch-action:manipulation;` +
+            `cursor:${downDisabled ? 'default' : 'pointer'};">▶</button>` +
+        '</div>'
+      )
+    }).join('')
+
+    return (
+      '<div style="font-size:11px;color:#888;letter-spacing:1px;margin-bottom:4px;">Battle bar order (left → right)</div>' +
+      rows +
+      '<button data-reset-order style="margin-top:10px;background:none;border:1px solid #ffd866;color:#ffd866;' +
+        'border-radius:6px;padding:8px;font-size:12px;letter-spacing:1px;cursor:pointer;touch-action:manipulation;">RESET ORDER</button>'
+    )
+  }
+
+  private mountBattleActionsCard(cardEl: HTMLDivElement): void {
+    const rerender = () => {
+      cardEl.innerHTML = this.buildBattleActionsCard()
+      this.mountBattleActionsCard(cardEl)
+    }
+    cardEl.querySelectorAll<HTMLButtonElement>('[data-move-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.moveId as BattleActionId
+        const dir = btn.dataset.moveDir === '-1' ? -1 : 1
+        moveBattleAction(id, dir)
+        rerender()
+      })
+    })
+    cardEl.querySelector<HTMLButtonElement>('[data-reset-order]')?.addEventListener('click', () => {
+      resetBattleActionOrder()
+      rerender()
+    })
   }
 
   // ============================================================================
@@ -363,6 +426,7 @@ export class MenuSystem {
         'min-width:100%;box-sizing:border-box;' +
         'padding:4px 32px 12px;display:flex;flex-direction:column;gap:10px;'
       cardEl.innerHTML = card.build(s)
+      card.onMount?.(cardEl, s)
       this.cardTrack.appendChild(cardEl)
     }
 

@@ -90,18 +90,27 @@ export class PauseOverlay {
       align-items: center;
       ${isMobile ? 'padding-top: 18vh;' : ''}
       z-index: 10000;
-      font-family: 'Press Start 2P', 'Courier New', monospace;
+      font-family: 'Arial', 'Helvetica', sans-serif;
     `;
 
-    // Title
+    // Title — mirrors the title screen's '.title-main' Storm Gust styling
     const title = document.createElement('div');
     title.textContent = 'PAUSED';
     title.style.cssText = `
-      color: #fff;
+      font-family: 'Storm Gust', 'Arial', 'Helvetica', sans-serif;
       font-size: 48px;
-      text-shadow: 4px 4px 0 #000;
-      margin-bottom: 48px;
+      font-weight: 400;
       letter-spacing: 8px;
+      line-height: 0.95;
+      text-transform: uppercase;
+      margin-bottom: 48px;
+      background: linear-gradient(180deg, #ffffff 0%, #4a9eff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: titlePulse 3s ease-in-out infinite;
+      text-shadow: none;
+      filter: drop-shadow(0 0 30px rgba(74, 158, 255, 0.8));
     `;
     this.container.appendChild(title);
 
@@ -128,12 +137,17 @@ export class PauseOverlay {
       const optionEl = document.createElement('div');
       optionEl.className = 'pause-option';
       
+      // Mirrors the title screen's '.menu-item' text styling
       const isSelected = index === this.selectedIndex;
       optionEl.style.cssText = `
-        color: ${isSelected ? '#ffcc00' : '#fff'};
         font-size: 24px;
+        letter-spacing: 4px;
         padding: 12px 32px;
-        text-shadow: ${isSelected ? '2px 2px 0 #000' : 'none'};
+        text-transform: uppercase;
+        color: ${isSelected ? '#ffffff' : 'rgba(255, 255, 255, 0.35)'};
+        text-shadow: ${isSelected ? '0 0 18px rgba(255, 255, 255, 0.5)' : 'none'};
+        transform: scale(${isSelected ? '1.05' : '1'});
+        transition: all 0.3s ease;
         cursor: pointer;
         text-align: center;
         min-width: 200px;

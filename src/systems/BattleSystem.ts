@@ -13,16 +13,11 @@ import type { SoundSystem } from './SoundSystem'
 import type { ItemSystem } from './ItemSystem'
 import type { InventoryDisplay } from './InventoryDisplay'
 import type { PlayerStatsSystem } from './PlayerStatsSystem'
+import { type BattleActionId, type BattleActionDef, BATTLE_ACTION_DEFS, getBattleActionOrder } from './BattleActionConfig'
 
 type ActiveInputMode = 'touch' | 'gamepad' | 'keyboard' | 'mouse'
 
 type BattlePhase = 'player-turn' | 'ended'
-type BattleActionId = 'attack' | 'guard' | 'escape' | 'item'
-
-interface BattleMenuAction {
-  id: BattleActionId
-  label: string
-}
 
 export class BattleSystem {
   private npcSystem: NPCSystem
@@ -141,12 +136,7 @@ export class BattleSystem {
     return this.playerStats ? this.playerStats.getMaxHP() : this.localMaxPlayerHP
   }
 
-  private readonly menuActions: BattleMenuAction[] = [
-    { id: 'attack', label: 'Attack' },
-    { id: 'guard', label: 'Guard' },
-    { id: 'escape', label: 'Escape' },
-    { id: 'item', label: 'Items' },
-  ]
+  private menuActions: BattleActionDef[] = getBattleActionOrder().map(id => BATTLE_ACTION_DEFS[id])
 
   constructor(
     npcSystem: NPCSystem,
@@ -494,6 +484,9 @@ export class BattleSystem {
       case 'item':
         this.performItemAction()
         return true
+      case 'talk':
+        this.performTalkAction()
+        return true
     }
 
     return false
@@ -516,6 +509,9 @@ export class BattleSystem {
 
     const npc = this.npcSystem.getNPC(npcId)
     if (!npc || !this.playerController) return false
+
+    // Pick up any reordering done via the Stats Menu since the last battle.
+    this.menuActions = getBattleActionOrder().map(id => BATTLE_ACTION_DEFS[id])
 
     // ── Form cluster: nearby same-class NPCs join, others flee ──
     this.clusterNpcIds = this.aiSystem.formCluster(npcId, 'battle')
@@ -744,6 +740,26 @@ export class BattleSystem {
     // Bracing lets the player size up the opponent — reveals enemy stats for the rest of the battle.
     this.enemyStatsRevealed = true
     this.resolveEnemyTurn(`You brace for ${npc.id}'s counterattack.`)
+  }
+
+  /** Attempt to talk the enemy down — a chance to end the battle peacefully instead of fighting. */
+  private performTalkAction(): void {
+    const npc = this.npcSystem.getNPC(this.activeNpcId ?? '')
+    if (!npc) {
+      this.leaveBattle(true)
+      return
+    }
+
+    const persuaded = Math.random() < 0.3
+    if (persuaded) {
+      this.aiSystem.disengageFromPlayer(npc.id)
+      this.phase = 'ended'
+      this.statusText = `${npc.id} backs down. The fight is over.`
+      this.renderBattleOverlay()
+      return
+    }
+
+    this.resolveEnemyTurn(`${npc.id} isn't convinced.`)
   }
 
   private performItemAction(): void {
@@ -1293,6 +1309,12 @@ export class BattleSystem {
       this.handleDirectActionInput('item', 'keyboard')
       return
     }
+
+    if (e.code === 'KeyT') {
+      e.preventDefault()
+      this.handleDirectActionInput('talk', 'keyboard')
+      return
+    }
   }
 
   private cycleChoice(dir: number): void {
@@ -1416,12 +1438,24 @@ export class BattleSystem {
       return
     }
 
-    this.menuActions.forEach((action, index) => {
+    this.menuActions.forEach((def, index) => {
       const item = document.createElement('button')
       item.type = 'button'
-      const itemColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
-      item.textContent = this.getActionDisplayText(action, index)
-      item.style.cssText = `color:${itemColor};padding:${this.inputMode === 'touch' ? '12px 18px' : '6px 14px'};font-size:${this.inputMode === 'touch' ? '18px' : '16px'};cursor:pointer;transition:color 0.15s,border-color 0.15s;text-shadow:${this.inputMode === 'touch' ? '0 0 14px rgba(0,0,0,0.9)' : 'none'};pointer-events:auto;touch-action:manipulation;background:transparent;border:1px solid ${itemColor};border-radius:4px;outline:none;text-align:left;width:100%;appearance:none;-webkit-appearance:none;box-sizing:border-box;`
+      const highlighted = index === this.highlightedActionIndex
+      const itemColor = this.getActionColor(def.id, highlighted)
+      const bindingLabel = this.getActionBindingLabel(def.id)
+      item.style.cssText =
+        `position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;` +
+        `width:clamp(46px,13vw,60px);height:clamp(46px,13vw,60px);flex:0 0 auto;` +
+        `color:${itemColor};border:1px solid ${itemColor};border-radius:8px;` +
+        `background:${highlighted ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.45)'};` +
+        `box-shadow:${highlighted ? `0 0 12px ${itemColor}` : 'none'};` +
+        `cursor:pointer;transition:background 0.15s,box-shadow 0.15s;pointer-events:auto;touch-action:manipulation;` +
+        `outline:none;appearance:none;-webkit-appearance:none;box-sizing:border-box;`
+      item.innerHTML =
+        `<span style="font-size:16px;line-height:1;">${def.icon}</span>` +
+        `<span style="font-size:10px;font-weight:bold;letter-spacing:1px;line-height:1;">${def.acronym}</span>` +
+        (bindingLabel ? `<span style="position:absolute;top:2px;right:3px;font-size:8px;opacity:0.7;">${bindingLabel}</span>` : '')
       let lastActivateTime = 0
       const activate = (event: Event) => {
         event.preventDefault()
@@ -1432,7 +1466,7 @@ export class BattleSystem {
         if (this.inputMode !== 'touch') {
           this.highlightedActionIndex = index
         }
-        this.handleDirectActionInput(action.id, this.inputMode === 'touch' ? 'touch' : 'mouse')
+        this.handleDirectActionInput(def.id, this.inputMode === 'touch' ? 'touch' : 'mouse')
       }
       item.addEventListener('mouseenter', () => {
         this.highlightedActionIndex = index
@@ -1472,19 +1506,15 @@ export class BattleSystem {
     const items = Array.from(this.overlayChoices.children)
     items.forEach((item, index) => {
       const el = item as HTMLElement
-      const action = this.menuActions[index]
-      if (!action) return
-      el.textContent = this.getActionDisplayText(action, index)
-      const newColor = this.getActionColor(action.id, index === this.highlightedActionIndex)
+      const def = this.menuActions[index]
+      if (!def) return
+      const highlighted = index === this.highlightedActionIndex
+      const newColor = this.getActionColor(def.id, highlighted)
       el.style.color = newColor
       el.style.borderColor = newColor
+      el.style.background = highlighted ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.45)'
+      el.style.boxShadow = highlighted ? `0 0 12px ${newColor}` : 'none'
     })
-  }
-
-  private getActionDisplayText(action: BattleMenuAction, index: number): string {
-    const bindingLabel = this.getActionBindingLabel(action.id)
-    const label = bindingLabel ? `${bindingLabel}. ${action.label}` : action.label
-    return label
   }
 
   private getActionBindingLabel(actionId: BattleActionId): string {
@@ -1500,6 +1530,8 @@ export class BattleSystem {
           return 'B'
         case 'item':
           return 'Y'
+        case 'talk':
+          return ''
       }
     }
 
@@ -1512,6 +1544,8 @@ export class BattleSystem {
         return 'L'
       case 'item':
         return 'I'
+      case 'talk':
+        return 'T'
     }
   }
 
@@ -1620,6 +1654,8 @@ export class BattleSystem {
         return highlighted ? '#a9d8ff' : '#66b7ff'
       case 'escape':
         return highlighted ? '#fff1a8' : '#ffd866'
+      case 'talk':
+        return highlighted ? '#e2d1ff' : '#c9a9ff'
     }
   }
 
@@ -1648,7 +1684,7 @@ export class BattleSystem {
       this.overlayStatus.style.cssText =
         'color:#fff7f1;font-size:18px;line-height:1.45;max-width:none;text-shadow:0 0 16px rgba(0,0,0,0.92);margin:0 auto;'
 
-      this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-width:none;pointer-events:auto;'
+      this.overlayChoices.style.cssText = 'display:flex;flex-direction:row;justify-content:center;align-items:center;gap:8px;flex-wrap:nowrap;pointer-events:auto;'
     } else {
       this.overlayPrompt.style.cssText =
         'position:absolute;left:20px;bottom:28px;transform:none;' +
@@ -1665,7 +1701,7 @@ export class BattleSystem {
         'background:linear-gradient(to top,rgba(24,6,4,0.94),rgba(52,12,8,0.72) 72%,transparent);'
 
       this.overlayStatus.style.cssText = 'color:#fff7f1;font-size:18px;line-height:1.45;max-width:760px;margin:0 auto;'
-      this.overlayChoices.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-width:360px;'
+      this.overlayChoices.style.cssText = 'display:flex;flex-direction:row;justify-content:center;align-items:center;gap:8px;flex-wrap:nowrap;pointer-events:auto;'
     }
   }
 

@@ -11,7 +11,8 @@
  */
 
 import * as THREE from 'three'
-import type { ItemSystem, InventorySlot, ItemShape } from './ItemSystem'
+import { createItemGeometry } from './ItemSystem'
+import type { ItemSystem, InventorySlot } from './ItemSystem'
 import type { CameraManager } from './CameraManager'
 import type { PlayerController } from './PlayerController'
 import type { PauseManager } from './PauseManager'
@@ -34,22 +35,6 @@ const RING_LERP_SPEED = 8.0        // radians/sec — ring snaps to new selectio
 const SIDE_OFFSET = 2.5            // world units to player's right (battle/dialogue)
 const SIDE_OFFSET_Y = 0.8          // height offset for side ring (battle/dialogue)
 const OVERLAY_Z = 12150
-
-// ─── Shape factory ───────────────────────────────────────────────────────────
-
-function createItemGeometry(shape: ItemShape): THREE.BufferGeometry {
-  switch (shape) {
-    case 'cube':         return new THREE.BoxGeometry(1, 1, 1)
-    case 'cone':         return new THREE.ConeGeometry(0.5, 1.2, 8)
-    case 'sphere':       return new THREE.SphereGeometry(0.5, 8, 6)
-    case 'cylinder':     return new THREE.CylinderGeometry(0.35, 0.35, 1, 8)
-    case 'octahedron':   return new THREE.OctahedronGeometry(0.55)
-    case 'torus':        return new THREE.TorusGeometry(0.4, 0.15, 8, 16)
-    case 'tetrahedron':  return new THREE.TetrahedronGeometry(0.6)
-    case 'dodecahedron': return new THREE.DodecahedronGeometry(0.5)
-    default:             return new THREE.BoxGeometry(1, 1, 1)
-  }
-}
 
 // ─── InventoryDisplay ────────────────────────────────────────────────────────
 

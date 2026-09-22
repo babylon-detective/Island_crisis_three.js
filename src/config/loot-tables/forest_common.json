@@ -1,0 +1,9 @@
+{
+  "table_id": "forest_common",
+  "entries": [
+    { "item_id": "potion_hp", "weight": 60, "min": 1, "max": 2 },
+    { "item_id": "antidote", "weight": 25, "min": 1, "max": 1 },
+    { "item_id": "phoenix_down", "weight": 5, "min": 1, "max": 1 },
+    { "item_id": "wood_plank", "weight": 10, "min": 2, "max": 4 }
+  ]
+}

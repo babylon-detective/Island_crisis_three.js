@@ -37,6 +37,13 @@ import { BattleSystem } from './systems/BattleSystem'
 import { BattleAnimSync, registerDefaultSyncPoints } from './systems/BattleAnimSync'
 import { MenuSystem, type PlayerMenuStats } from './systems/MenuSystem'
 import { ItemSystem } from './systems/ItemSystem'
+import { GameFlags } from './systems/GameFlags'
+import { LootTableRegistry } from './systems/LootTable'
+import { SpawnSystem } from './systems/SpawnSystem'
+import { PotionScatterSystem } from './systems/PotionScatterSystem'
+import forestCommonLoot from './config/loot-tables/forest_common.json'
+import forestHardLoot from './config/loot-tables/forest_hard.json'
+import whisperingForestSpawns from './config/spawns/whispering_forest.json'
 import { PlayerStatsSystem } from './systems/PlayerStatsSystem'
 import { InventoryDisplay } from './systems/InventoryDisplay'
 import { SoundSystem } from './systems/SoundSystem'
@@ -923,6 +930,12 @@ class IntegratedThreeJSApp {
   private battleAnimSync: BattleAnimSync | null = null
   private menuSystem: MenuSystem | null = null
   private itemSystem: ItemSystem = new ItemSystem()
+  /** Story/quest flags + player level — gates spawn-point conditions. */
+  private gameFlags: GameFlags = new GameFlags()
+  /** Reusable weighted loot tables, referenced by spawn points (never hardcode an item into a location). */
+  private lootTables: LootTableRegistry = new LootTableRegistry()
+  private spawnSystem: SpawnSystem | null = null
+  private potionScatterSystem: PotionScatterSystem | null = null
   /** Single source of truth for player HP; shared by BattleSystem and InventoryDisplay so it persists across battles and exploration. */
   private playerStats: PlayerStatsSystem = new PlayerStatsSystem(30)
   private inventoryDisplay: InventoryDisplay | null = null
@@ -1348,6 +1361,23 @@ class IntegratedThreeJSApp {
       this.itemSystem.addItem('iron_sword', 1)
       this.itemSystem.addItem('old_key', 1)
 
+      // Item placement: loot tables + spawn points are data, never hardcoded to an object/location.
+      // See docs/ITEM_SYSTEM.md for the full Item Definition / Spawn Point / Loot Table architecture.
+      this.lootTables.registerMany([forestCommonLoot, forestHardLoot])
+      this.spawnSystem = new SpawnSystem(this.scene, this.itemSystem, this.lootTables, this.gameFlags)
+      this.spawnSystem.registerSpawnPoints(whisperingForestSpawns as any)
+      this.spawnSystem.activateLevel('whispering_forest')
+      this.spawnSystem.printValidation()
+
+      // Potion scatter — procedurally sprinkles potions across the level (data-driven, see SpawnSystem)
+      this.potionScatterSystem = new PotionScatterSystem(this.spawnSystem, this.lootTables, this.itemSystem, this.collisionSystem)
+      this.potionScatterSystem.scatter({ level: 'whispering_forest', count: 25, center: [0, 0], radius: 60, minSpacing: 5, respawnHours: 12 })
+
+      if (this.consoleCommands) {
+        this.consoleCommands.setSpawnSystem(this.spawnSystem, this.itemSystem, this.lootTables, this.gameFlags)
+        this.consoleCommands.setPotionScatterSystem(this.potionScatterSystem)
+      }
+
       window.addEventListener('dialogue-to-battle', (event: Event) => {
         const customEvent = event as CustomEvent<{ npcId: string }>
         const npcId = customEvent.detail?.npcId
@@ -1740,6 +1770,8 @@ class IntegratedThreeJSApp {
       landSystem: this.landSystem,
       npcSystem: this.npcSystem,
       collisionSystem: this.collisionSystem,
+      spawnSystem: this.spawnSystem ?? undefined,
+      potionScatterSystem: this.potionScatterSystem ?? undefined,
       updateSunPosition: () => this.updateSunPosition(),
       sunCycle: this.sunCycle,
     })
@@ -3437,6 +3469,9 @@ void main() {
         }
         if (this.battleSystem && !inMenu) {
           this.battleSystem.update(this.playerController.getPosition())
+        }
+        if (this.spawnSystem && !inDialogue && !inBattle && !inMenu) {
+          this.spawnSystem.update(deltaTime, this.playerController.getPosition())
         }
         if (this.menuSystem) {
           this.menuSystem.update(deltaTime)

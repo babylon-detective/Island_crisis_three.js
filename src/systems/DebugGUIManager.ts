@@ -23,6 +23,8 @@ export interface SystemReferences {
   landSystem?: any
   npcSystem?: any
   collisionSystem?: CollisionSystem
+  spawnSystem?: any
+  potionScatterSystem?: any
   updateSunPosition?: () => void
   sunCycle?: { frozen: boolean, speed: number }
 }
@@ -121,6 +123,7 @@ export class DebugGUIManager {
       this.setupMovementControls(generalGui)
       this.setupPhysicsControls(generalGui)
       this.setupCollisionControls(generalGui)
+      this.setupSpawnSystemControls(generalGui)
 
       // Lighting
       this.setupWorldLightingControls(lightingGui)
@@ -262,6 +265,55 @@ export class DebugGUIManager {
       const s = cs.getPerformanceStats() as Record<string, unknown>
       console.table(s)
     } }, 'log').name('📊 Log Stats')
+
+    folder.close()
+  }
+
+  private setupSpawnSystemControls(gui: GUI): void {
+    const spawnSystem = this.systems.spawnSystem
+    if (!spawnSystem) return
+
+    const folder = gui.addFolder('🎁 Item Spawns')
+    const state = { visualizer: false, heatmap: false, difficulty: 'normal' }
+
+    folder.add(state, 'visualizer').name('Show Spawn Gizmos')
+      .onChange((v: boolean) => spawnSystem.toggleVisualizer(v))
+    folder.add(state, 'heatmap').name('Show Loot Heatmap')
+      .onChange((v: boolean) => spawnSystem.toggleHeatmap(v))
+    folder.add(state, 'difficulty', ['normal', 'hard']).name('Difficulty')
+      .onChange((v: string) => spawnSystem.setDifficulty(v))
+
+    folder.add({ log: () => spawnSystem.printAll() }, 'log').name('📋 List spawn points')
+    folder.add({ log: () => spawnSystem.printValidation() }, 'log').name('⚠️ Validate spawn/loot data')
+    folder.add({ reset: () => spawnSystem.resetAll() }, 'reset').name('↻ Reset all spawns')
+
+    this.setupPotionScatterControls(folder)
+
+    folder.close()
+  }
+
+  private setupPotionScatterControls(parent: GUI): void {
+    const scatter = this.systems.potionScatterSystem
+    if (!scatter) return
+
+    const folder = parent.addFolder('🧪 Potion Scatter')
+    const cfg = scatter.getConfig()
+    const proxy = {
+      count: cfg.count,
+      radius: cfg.radius,
+      minSpacing: cfg.minSpacing,
+      respawnHours: cfg.respawnHours,
+    }
+
+    folder.add(proxy, 'count', 1, 100, 1).name('Count')
+    folder.add(proxy, 'radius', 5, 200, 1).name('Radius')
+    folder.add(proxy, 'minSpacing', 1, 20, 0.5).name('Min spacing')
+    folder.add(proxy, 'respawnHours', 0.5, 72, 0.5).name('Respawn (hrs)')
+
+    folder.add({ scatterNow: () => scatter.scatter({ ...proxy }) }, 'scatterNow').name('🧪 Scatter now')
+    folder.add({ regenerate: () => scatter.regenerate() }, 'regenerate').name('↻ Regenerate (new seed)')
+    folder.add({ clear: () => scatter.clear() }, 'clear').name('🧹 Clear scattered')
+    folder.add({ log: () => scatter.printConfig() }, 'log').name('📋 Print config')
 
     folder.close()
   }

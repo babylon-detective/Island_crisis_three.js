@@ -4,6 +4,11 @@ import { AnimationSystem } from './AnimationSystem'
 import { ConfigManager } from './ConfigManager'
 import { logger, LogModule, LogLevel } from './Logger'
 import { performanceMonitor, adaptiveQuality } from './PerformanceMonitor'
+import type { SpawnSystem } from './SpawnSystem'
+import type { PotionScatterSystem } from './PotionScatterSystem'
+import type { ItemSystem } from './ItemSystem'
+import type { LootTableRegistry } from './LootTable'
+import type { GameFlags } from './GameFlags'
 
 
 // Interface for the main app reference
@@ -41,8 +46,27 @@ interface IntegratedThreeJSApp {
 export class ConsoleCommands {
   private app: AppReference
 
+  // Late-bound item/spawn/loot systems (created after ConsoleCommands itself)
+  private spawnSystem: SpawnSystem | null = null
+  private potionScatterSystem: PotionScatterSystem | null = null
+  private itemSystemRef: ItemSystem | null = null
+  private lootTables: LootTableRegistry | null = null
+  private gameFlags: GameFlags | null = null
+
   constructor(app: AppReference) {
     this.app = app
+  }
+
+  /** Wire in the item/spawn/loot systems once they exist (they're created after ConsoleCommands). */
+  public setSpawnSystem(spawnSystem: SpawnSystem, itemSystem: ItemSystem, lootTables: LootTableRegistry, gameFlags: GameFlags): void {
+    this.spawnSystem = spawnSystem
+    this.itemSystemRef = itemSystem
+    this.lootTables = lootTables
+    this.gameFlags = gameFlags
+  }
+
+  public setPotionScatterSystem(potionScatterSystem: PotionScatterSystem): void {
+    this.potionScatterSystem = potionScatterSystem
   }
 
   // ============================================================================
@@ -983,6 +1007,30 @@ export class ConsoleCommands {
 - disableAllLogging()              - Disable all debug logging
 - getLoggingConfig()               - Show logging configuration
 
+🎁 ITEM SPAWN / LOOT TABLE SYSTEM (see docs/ITEM_SYSTEM.md):
+- listSpawnPoints()                 - List all registered spawn points + state
+- spawnPointInfo(spawnId)           - Show one spawn point's definition + availability
+- toggleSpawnVisualizer(visible?)   - Toggle in-scene gizmos (green/red/gray/purple)
+- toggleLootHeatmap(visible?)       - Toggle loot-value heatmap overlay
+- rollLoot(tableId, times?)         - Roll a loot table N times, tally results
+- printLootTables()                 - Print all loot tables + drop odds
+- forceCollectSpawn(spawnId)        - Force-collect a spawn point (bypass proximity)
+- resetSpawn(spawnId)               - Reset one spawn point's collected state
+- resetAllSpawns()                  - Reset every spawn point
+- addSpawnPointHere(id, level, table) - Author a new spawn point at the player's position
+- exportSpawnPoints(level?)         - Print/copy spawn-point JSON for src/config/spawns/
+- importSpawnPoints(json)           - Hot-load spawn points from a JSON string
+- validateSpawnData()               - Offline lint: unknown items, bad weights, dupes
+- setSpawnDifficulty(difficulty)    - Switch difficulty-scaled loot tables
+- setStoryFlag(name, value?)        - Set a story/quest flag used by spawn conditions
+- printGameFlags()                  - Print current flags/quest stages/player level
+
+🧪 POTION SCATTER:
+- scatterPotions(count?, radius?, minSpacing?, respawnHours?) - Scatter potions across the level
+- clearScatteredPotions()           - Remove all scattered potions
+- regenerateScatteredPotions(seed?) - Re-roll positions (new layout)
+- printPotionScatterConfig()        - Print current scatter config + count
+
 ❓ HELP:
 - help()                          - Show this help message
 
@@ -1277,7 +1325,32 @@ export class ConsoleCommands {
       console.log(`Development Mode: ${config.developmentMode}`)
       console.groupEnd()
     }
-    
+
+    // Item Spawn / Loot Table commands
+    win.listSpawnPoints = () => this.listSpawnPoints()
+    win.spawnPointInfo = (spawnId: string) => this.spawnPointInfo(spawnId)
+    win.toggleSpawnVisualizer = (visible?: boolean) => this.toggleSpawnVisualizer(visible)
+    win.toggleLootHeatmap = (visible?: boolean) => this.toggleLootHeatmap(visible)
+    win.rollLoot = (tableId: string, times?: number) => this.rollLoot(tableId, times)
+    win.printLootTables = () => this.printLootTables()
+    win.forceCollectSpawn = (spawnId: string) => this.forceCollectSpawn(spawnId)
+    win.resetSpawn = (spawnId: string) => this.resetSpawn(spawnId)
+    win.resetAllSpawns = () => this.resetAllSpawns()
+    win.addSpawnPointHere = (spawnId: string, level: string, lootTable: string) => this.addSpawnPointHere(spawnId, level, lootTable)
+    win.exportSpawnPoints = (level?: string) => this.exportSpawnPoints(level)
+    win.importSpawnPoints = (json: string) => this.importSpawnPoints(json)
+    win.validateSpawnData = () => this.validateSpawnData()
+    win.setSpawnDifficulty = (difficulty: string) => this.setSpawnDifficulty(difficulty)
+    win.setStoryFlag = (name: string, value?: boolean) => this.setStoryFlag(name, value)
+    win.printGameFlags = () => this.printGameFlags()
+
+    // Potion Scatter commands
+    win.scatterPotions = (count?: number, radius?: number, minSpacing?: number, respawnHours?: number) =>
+      this.scatterPotions(count, radius, minSpacing, respawnHours)
+    win.clearScatteredPotions = () => this.clearScatteredPotions()
+    win.regenerateScatteredPotions = (seed?: number) => this.regenerateScatteredPotions(seed)
+    win.printPotionScatterConfig = () => this.printPotionScatterConfig()
+
     // Help Command
     win.help = () => this.help()
     
@@ -2843,4 +2916,179 @@ export class ConsoleCommands {
     console.log('\n💡 Use exportObjectPositions() to export current positions to JSON')
     console.groupEnd()
   }
-} 
+
+  // ============================================================================
+  // ITEM SPAWN / LOOT TABLE DEBUG COMMANDS
+  // ============================================================================
+
+  private requireSpawnSystem(): SpawnSystem | null {
+    if (!this.spawnSystem) {
+      console.warn('⚠️ SpawnSystem not ready yet.')
+      return null
+    }
+    return this.spawnSystem
+  }
+
+  /** List every registered spawn point and its current state. */
+  public listSpawnPoints(): void {
+    this.requireSpawnSystem()?.printAll()
+  }
+
+  /** Print details for a single spawn point. */
+  public spawnPointInfo(spawnId: string): void {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem) return
+    const def = spawnSystem.getDefinition(spawnId)
+    if (!def) {
+      console.warn(`⚠️ No spawn point "${spawnId}"`)
+      return
+    }
+    console.group(`🎁 ${spawnId}`)
+    console.log(def)
+    console.log('Available now:', spawnSystem.isAvailable(def))
+    console.groupEnd()
+  }
+
+  /** Toggle the in-scene spawn point visualizer (color-coded gizmos + labels). */
+  public toggleSpawnVisualizer(visible?: boolean): boolean {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem) return false
+    const shown = spawnSystem.toggleVisualizer(visible)
+    console.log(shown ? '🟢 Spawn visualizer ON (green=available, red=locked, gray=collected, purple=hidden)' : '⚪ Spawn visualizer OFF')
+    return shown
+  }
+
+  /** Toggle the loot-value heatmap overlay (blue=low value, red=high value). */
+  public toggleLootHeatmap(visible?: boolean): boolean {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem) return false
+    const shown = spawnSystem.toggleHeatmap(visible)
+    console.log(shown ? '🔥 Loot heatmap ON' : '⚪ Loot heatmap OFF')
+    return shown
+  }
+
+  /** Roll a loot table without affecting spawn state — useful for tuning drop rates. */
+  public rollLoot(tableId: string, times: number = 1): void {
+    if (!this.lootTables) {
+      console.warn('⚠️ LootTableRegistry not ready yet.')
+      return
+    }
+    const tally: Record<string, number> = {}
+    for (let i = 0; i < times; i++) {
+      const result = this.lootTables.roll(tableId)
+      if (result) tally[result.itemId] = (tally[result.itemId] ?? 0) + 1
+    }
+    console.group(`🎲 Rolled "${tableId}" x${times}`)
+    console.table(tally)
+    console.groupEnd()
+  }
+
+  public printLootTables(): void {
+    this.lootTables?.printAll()
+  }
+
+  /** Force-collect a spawn point (rolls loot + adds to inventory), bypassing proximity. */
+  public forceCollectSpawn(spawnId: string): boolean {
+    return this.requireSpawnSystem()?.forceCollect(spawnId) ?? false
+  }
+
+  public resetSpawn(spawnId: string): void {
+    this.requireSpawnSystem()?.resetSpawn(spawnId)
+  }
+
+  public resetAllSpawns(): void {
+    this.requireSpawnSystem()?.resetAll()
+  }
+
+  /** Author a new spawn point at the player's current position and print its JSON. */
+  public addSpawnPointHere(spawnId: string, level: string, lootTable: string): void {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem || !this.app.playerController) return
+    const position = this.app.playerController.getPosition() as THREE.Vector3
+    const def = spawnSystem.addSpawnPointAt(spawnId, position, level, lootTable)
+    console.log('📍 Added spawn point:', def)
+    console.log('💡 Use exportSpawnPoints() to get JSON for src/config/spawns/')
+  }
+
+  /** Export all (or one level's) spawn points as JSON, ready to paste into src/config/spawns/. */
+  public exportSpawnPoints(level?: string): void {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem) return
+    const json = spawnSystem.exportSpawnPoints(level)
+    console.group('📤 Exporting Spawn Points')
+    console.log(json)
+    console.groupEnd()
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(json).then(() => console.log('✅ JSON copied to clipboard!')).catch(() => {})
+    }
+  }
+
+  /** Hot-load spawn points from a JSON string at runtime (fast authoring iteration). */
+  public importSpawnPoints(json: string): void {
+    const spawnSystem = this.requireSpawnSystem()
+    if (!spawnSystem) return
+    const count = spawnSystem.importSpawnPoints(json)
+    console.log(`✅ Imported ${count} spawn point(s)`)
+  }
+
+  /** Offline lint: validate spawn/loot data (unknown items, bad weights, duplicate ids, etc). */
+  public validateSpawnData(): void {
+    this.requireSpawnSystem()?.printValidation()
+  }
+
+  public setSpawnDifficulty(difficulty: string): void {
+    this.requireSpawnSystem()?.setDifficulty(difficulty)
+    console.log(`🎚️ Spawn difficulty set to "${difficulty}"`)
+  }
+
+  public setStoryFlag(name: string, value: boolean = true): void {
+    if (!this.gameFlags) return
+    this.gameFlags.setFlag(name, value)
+    console.log(`🚩 Flag "${name}" = ${value} (re-run toggleSpawnVisualizer() to refresh gizmo colors)`)
+  }
+
+  public printGameFlags(): void {
+    this.gameFlags?.printState()
+  }
+
+  // ============================================================================
+  // POTION SCATTER DEBUG COMMANDS
+  // ============================================================================
+
+  private requireScatter(): PotionScatterSystem | null {
+    if (!this.potionScatterSystem) {
+      console.warn('⚠️ PotionScatterSystem not ready yet.')
+      return null
+    }
+    return this.potionScatterSystem
+  }
+
+  /** Scatter potions across the level. Any omitted option keeps its current value. */
+  public scatterPotions(count?: number, radius?: number, minSpacing?: number, respawnHours?: number): void {
+    const scatter = this.requireScatter()
+    if (!scatter) return
+    const placed = scatter.scatter({
+      ...(count !== undefined ? { count } : {}),
+      ...(radius !== undefined ? { radius } : {}),
+      ...(minSpacing !== undefined ? { minSpacing } : {}),
+      ...(respawnHours !== undefined ? { respawnHours } : {}),
+    })
+    console.log(`🧪 Scattered ${placed} potion(s)`)
+  }
+
+  public clearScatteredPotions(): void {
+    this.requireScatter()?.clear()
+    console.log('🧹 Cleared scattered potions')
+  }
+
+  public regenerateScatteredPotions(seed?: number): void {
+    const scatter = this.requireScatter()
+    if (!scatter) return
+    const placed = scatter.regenerate(seed)
+    console.log(`🧪 Regenerated ${placed} potion(s)`)
+  }
+
+  public printPotionScatterConfig(): void {
+    this.requireScatter()?.printConfig()
+  }
+}
